@@ -89,8 +89,8 @@ frappe.query_reports["Pure Accounts Payable Summary"] = {
 			options: "Supplier Group",
 		},
 		{
-			fieldname: "excluded_supplier_group",
-			label: __("Excluded Supplier Group"),
+			fieldname: "exclude_supplier_group",
+			label: __("Exclude Supplier Group"),
 			fieldtype: "MultiSelectList",
 			get_data: function(txt) {
 				return frappe.db.get_link_options('Supplier Group', txt);
