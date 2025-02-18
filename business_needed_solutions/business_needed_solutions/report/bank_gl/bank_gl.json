@@ -1,0 +1,35 @@
+{
+ "add_total_row": 0,
+ "columns": [],
+ "creation": "2024-11-19 18:47:57.767916",
+ "disabled": 0,
+ "docstatus": 0,
+ "doctype": "Report",
+ "filters": [],
+ "idx": 0,
+ "is_standard": "Yes",
+ "json": "{\"columns\":[{\"label\":\"Posting Date\",\"fieldname\":\"posting_date\",\"fieldtype\":\"Date\",\"width\":100,\"id\":\"posting_date\",\"name\":\"Posting Date\",\"editable\":false},{\"label\":\"Account\",\"fieldname\":\"account\",\"fieldtype\":\"Link\",\"options\":\"Account\",\"width\":180,\"id\":\"account\",\"name\":\"Account\",\"editable\":false,\"compareValue\":null},{\"label\":\"Debit (INR)\",\"fieldname\":\"debit\",\"fieldtype\":\"Float\",\"width\":130,\"id\":\"debit\",\"name\":\"Debit (INR)\",\"editable\":false,\"compareValue\":null},{\"label\":\"Credit (INR)\",\"fieldname\":\"credit\",\"fieldtype\":\"Float\",\"width\":130,\"id\":\"credit\",\"name\":\"Credit (INR)\",\"editable\":false,\"compareValue\":null},{\"label\":\"Balance (INR)\",\"fieldname\":\"balance\",\"fieldtype\":\"Float\",\"width\":130,\"id\":\"balance\",\"name\":\"Balance (INR)\",\"editable\":false,\"compareValue\":null},{\"label\":\"Voucher Type\",\"fieldname\":\"voucher_type\",\"width\":120,\"id\":\"voucher_type\",\"name\":\"Voucher Type\",\"editable\":false,\"compareValue\":null},{\"label\":\"Voucher Subtype\",\"fieldname\":\"voucher_subtype\",\"fieldtype\":\"Data\",\"width\":180,\"id\":\"voucher_subtype\",\"name\":\"Voucher Subtype\",\"editable\":false,\"compareValue\":null},{\"label\":\"Voucher No\",\"fieldname\":\"voucher_no\",\"fieldtype\":\"Dynamic Link\",\"options\":\"voucher_type\",\"width\":180,\"id\":\"voucher_no\",\"name\":\"Voucher No\",\"editable\":false,\"compareValue\":null},{\"label\":\"Against Account\",\"fieldname\":\"against\",\"width\":120,\"id\":\"against\",\"name\":\"Against Account\",\"editable\":false,\"compareValue\":null},{\"label\":\"Party Type\",\"fieldname\":\"party_type\",\"width\":100,\"id\":\"party_type\",\"name\":\"Party Type\",\"editable\":false,\"compareValue\":null},{\"label\":\"Party\",\"fieldname\":\"party\",\"width\":100,\"id\":\"party\",\"name\":\"Party\",\"editable\":false,\"compareValue\":null}],\"filters\":{\"company\":\"KGOPL (Demo)\",\"from_date\":\"2024-10-19\",\"to_date\":\"2024-11-19\",\"account\":[\"Bank Account - KGOPLD\"],\"party\":[],\"group_by\":\"Group by Voucher (Consolidated)\",\"cost_center\":[],\"project\":[],\"include_dimensions\":1,\"include_default_book_entries\":1}}",
+ "letterhead": null,
+ "modified": "2025-02-16 22:59:37.798944",
+ "modified_by": "Administrator",
+ "module": "Business Needed Solutions",
+ "name": "Bank GL",
+ "owner": "Administrator",
+ "prepared_report": 0,
+ "ref_doctype": "GL Entry",
+ "reference_report": "General Ledger",
+ "report_name": "Bank GL",
+ "report_type": "Script Report",
+ "roles": [
+  {
+   "role": "Accounts User"
+  },
+  {
+   "role": "Accounts Manager"
+  },
+  {
+   "role": "Auditor"
+  }
+ ],
+ "timeout": 0
+}

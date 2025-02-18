@@ -26,7 +26,7 @@ app_license = "mit"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
-# app_include_js = "/assets/business_needed_solutions/js/business_needed_solutions.js"
+app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js"]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
@@ -144,6 +144,15 @@ app_license = "mit"
 # 		"on_trash": "method"
 # 	}
 # }
+
+doc_events = {
+    "Customer": {
+        "validate": "business_needed_solutions.business_needed_solutions.overrides.customer.validate_pan_uniqueness"
+    },
+    "Supplier": {
+        "validate": "business_needed_solutions.business_needed_solutions.overrides.supplier.validate_pan_uniqueness"
+    }
+}
 
 # Scheduled Tasks
 # ---------------
