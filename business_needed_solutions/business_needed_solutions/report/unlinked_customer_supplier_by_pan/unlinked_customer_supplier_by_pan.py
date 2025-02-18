@@ -5,8 +5,10 @@ import urllib.parse
 def execute(filters=None):
     columns = [
         {"label": _("Customer"), "fieldname": "customer", "fieldtype": "Link", "options": "Customer", "width": 150},
+        {"label": _("Customer Name"), "fieldname": "customer_name", "fieldtype": "Data", "width": 150},
         {"label": _("Customer PAN"), "fieldname": "customer_pan", "fieldtype": "Data", "width": 120},
         {"label": _("Supplier"), "fieldname": "supplier", "fieldtype": "Link", "options": "Supplier", "width": 150},
+        # {"label": _("Supplier Name"), "fieldname": "supplier_name", "fieldtype": "Data", "width": 150},
         {"label": _("Supplier PAN"), "fieldname": "supplier_pan", "fieldtype": "Data", "width": 120},
         {"label": _("Customer → Supplier"), "fieldname": "customer_to_supplier", "fieldtype": "HTML", "width": 150},
         {"label": _("Supplier → Customer"), "fieldname": "supplier_to_customer", "fieldtype": "HTML", "width": 150}
@@ -18,14 +20,14 @@ def execute(filters=None):
     customers = frappe.db.get_list(
         "Customer",
         filters=[["pan", "!=", ""], ["disabled", "=", 0]],
-        fields=["name", "pan"]
+        fields=["name", "pan","customer_name"]
     )
 
     # Fetch Active Suppliers with PAN
     suppliers = frappe.db.get_list(
         "Supplier",
         filters=[["pan", "!=", ""], ["disabled", "=", 0]],
-        fields=["name", "pan"]
+        fields=["name", "pan","supplier_name"]
     )
 
     # Create a Supplier lookup dictionary by PAN for quick matching
@@ -67,6 +69,7 @@ def execute(filters=None):
 
                 data.append({
                     "customer": customer["name"],
+                    "customer_name":customer["customer_name"],
                     "customer_pan": pan,
                     "supplier": supplier_name,
                     "supplier_pan": pan,
