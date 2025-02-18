@@ -20,6 +20,7 @@ from business_needed_solutions.business_needed_solutions.report.pure_accounts_re
 # 	}
 # 	return AccountsReceivablePayableSummary(filters).run(args,secondary_args)
 
+
 def execute(filters=None):
 	args = {
 		"account_type": "Payable",
@@ -115,7 +116,7 @@ def execute(filters=None):
 		{
 			"label": "Secondary Party",
 			"fieldname": "secondary_party",
-			"fieldtype": "Link",  # or "Dynamic Link" if you want it linked
+			"fieldtype": "Data",  # or "Dynamic Link" if you want it linked
 			"width": 140,
 		}
 	)
