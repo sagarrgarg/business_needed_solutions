@@ -1,0 +1,79 @@
+[
+ {
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Lead",
+  "enabled": 1,
+  "modified": "2025-03-09 02:39:47.641247",
+  "module": "Business Needed Solutions",
+  "name": "Hide Column ID Lead",
+  "script": "frappe.listview_settings[\"Lead\"]={\n    hide_name_column : true,\n}",
+  "view": "Form"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Sales Invoice",
+  "enabled": 1,
+  "modified": "2025-03-09 02:53:51.084988",
+  "module": "Business Needed Solutions",
+  "name": "Direct Print",
+  "script": "frappe.ui.form.on('Sales Invoice', {\n    refresh: function(frm) {\n        // Override the original print button behavior\n        var $printButton = frm.page.wrapper.find('button[data-original-title=\"Print\"]');\n        $printButton.off('click'); // Remove the existing click handler\n        $printButton.addClass('dropdown-toggle');\n        $printButton.attr('data-toggle', 'dropdown');\n\n        // Check if dropdown menu already exists\n        if (!$printButton.next('.dropdown-menu').length) {\n            // Generate the dropdown options dynamically\n            var dropdownMenu123 = $('<div class=\"dropdown-menu\"></div>');\n            $.each(frm.fields_dict.invoice_copy.df.options.split('\\n'), function(i, option) {\n                if (option) {\n                    dropdownMenu123.append('<a class=\"dropdown-item\" href=\"#\" data-print-option=\"' + option + '\">' + option + '</a>');\n                }\n            });\n            $printButton.after(dropdownMenu123);\n        }\n\n        // Handle the dropdown selection using event delegation\n        frm.page.wrapper.find('.dropdown-menu').on('click', '.dropdown-item', function(event) {\n            event.preventDefault();\n            var printOption = $(this).data('print-option');\n            print_with_option(frm, printOption);\n        });\n        \n        // Add event listener for Ctrl + P or Command + P\n        $(document).on('keydown.print', function(event) {\n            if ((event.ctrlKey || event.metaKey) && (event.key === 'p' || event.key === 'P')) {\n                event.preventDefault();\n                event.stopImmediatePropagation();\n                var defaultPrintOption = frm.fields_dict.invoice_copy.df.options.split('\\n')[0]; // Assuming the first option as default\n                print_with_option(frm, defaultPrintOption);\n            }\n        });\n    }\n});\n\nfunction print_with_option(frm, option) {\n    frappe.call({\n        method: \"frappe.client.set_value\",\n        args: {\n            doctype: frm.doc.doctype,\n            name: frm.doc.name,\n            fieldname: \"invoice_copy\",\n            value: option\n        },\n        callback: function(response) {\n            if (!response.exc) {\n                generate_pdf(frm);\n            }\n        }\n    });\n}\n\nfunction generate_pdf(frm) {\n    var print_format = \"RB Tax Invoice With E-Way Bill V2\"; // Specify your print format name\n    var letterhead = frm.doc.letter_head || ''; // Check if the document has a letterhead\n    var no_letterhead = letterhead == '' ? 1 : 0; // Set no_letterhead parameter based on the presence of a letterhead\n    var pdf_url = frappe.urllib.get_full_url(\"/api/method/frappe.utils.print_format.download_pdf?\" \n        + \"doctype=\" + encodeURIComponent(frm.doc.doctype)\n        + \"&name=\" + encodeURIComponent(frm.doc.name)\n        + \"&format=\" + encodeURIComponent(print_format)\n        + \"&no_letterhead=\" + no_letterhead\n        + (letterhead ? \"&letterhead=\" + encodeURIComponent(letterhead) : ''));\n\n    var printWindow = window.open(pdf_url);\n    if (printWindow) {\n        printWindow.addEventListener('load', function() {\n            printWindow.print();\n        });\n    } else {\n        frappe.msgprint(__('Please allow pop-ups to print the document.'));\n    }\n}\n",
+  "view": "Form"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Journal Entry",
+  "enabled": 1,
+  "modified": "2025-03-09 02:53:59.099915",
+  "module": "Business Needed Solutions",
+  "name": "Hide ID Column Journal",
+  "script": "frappe.listview_settings[\"Journal Entry\"]={\n    hide_name_column : true,\n}",
+  "view": "List"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Purchase Order",
+  "enabled": 1,
+  "modified": "2025-03-09 02:49:58.731147",
+  "module": "Business Needed Solutions",
+  "name": "PO Direct Print",
+  "script": "frappe.ui.form.on('Purchase Order', {\n    refresh: function(frm) {\n        // Override the original print button behavior\n        var $printButton = frm.page.wrapper.find('button[data-original-title=\"Print\"]');\n        $printButton.off('click'); // Remove the existing click handler\n\n        // Add new click handler for a simple print action\n        $printButton.on('click', function() {\n            generate_pdf(frm); // Directly generate the PDF without options\n        });\n\n        // Add event listener for Ctrl + P or Command + P\n        $(document).on('keydown.print', function(event) {\n            if ((event.ctrlKey || event.metaKey) && (event.key === 'p' || event.key === 'P')) {\n                event.preventDefault();\n                event.stopImmediatePropagation();\n                generate_pdf(frm); // Directly print the default format when Ctrl + P or Command + P is pressed\n            }\n        });\n    }\n});\n\nfunction generate_pdf(frm) {\n    var print_format = \"RB PO V1\"; // Specify your print format name\n    var letterhead = frm.doc.letter_head || ''; // Check if the document has a letterhead\n    var no_letterhead = letterhead === '' ? 1 : 0; // Set no_letterhead parameter based on the presence of a letterhead\n    var pdf_url = frappe.urllib.get_full_url(\"/api/method/frappe.utils.print_format.download_pdf?\" \n        + \"doctype=\" + encodeURIComponent(frm.doc.doctype)\n        + \"&name=\" + encodeURIComponent(frm.doc.name)\n        + \"&format=\" + encodeURIComponent(print_format)\n        + \"&no_letterhead=\" + no_letterhead\n        + (letterhead ? \"&letterhead=\" + encodeURIComponent(letterhead) : ''));\n\n    var printWindow = window.open(pdf_url);\n    if (printWindow) {\n        printWindow.addEventListener('load', function() {\n            printWindow.print();\n        });\n    } else {\n        frappe.msgprint(__('Please allow pop-ups to print the document.'));\n    }\n}",
+  "view": "Form"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Delivery Note",
+  "enabled": 1,
+  "modified": "2025-03-09 02:49:20.057577",
+  "module": "Business Needed Solutions",
+  "name": "Direct Print DN",
+  "script": "frappe.ui.form.on('Delivery Note', {\n    refresh: function(frm) {\n        // Override the original print button behavior\n        var $printButton = frm.page.wrapper.find('button[data-original-title=\"Print\"]');\n        $printButton.off('click'); // Remove the existing click handler\n\n        // Add new click handler for a simple print action\n        $printButton.on('click', function() {\n            generate_pdf(frm); // Directly generate the PDF without options\n        });\n\n        // Add event listener for Ctrl + P or Command + P\n        $(document).on('keydown.print', function(event) {\n            if ((event.ctrlKey || event.metaKey) && (event.key === 'p' || event.key === 'P')) {\n                event.preventDefault();\n                event.stopImmediatePropagation();\n                generate_pdf(frm); // Directly print the default format when Ctrl + P or Command + P is pressed\n            }\n        });\n    }\n});\n\nfunction generate_pdf(frm) {\n    var print_format = \"RB Delivery Note\"; // Specify your print format name\n    var letterhead = frm.doc.letter_head || ''; // Check if the document has a letterhead\n    var no_letterhead = letterhead === '' ? 1 : 0; // Set no_letterhead parameter based on the presence of a letterhead\n    var pdf_url = frappe.urllib.get_full_url(\"/api/method/frappe.utils.print_format.download_pdf?\" \n        + \"doctype=\" + encodeURIComponent(frm.doc.doctype)\n        + \"&name=\" + encodeURIComponent(frm.doc.name)\n        + \"&format=\" + encodeURIComponent(print_format)\n        + \"&no_letterhead=\" + no_letterhead\n        + (letterhead ? \"&letterhead=\" + encodeURIComponent(letterhead) : ''));\n\n    var printWindow = window.open(pdf_url);\n    if (printWindow) {\n        printWindow.addEventListener('load', function() {\n            printWindow.print();\n        });\n    } else {\n        frappe.msgprint(__('Please allow pop-ups to print the document.'));\n    }\n}",
+  "view": "Form"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Stock Entry",
+  "enabled": 1,
+  "modified": "2025-03-09 02:48:58.753885",
+  "module": "Business Needed Solutions",
+  "name": "Stock entry customisation",
+  "script": "frappe.ui.form.on('Stock Entry', {\n    before_save: function (frm) {\n        console.log(\"Before Save Triggered\"); // Debugging\n        console.log(\"Stock Entry Type:\", frm.doc.stock_entry_type); // Debugging\n        console.log(\"Outgoing Stock Entry:\", frm.doc.outgoing_stock_entry); // Debugging\n\n        // Check if Stock Entry Type is Material Transfer and outgoing_stock_entry is not set\n        if (frm.doc.stock_entry_type === 'Material Transfer' && !frm.doc.outgoing_stock_entry) {\n            console.log(\"Setting Add to Transit to 1\"); // Debugging\n            frm.set_value('add_to_transit', 1); // Set Add to Transit to 1\n        }\n    }\n});",
+  "view": "Form"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Purchase Invoice",
+  "enabled": 1,
+  "modified": "2025-03-09 02:47:47.148283",
+  "module": "Business Needed Solutions",
+  "name": "Hide Column ID PI",
+  "script": "frappe.listview_settings[\"Purchase Invoice\"] = {\n    hide_name_column: true,\n}",
+  "view": "List"
+ }
+]
