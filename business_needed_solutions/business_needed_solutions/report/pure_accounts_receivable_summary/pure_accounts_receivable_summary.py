@@ -5,10 +5,45 @@
 import frappe
 from frappe import _, scrub
 from frappe.utils import cint, flt
-
+from urllib.parse import quote
 from erpnext.accounts.party import get_partywise_advanced_payment_amount
 from erpnext.accounts.report.accounts_receivable.accounts_receivable import ReceivablePayableReport
 from erpnext.accounts.utils import get_currency_precision, get_party_types_from_account_type
+
+def get_fiscal_year_dates(report_date, company):
+	report_date = frappe.utils.getdate(report_date)
+
+	# First, try to get Fiscal Year where the company is linked in the child table
+	fiscal_years = frappe.get_all(
+		"Fiscal Year",
+		fields=["name", "year_start_date", "year_end_date"],
+		filters={
+			"disabled": 0,
+			"year_start_date": ("<=", report_date),
+			"year_end_date": (">=", report_date),
+		},
+		order_by="year_start_date desc"
+	)
+
+	for fy in fiscal_years:
+		linked_companies = frappe.get_all(
+			"Fiscal Year Company",
+			filters={"parent": fy.name, "company": company},
+			pluck="company"
+		)
+		if linked_companies:
+			return fy.year_start_date, fy.year_end_date
+
+	# Fallback to any Fiscal Year (system default)
+	if fiscal_years:
+		fy = fiscal_years[0]
+		return fy.year_start_date, fy.year_end_date
+
+	# Absolute fallback
+	return "2023-04-01", "2024-03-31"
+
+
+
 
 
 def execute(filters=None):
@@ -22,9 +57,16 @@ def execute(filters=None):
 		"naming_by": ["Buying Settings", "supp_master_name"],
 	}
 
+	report_date = filters.get("report_date") or frappe.utils.today()
+	company = filters.get("company") or frappe.defaults.get_global_default("company")
+	from_date, to_date = get_fiscal_year_dates(report_date, company)
+
+
 	# 1. Get columns & data for Receivable (main) and Payable (secondary).
 	main_columns, main_data = AccountsReceivablePayableSummary(filters).run(args)
 	secondary_columns, secondary_data = AccountsReceivablePayableSummary(filters).run(secondary_args)
+
+
 
 	# 2. Convert main_data and secondary_data to dictionaries keyed by 'party'.
 	main_dict = {}
@@ -101,8 +143,13 @@ def execute(filters=None):
 							flt(updated_row.get(fieldname, 0.0)) 
 							- flt(sec_row.get(fieldname, 0.0))
 						)
+		party_name = updated_row.get("party_name") or party
+		gl_url = f"/app/query-report/Party%20GL?company={quote(company)}&from_date={quote(str(from_date))}&to_date={quote(str(to_date))}&account=undefined&party=%5B%22{quote(party)}%22%5D&party_name={quote(party_name)}&group_by=Group+by+Voucher+%28Consolidated%29&project=undefined&include_dimensions=1&include_default_book_entries=1"
+		button_html = f'<a href="{gl_url}" target="_blank" class="btn btn-xs btn-default">GL: {party_name}</a>'
 
+		updated_row["party_gl_link"] = button_html
 		final_data.append(updated_row)
+
 	main_columns.append(
 		{
 			"label": "Secondary Party",
@@ -118,6 +165,14 @@ def execute(filters=None):
 			"fieldname": "secondary_party_type",
 			"fieldtype": "Data",
 			"width": 120,
+		}
+	)
+	main_columns.append(
+		{
+			"label": "Party GL",
+			"fieldname": "party_gl_link",
+			"fieldtype": "HTML",
+			"width": 200,
 		}
 	)
 	# 6. You can return the same columns from the main dataset
@@ -191,7 +246,7 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 
 			# Advance against party
 			row.advance = party_advance_amount.get(party, 0)
-
+			row.purepaid = row.paid
 			# In AR/AP, advance shown in paid columns,
 			# but in summary report advance shown in separate column
 			row.paid -= row.advance
@@ -273,7 +328,8 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 				fieldname="party_name",
 				fieldtype="Data",
 			)
-
+		self.add_column(_("Invoiced Amount"), fieldname="invoiced")
+		self.add_column(_("Paid Amount"), fieldname="purepaid")
 		self.add_column(_("Outstanding Amount"), fieldname="outstanding")
 
 		if self.filters.show_gl_balance:

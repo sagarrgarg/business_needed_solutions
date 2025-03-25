@@ -3,9 +3,10 @@
 
 import frappe
 from frappe import _, scrub
+from urllib.parse import quote
 from frappe.utils import cint, flt
 from business_needed_solutions.business_needed_solutions.report.pure_accounts_receivable_summary.pure_accounts_receivable_summary import (
-	AccountsReceivablePayableSummary,
+	AccountsReceivablePayableSummary,get_fiscal_year_dates
 )
 
 
@@ -30,6 +31,10 @@ def execute(filters=None):
 		"account_type": "Receivable",
 		"naming_by": ["Selling Settings", "cust_master_name"],
 	}
+
+	report_date = filters.get("report_date") or frappe.utils.today()
+	company = filters.get("company") or frappe.defaults.get_global_default("company")
+	from_date, to_date = get_fiscal_year_dates(report_date, company)
 
 	# 1. Get columns & data for Receivable (main) and Payable (secondary).
 	main_columns, main_data = AccountsReceivablePayableSummary(filters).run(args)
@@ -110,6 +115,11 @@ def execute(filters=None):
 							flt(updated_row.get(fieldname, 0.0)) 
 							- flt(sec_row.get(fieldname, 0.0))
 						)
+		party_name = updated_row.get("party_name") or party
+		gl_url = f"/app/query-report/Party%20GL?company={quote(company)}&from_date={quote(str(from_date))}&to_date={quote(str(to_date))}&account=undefined&party=%5B%22{quote(party)}%22%5D&party_name={quote(party_name)}&group_by=Group+by+Voucher+%28Consolidated%29&project=undefined&include_dimensions=1&include_default_book_entries=1"
+		button_html = f'<a href="{gl_url}" target="_blank" class="btn btn-xs btn-default">GL: {party_name}</a>'
+
+		updated_row["party_gl_link"] = button_html
 
 		final_data.append(updated_row)
 	main_columns.append(
@@ -127,6 +137,14 @@ def execute(filters=None):
 			"fieldname": "secondary_party_type",
 			"fieldtype": "Data",
 			"width": 120,
+		}
+	)
+	main_columns.append(
+		{
+			"label": "Party GL",
+			"fieldname": "party_gl_link",
+			"fieldtype": "HTML",
+			"width": 200,
 		}
 	)
 	# 6. You can return the same columns from the main dataset

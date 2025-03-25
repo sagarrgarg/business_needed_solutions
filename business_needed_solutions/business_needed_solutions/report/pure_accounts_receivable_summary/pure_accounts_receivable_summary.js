@@ -21,7 +21,7 @@ frappe.query_reports["Pure Accounts Receivable Summary"] = {
 			label: __("Ageing Based On"),
 			fieldtype: "Select",
 			options: "Posting Date\nDue Date",
-			default: "Due Date",
+			default: "Posting Date",
 		},
 		{
 			fieldname: "range",
@@ -137,9 +137,9 @@ frappe.query_reports["Pure Accounts Receivable Summary"] = {
 	],
 
 	onload: function (report) {
-		report.page.add_inner_button(__("Accounts Receivable"), function () {
+		report.page.add_inner_button(__("Pure Accounts Payable Summary"), function () {
 			var filters = report.get_values();
-			frappe.set_route("query-report", "Accounts Receivable", { company: filters.company });
+			frappe.set_route("query-report", "Pure Accounts Payable Summary", { company: filters.company });
 		});
 	},
 };
