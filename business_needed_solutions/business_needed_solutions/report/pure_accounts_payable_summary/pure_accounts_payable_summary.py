@@ -122,6 +122,15 @@ def execute(filters=None):
 		updated_row["party_gl_link"] = button_html
 
 		final_data.append(updated_row)
+
+	main_columns.append(
+		{
+			"label": "Party GL",
+			"fieldname": "party_gl_link",
+			"fieldtype": "HTML",
+			"width": 200,
+		}
+	)
 	main_columns.append(
 		{
 			"label": "Secondary Party",
@@ -139,14 +148,7 @@ def execute(filters=None):
 			"width": 120,
 		}
 	)
-	main_columns.append(
-		{
-			"label": "Party GL",
-			"fieldname": "party_gl_link",
-			"fieldtype": "HTML",
-			"width": 200,
-		}
-	)
+
 	# 6. You can return the same columns from the main dataset
 	#    (they now reflect the differences).
 	#    No extra "r_minus_p" column is needed since you replaced

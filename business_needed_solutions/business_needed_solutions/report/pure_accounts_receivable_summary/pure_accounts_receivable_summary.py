@@ -152,6 +152,15 @@ def execute(filters=None):
 
 	main_columns.append(
 		{
+			"label": "Party GL",
+			"fieldname": "party_gl_link",
+			"fieldtype": "HTML",
+			"width": 200,
+		}
+	)
+
+	main_columns.append(
+		{
 			"label": "Secondary Party",
 			"fieldname": "secondary_party",
 			"fieldtype": "Data",  # or "Dynamic Link" if you want it linked
@@ -165,14 +174,6 @@ def execute(filters=None):
 			"fieldname": "secondary_party_type",
 			"fieldtype": "Data",
 			"width": 120,
-		}
-	)
-	main_columns.append(
-		{
-			"label": "Party GL",
-			"fieldname": "party_gl_link",
-			"fieldtype": "HTML",
-			"width": 200,
 		}
 	)
 	# 6. You can return the same columns from the main dataset
