@@ -158,6 +158,9 @@ fixtures = [{"doctype": "Client Script", "filters": [["module" , "in" , ("Busine
             {"doctype": "Custom Field", "filters": [["module" , "in" , ("Business Needed Solutions" )]]},
             {"doctype": "Print Format", "filters": [["module" , "in" , ("Business Needed Solutions" )]]}]
 
+
+on_boot = "business_needed_solutions.business_needed_solutions.overrides.account_controller_override"
+
 # Scheduled Tasks
 # ---------------
 
