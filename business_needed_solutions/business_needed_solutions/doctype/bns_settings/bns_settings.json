@@ -1,0 +1,42 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2025-04-05 02:20:45.805233",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "discounting_type"
+ ],
+ "fields": [
+  {
+   "default": "Single Discounting",
+   "fieldname": "discounting_type",
+   "fieldtype": "Select",
+   "label": "Discounting Type",
+   "options": "Single Discounting\nTriple Compounded Discounting"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2025-04-05 02:30:35.463779",
+ "modified_by": "Administrator",
+ "module": "Business Needed Solutions",
+ "name": "BNS Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
