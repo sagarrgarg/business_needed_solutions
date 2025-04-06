@@ -1,0 +1,41 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2025-04-06 03:14:02.100052",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "doctype_map",
+  "print_format"
+ ],
+ "fields": [
+  {
+   "fieldname": "doctype_map",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "DocType Map",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "print_format",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Print Format",
+   "link_filters": "[\n  [\"Print Format\", \"doc_type\", \"=\", \"eval:doc.doctype_map\"]\n]",
+   "options": "Print Format"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2025-04-06 03:35:21.075499",
+ "modified_by": "Administrator",
+ "module": "Business Needed Solutions",
+ "name": "BNS Settings Print Format",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

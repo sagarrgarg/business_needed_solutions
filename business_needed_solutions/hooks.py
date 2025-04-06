@@ -26,7 +26,7 @@ app_license = "mit"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
-app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js"]
+app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js","/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=3","/assets/business_needed_solutions/js/direct_print.js?v=4"]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
@@ -44,6 +44,8 @@ app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js"]
 
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
+
+
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -147,19 +149,37 @@ app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js"]
 
 doc_events = {
     "Customer": {
-        "validate": "business_needed_solutions.business_needed_solutions.overrides.customer.validate_pan_uniqueness"
+        "validate": "business_needed_solutions.business_needed_solutions.overrides.pan_validation.validate_pan_uniqueness"
     },
     "Supplier": {
-        "validate": "business_needed_solutions.business_needed_solutions.overrides.supplier.validate_pan_uniqueness"
+        "validate": "business_needed_solutions.business_needed_solutions.overrides.pan_validation.validate_pan_uniqueness"
+    },
+    "Stock Entry": {
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification"
+    },
+    "Delivery Note": {
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification"
+    },
+    "Purchase Receipt": {
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification"
+    },
+    "Stock Reconciliation": {
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification"
+    },
+    "Sales Invoice": {
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification"
+    },
+    "Purchase Invoice": {
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification"
     }
 }
 
 fixtures = [{"doctype": "Client Script", "filters": [["module" , "in" , ("Business Needed Solutions" )]]},
             {"doctype": "Custom Field", "filters": [["module" , "in" , ("Business Needed Solutions" )]]},
-            {"doctype": "Print Format", "filters": [["module" , "in" , ("Business Needed Solutions" )]]}]
+            {"doctype": "Print Format", "filters": [["module" , "in" , ("Business Needed Solutions" )]]},
+            {"doctype": "BNS Settings", "filters":[]}]
 
 
-on_boot = "business_needed_solutions.business_needed_solutions.overrides.account_controller_override"
 
 # Scheduled Tasks
 # ---------------
@@ -257,4 +277,7 @@ on_boot = "business_needed_solutions.business_needed_solutions.overrides.account
 # default_log_clearing_doctypes = {
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
+
+# Migration hook to reapply BNS Settings
+after_migrate = "business_needed_solutions.migration.after_migrate"
 

@@ -1,0 +1,144 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2025-04-05 02:44:18.812451",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "general_section",
+  "discount_type",
+  "column_break_pan",
+  "enforce_pan_uniqueness",
+  "restrict_stock_entry",
+  "stock_restriction_override_roles",
+  "tab_break_wrem",
+  "print_format",
+  "section_break_vlqx",
+  "rate_incl_tax",
+  "column_break_giiq",
+  "rate_excl_tax",
+  "section_break_qbpg",
+  "secondary_rate_display",
+  "secondary_rate_field"
+ ],
+ "fields": [
+  {
+   "default": "Single",
+   "fieldname": "discount_type",
+   "fieldtype": "Select",
+   "label": "Discount Type",
+   "options": "Single\nTriple Compounded",
+   "permlevel": 1
+  },
+  {
+   "fieldname": "general_section",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "column_break_pan",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "enforce_pan_uniqueness",
+   "fieldtype": "Check",
+   "label": "Enforce PAN Uniqueness"
+  },
+  {
+   "default": "0",
+   "fieldname": "restrict_stock_entry",
+   "fieldtype": "Check",
+   "label": "Restrict Stock Entry on Submit"
+  },
+  {
+   "depends_on": "restrict_stock_entry",
+   "description": "Select roles that can submit stock entries in addition to System Manager",
+   "fieldname": "stock_restriction_override_roles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Override Stock Restriction",
+   "options": "Has Role"
+  },
+  {
+   "fieldname": "tab_break_wrem",
+   "fieldtype": "Tab Break",
+   "label": "Print Options"
+  },
+  {
+   "default": "1",
+   "fieldname": "rate_incl_tax",
+   "fieldtype": "Check",
+   "label": "Rate (Incl Tax)"
+  },
+  {
+   "fieldname": "column_break_giiq",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "rate_excl_tax",
+   "fieldtype": "Check",
+   "label": "Rate (Excl Tax)"
+  },
+  {
+   "fieldname": "print_format",
+   "fieldtype": "Table",
+   "label": "Print Format",
+   "options": "BNS Settings Print Format"
+  },
+  {
+   "fieldname": "section_break_vlqx",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "section_break_qbpg",
+   "fieldtype": "Section Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "secondary_rate_display",
+   "fieldtype": "Check",
+   "label": "Secondary Rate Display"
+  },
+  {
+   "depends_on": "secondary_rate_display",
+   "fieldname": "secondary_rate_field",
+   "fieldtype": "Select",
+   "label": "Secondary Rate Field",
+   "mandatory_depends_on": "secondary_rate_display",
+   "options": "print_uom\nweight_uom"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2025-04-07 01:35:21.172627",
+ "modified_by": "Administrator",
+ "module": "Business Needed Solutions",
+ "name": "BNS Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "All"
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
