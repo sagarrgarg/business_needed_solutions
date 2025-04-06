@@ -111,7 +111,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2025-04-07 03:15:20.981172",
+ "modified": "2025-04-07 03:26:12.458078",
  "modified_by": "Administrator",
  "module": "Business Needed Solutions",
  "name": "BNS Settings",
@@ -144,6 +144,11 @@
    "role": "Accounts Manager",
    "select": 1,
    "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "Accounts Manager"
   }
  ],
  "sort_field": "modified",

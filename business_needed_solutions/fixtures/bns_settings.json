@@ -1,6 +1,5 @@
 [
  {
-  "discount_type": "Single",
   "docstatus": 0,
   "doctype": "BNS Settings",
   "enforce_pan_uniqueness": 1,
@@ -66,9 +65,6 @@
   ],
   "rate_excl_tax": 1,
   "rate_incl_tax": 1,
-  "restrict_stock_entry": 0,
-  "secondary_rate_display": 1,
-  "secondary_rate_field": "weight_uom",
   "stock_restriction_override_roles": []
  }
 ]
