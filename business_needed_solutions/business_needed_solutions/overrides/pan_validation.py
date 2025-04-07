@@ -8,7 +8,7 @@ def validate_pan_uniqueness(doc, method):
 
     # Check if PAN uniqueness is enabled in settings
     # enforce_pan_uniqueness = frappe.db.get_value("BNS Settings", None, "enforce_pan_uniqueness", ignore_permissions=True)
-    enforce_pan_uniqueness = frappe.get_single_value("BNS Settings", "enforce_pan_uniqueness")
+    enforce_pan_uniqueness = frappe.db.get_single_value("BNS Settings", "enforce_pan_uniqueness")
     if not enforce_pan_uniqueness:
         return
 
