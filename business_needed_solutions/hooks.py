@@ -175,9 +175,7 @@ doc_events = {
 }
 
 fixtures = [{"doctype": "Client Script", "filters": [["module" , "in" , ("Business Needed Solutions" )]]},
-            {"doctype": "Custom Field", "filters": [["module" , "in" , ("Business Needed Solutions" )]]},
-            {"doctype": "Print Format", "filters": [["module" , "in" , ("Business Needed Solutions" )]]},
-            {"doctype": "BNS Settings", "filters":[]}]
+            {"doctype": "Print Format", "filters": [["module" , "in" , ("Business Needed Solutions" )]],"overwrite": True}]
 
 
 
