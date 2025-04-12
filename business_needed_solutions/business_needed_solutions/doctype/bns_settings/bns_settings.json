@@ -9,8 +9,11 @@
   "discount_type",
   "column_break_pan",
   "enforce_pan_uniqueness",
+  "enforce_stock_update_or_reference",
   "restrict_stock_entry",
   "stock_restriction_override_roles",
+  "section_break_stock_entry",
+  "auto_transit_material_transfer",
   "restrict_transaction_entry",
   "transaction_restriction_override_roles",
   "restrict_order_entry",
@@ -50,6 +53,12 @@
   },
   {
    "default": "0",
+   "fieldname": "enforce_stock_update_or_reference",
+   "fieldtype": "Check",
+   "label": "Enforce Stock Update or Reference"
+  },
+  {
+   "default": "0",
    "fieldname": "restrict_stock_entry",
    "fieldtype": "Check",
    "label": "Restrict Stock Entry on Submit"
@@ -61,6 +70,18 @@
    "fieldtype": "Table MultiSelect",
    "label": "Override Stock Restriction",
    "options": "Has Role"
+  },
+  {
+   "fieldname": "section_break_stock_entry",
+   "fieldtype": "Section Break",
+   "label": "Stock Entry Settings"
+  },
+  {
+   "default": "1",
+   "fieldname": "auto_transit_material_transfer",
+   "fieldtype": "Check",
+   "label": "Auto Set Transit for Material Transfer",
+   "description": "Automatically set 'Add to Transit' to 1 for Material Transfer type Stock Entries"
   },
   {
    "fieldname": "tab_break_wrem",

@@ -26,7 +26,11 @@ app_license = "mit"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
-app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js","/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=3","/assets/business_needed_solutions/js/direct_print.js?v=4"]
+app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js",
+                  "/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=3",
+                  "/assets/business_needed_solutions/js/direct_print.js?v=4",
+                  "/assets/business_needed_solutions/js/item.js",
+                ]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
@@ -176,13 +180,15 @@ doc_events = {
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
             "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
-        ]
+        ],
+        "validate": "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference"
     },
     "Purchase Invoice": {
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
             "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
-        ]
+        ],
+        "validate": "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference"
     },
     "Journal Entry": {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
