@@ -10,9 +10,9 @@
   "column_break_pan",
   "enforce_pan_uniqueness",
   "enforce_stock_update_or_reference",
+  "section_break_stock_entry",
   "restrict_stock_entry",
   "stock_restriction_override_roles",
-  "section_break_stock_entry",
   "auto_transit_material_transfer",
   "restrict_transaction_entry",
   "transaction_restriction_override_roles",
@@ -74,7 +74,7 @@
   {
    "fieldname": "section_break_stock_entry",
    "fieldtype": "Section Break",
-   "label": "Stock Entry Settings"
+   "label": "Entry Settings"
   },
   {
    "default": "1",
