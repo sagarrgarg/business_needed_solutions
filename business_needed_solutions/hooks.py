@@ -158,19 +158,46 @@ doc_events = {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification"
     },
     "Delivery Note": {
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification"
+        "on_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
+            "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
+        ]
     },
     "Purchase Receipt": {
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification"
+        "on_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
+            "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
+        ]
     },
     "Stock Reconciliation": {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification"
     },
     "Sales Invoice": {
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification"
+        "on_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
+            "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
+        ]
     },
     "Purchase Invoice": {
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification"
+        "on_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
+            "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
+        ]
+    },
+    "Journal Entry": {
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
+    },
+    "Payment Entry": {
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
+    },
+    "Sales Order": {
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_order_modification"
+    },
+    "Purchase Order": {
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_order_modification"
+    },
+    "Payment Request": {
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_order_modification"
     }
 }
 

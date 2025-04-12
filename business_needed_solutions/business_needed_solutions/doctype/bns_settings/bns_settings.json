@@ -11,6 +11,10 @@
   "enforce_pan_uniqueness",
   "restrict_stock_entry",
   "stock_restriction_override_roles",
+  "restrict_transaction_entry",
+  "transaction_restriction_override_roles",
+  "restrict_order_entry",
+  "order_restriction_override_roles",
   "tab_break_wrem",
   "print_format",
   "section_break_vlqx",
@@ -106,6 +110,34 @@
    "label": "Secondary Rate Field",
    "mandatory_depends_on": "secondary_rate_display",
    "options": "print_uom\nweight_uom"
+  },
+  {
+   "default": "0",
+   "fieldname": "restrict_transaction_entry",
+   "fieldtype": "Check",
+   "label": "Restrict Transaction Entry on Submit"
+  },
+  {
+   "depends_on": "restrict_transaction_entry",
+   "description": "Select roles that can submit transactions in addition to System Manager",
+   "fieldname": "transaction_restriction_override_roles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Override Transaction Restriction",
+   "options": "Has Role"
+  },
+  {
+   "default": "0",
+   "fieldname": "restrict_order_entry",
+   "fieldtype": "Check",
+   "label": "Restrict Order Entry on Submit"
+  },
+  {
+   "depends_on": "restrict_order_entry",
+   "description": "Select roles that can submit orders in addition to System Manager",
+   "fieldname": "order_restriction_override_roles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Override Order Restriction",
+   "options": "Has Role"
   }
  ],
  "index_web_pages_for_search": 1,
