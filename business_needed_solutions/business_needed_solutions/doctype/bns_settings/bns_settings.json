@@ -78,6 +78,7 @@
   },
   {
    "default": "1",
+   "hidden":"1",
    "fieldname": "auto_transit_material_transfer",
    "fieldtype": "Check",
    "label": "Auto Set Transit for Material Transfer",
