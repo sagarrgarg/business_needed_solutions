@@ -42,7 +42,7 @@ frappe.ui.form.on('Sales Invoice', {
                     primary_action(values) {
                         // Call the server-side method to update vehicle/transporter info
                         frappe.call({
-                            method: 'custom_transport_change_allow.update_vehicle.update_vehicle_or_transporter',
+                            method: 'business_needed_solutions.update_vehicle.update_vehicle_or_transporter',
                             args: {
                                 doctype: frm.doctype,
                                 docname: frm.doc.name,
