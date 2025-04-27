@@ -48,9 +48,14 @@ app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js",
 
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
+doctype_js = {"Delivery Note" : "public/js/delivery_note.js"}
 
 
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
+doctype_list_js = {
+    "Delivery Note" : "public/js/delivery_note_list.js",
+    "Purchase Receipt" : "public/js/purchase_receipt_list.js"
+}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
 
@@ -164,13 +169,15 @@ doc_events = {
     "Delivery Note": {
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
-            "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
+            "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification",
+            "business_needed_solutions.business_needed_solutions.utils.update_delivery_note_status_for_bns_internal"
         ]
     },
     "Purchase Receipt": {
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
-            "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
+            "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification",
+            "business_needed_solutions.business_needed_solutions.utils.update_purchase_receipt_status_for_bns_internal"
         ]
     },
     "Stock Reconciliation": {
