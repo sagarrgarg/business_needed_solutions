@@ -281,7 +281,7 @@
   "show_dashboard": 0,
   "sort_options": 0,
   "translatable": 0,
-  "unique": 1,
+  "unique": 0,
   "width": null
  },
  {
@@ -509,7 +509,7 @@
   "show_dashboard": 0,
   "sort_options": 0,
   "translatable": 0,
-  "unique": 1,
+  "unique": 0,
   "width": null
  },
  {
