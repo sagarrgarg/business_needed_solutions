@@ -9,6 +9,7 @@ from urllib.parse import quote
 from erpnext.accounts.party import get_partywise_advanced_payment_amount
 from erpnext.accounts.report.accounts_receivable.accounts_receivable import ReceivablePayableReport
 from erpnext.accounts.utils import get_currency_precision, get_party_types_from_account_type
+from erpnext.accounts.doctype.process_statement_of_accounts.process_statement_of_accounts import get_customers_based_on_sales_person
 
 def get_fiscal_year_dates(report_date, company):
 	report_date = frappe.utils.getdate(report_date)
@@ -61,12 +62,20 @@ def execute(filters=None):
 	company = filters.get("company") or frappe.defaults.get_global_default("company")
 	from_date, to_date = get_fiscal_year_dates(report_date, company)
 
+	# Get customers based on sales person if filter is applied
+	customers = []
+	if filters.get("sales_person"):
+		customers = [d.name for d in get_customers_based_on_sales_person(filters.get("sales_person"))]
+		if not customers:
+			return [], []
 
 	# 1. Get columns & data for Receivable (main) and Payable (secondary).
 	main_columns, main_data = AccountsReceivablePayableSummary(filters).run(args)
 	secondary_columns, secondary_data = AccountsReceivablePayableSummary(filters).run(secondary_args)
 
-
+	# Filter main_data based on customers if sales person filter is applied
+	if customers:
+		main_data = [d for d in main_data if d.get("party") in customers]
 
 	# 2. Convert main_data and secondary_data to dictionaries keyed by 'party'.
 	main_dict = {}
