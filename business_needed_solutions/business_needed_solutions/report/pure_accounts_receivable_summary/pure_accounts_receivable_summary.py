@@ -77,6 +77,43 @@ def execute(filters=None):
 	if customers:
 		main_data = [d for d in main_data if d.get("party") in customers]
 
+	# Add city column if add_customer_cities is checked
+	if filters.get("add_customer_cities"):
+		main_columns.append({
+			"label": _("City"),
+			"fieldname": "city",
+			"fieldtype": "Data",
+			"width": 120
+		})
+		
+		# Get customer cities
+		customer_cities = {}
+		customer_list = [d.get("party") for d in main_data if d.get("party_type") == "Customer"]
+		if customer_list:
+			customer_addresses = frappe.get_all(
+				"Customer",
+				fields=["name", "customer_primary_address"],
+				filters={"name": ["in", customer_list]}
+			)
+			
+			address_list = [d.customer_primary_address for d in customer_addresses if d.customer_primary_address]
+			if address_list:
+				addresses = frappe.get_all(
+					"Address",
+					fields=["name", "city"],
+					filters={"name": ["in", address_list]}
+				)
+				address_city_map = {d.name: d.city for d in addresses}
+				
+				for customer in customer_addresses:
+					if customer.customer_primary_address:
+						customer_cities[customer.name] = address_city_map.get(customer.customer_primary_address, "")
+			
+			# Add city to main_data
+			for row in main_data:
+				if row.get("party_type") == "Customer":
+					row["city"] = customer_cities.get(row.get("party"), "")
+
 	# 2. Convert main_data and secondary_data to dictionaries keyed by 'party'.
 	main_dict = {}
 	for row in main_data:

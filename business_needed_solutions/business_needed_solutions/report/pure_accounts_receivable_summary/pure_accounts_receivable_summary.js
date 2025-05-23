@@ -134,6 +134,11 @@ frappe.query_reports["Pure Accounts Receivable Summary"] = {
 			label: __("Revaluation Journals"),
 			fieldtype: "Check",
 		},
+		{
+			fieldname: "add_customer_cities",
+			label: __("Add Customer Cities ?"),
+			fieldtype: "Check",
+		}
 	],
 
 	onload: function (report) {
