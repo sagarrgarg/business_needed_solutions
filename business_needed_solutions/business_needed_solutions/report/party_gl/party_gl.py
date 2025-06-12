@@ -301,6 +301,9 @@ def get_conditions(filters):
 
 	if not filters.get("show_cancelled_entries"):
 		conditions.append("is_cancelled = 0")
+	
+	# Exclude system-generated Journal Entries (used for inter-party settlements etc.)
+	conditions.append("voucher_no NOT IN (SELECT name FROM `tabJournal Entry` WHERE is_system_generated = 1)")
 
 	from frappe.desk.reportview import build_match_conditions
 
