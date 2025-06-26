@@ -161,14 +161,18 @@ def update_delivery_note_status_for_bns_internal(doc, method=None):
     """
     if not doc.is_bns_internal_customer or doc.docstatus != 1:
         return
-    
+
+    # Compare GSTINs
+    per_billed = 100
+    billing_address_gstin = getattr(doc, 'billing_address_gstin', None)
+    company_gstin = getattr(doc, 'company_gstin', None)
+    if billing_address_gstin is not None and company_gstin is not None:
+        if billing_address_gstin != company_gstin:
+            per_billed = 0
+
     # Update the status to "BNS Internally Transferred"
     frappe.db.set_value("Delivery Note", doc.name, "status", "BNS Internally Transferred")
-    
-    # Set per_billed to 100% to indicate it's fully billed
-    frappe.db.set_value("Delivery Note", doc.name, "per_billed", 100)
-    
-    # Clear the doctype cache to reflect the changes
+    frappe.db.set_value("Delivery Note", doc.name, "per_billed", per_billed)
     frappe.clear_cache(doctype="Delivery Note")
 
 def update_purchase_receipt_status_for_bns_internal(doc, method=None):
@@ -179,12 +183,16 @@ def update_purchase_receipt_status_for_bns_internal(doc, method=None):
     # Check if this has a BNS inter-company reference or is an internal supplier
     if doc.docstatus != 1 or (not doc.bns_inter_company_reference and not doc.is_internal_supplier):
         return
-    
+
+    # Compare GSTINs
+    per_billed = 100
+    billing_address_gstin = getattr(doc, 'billing_address_gstin', None)
+    company_gstin = getattr(doc, 'company_gstin', None)
+    if billing_address_gstin is not None and company_gstin is not None:
+        if billing_address_gstin != company_gstin:
+            per_billed = 0
+
     # Update the status to "BNS Internally Transferred"
     frappe.db.set_value("Purchase Receipt", doc.name, "status", "BNS Internally Transferred")
-    
-    # Set per_billed to 100% to indicate it's fully billed
-    frappe.db.set_value("Purchase Receipt", doc.name, "per_billed", 100)
-    
-    # Clear the doctype cache to reflect the changes
+    frappe.db.set_value("Purchase Receipt", doc.name, "per_billed", per_billed)
     frappe.clear_cache(doctype="Purchase Receipt") 
