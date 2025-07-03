@@ -18,6 +18,9 @@
   "transaction_restriction_override_roles",
   "restrict_order_entry",
   "order_restriction_override_roles",
+  "column_break_qfib",
+  "restrict_value_difference",
+  "value_difference_override_roles",
   "tab_break_wrem",
   "print_format",
   "section_break_vlqx",
@@ -72,17 +75,31 @@
    "options": "Has Role"
   },
   {
+   "default": "0",
+   "fieldname": "restrict_value_difference",
+   "fieldtype": "Check",
+   "label": "Disallow Stock Entries with Value Difference"
+  },
+  {
+   "depends_on": "restrict_value_difference",
+   "description": "Select roles that can submit stock entries with value difference in addition to System Manager",
+   "fieldname": "value_difference_override_roles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Override Value Difference Restriction",
+   "options": "Has Role"
+  },
+  {
    "fieldname": "section_break_stock_entry",
    "fieldtype": "Section Break",
    "label": "Entry Settings"
   },
   {
    "default": "1",
-   "hidden":"1",
+   "description": "Automatically set 'Add to Transit' to 1 for Material Transfer type Stock Entries",
    "fieldname": "auto_transit_material_transfer",
    "fieldtype": "Check",
-   "label": "Auto Set Transit for Material Transfer",
-   "description": "Automatically set 'Add to Transit' to 1 for Material Transfer type Stock Entries"
+   "hidden": 1,
+   "label": "Auto Set Transit for Material Transfer"
   },
   {
    "fieldname": "tab_break_wrem",
@@ -160,12 +177,16 @@
    "fieldtype": "Table MultiSelect",
    "label": "Override Order Restriction",
    "options": "Has Role"
+  },
+  {
+   "fieldname": "column_break_qfib",
+   "fieldtype": "Column Break"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2025-04-07 03:26:12.458078",
+ "modified": "2025-07-04 02:39:54.877886",
  "modified_by": "Administrator",
  "module": "Business Needed Solutions",
  "name": "BNS Settings",
@@ -205,6 +226,7 @@
    "role": "Accounts Manager"
   }
  ],
+ "row_format": "Dynamic",
  "sort_field": "modified",
  "sort_order": "DESC",
  "states": []
