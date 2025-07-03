@@ -21,6 +21,7 @@
   "column_break_qfib",
   "restrict_value_difference",
   "value_difference_override_roles",
+  "enforce_expense_account_for_non_stock_items",
   "tab_break_wrem",
   "print_format",
   "section_break_vlqx",
@@ -87,6 +88,12 @@
    "fieldtype": "Table MultiSelect",
    "label": "Override Value Difference Restriction",
    "options": "Has Role"
+  },
+  {
+   "default": "0",
+   "fieldname": "enforce_expense_account_for_non_stock_items",
+   "fieldtype": "Check",
+   "label": "Enforce Expense Account for Non-Stock Items"
   },
   {
    "fieldname": "section_break_stock_entry",

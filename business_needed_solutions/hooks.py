@@ -163,6 +163,9 @@ doc_events = {
     "Supplier": {
         "validate": "business_needed_solutions.business_needed_solutions.overrides.pan_validation.validate_pan_uniqueness"
     },
+    "Item": {
+        "validate": "business_needed_solutions.business_needed_solutions.overrides.item_validation.validate_expense_account_for_non_stock_items"
+    },
     "Stock Entry": {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
         "validate": "business_needed_solutions.business_needed_solutions.overrides.value_difference_validation.validate_value_difference"
