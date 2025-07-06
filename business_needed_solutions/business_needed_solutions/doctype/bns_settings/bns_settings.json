@@ -20,6 +20,7 @@
   "order_restriction_override_roles",
   "column_break_qfib",
   "restrict_value_difference",
+  "max_allowed_value_difference",
   "value_difference_override_roles",
   "enforce_expense_account_for_non_stock_items",
   "tab_break_wrem",
@@ -80,6 +81,15 @@
    "fieldname": "restrict_value_difference",
    "fieldtype": "Check",
    "label": "Disallow Stock Entries with Value Difference"
+  },
+  {
+   "default": "0",
+   "depends_on": "restrict_value_difference",
+   "description": "Maximum allowed value difference (0 means no difference allowed)",
+   "fieldname": "max_allowed_value_difference",
+   "fieldtype": "Float",
+   "label": "Maximum Allowed Value Difference",
+   "mandatory_depends_on": "restrict_value_difference"
   },
   {
    "depends_on": "restrict_value_difference",
