@@ -24,29 +24,30 @@ def validate_stock_update_or_reference(doc, method):
     # For Purchase Invoice, check if any items are NOT referenced from Purchase Receipt
     if doc.doctype == "Purchase Invoice":
         has_non_referenced = False
-        
-        # Check if any items are NOT referenced from Purchase Receipt
         for item in doc.items:
+            # Fetch maintain_stock for the item
+            maintain_stock = frappe.db.get_value("Item", item.item_code, "is_stock_item")
+            if not maintain_stock:
+                continue  # Skip non-stock items
             if not item.get("purchase_receipt") and not item.get("purchase_receipt_item"):
                 has_non_referenced = True
                 break
-        
         if has_non_referenced:
             frappe.throw(_(
-                "When 'Update Stock' is not checked, all items must be referenced from a Purchase Receipt."
+                "When 'Update Stock' is not checked, all stock items must be referenced from a Purchase Receipt."
             ), title=_("Validation Error"))
-    
     # For Sales Invoice, check if any items are NOT referenced from Delivery Note
     elif doc.doctype == "Sales Invoice":
         has_non_referenced = False
-        
-        # Check if any items are NOT referenced from Delivery Note
         for item in doc.items:
+            # Fetch maintain_stock for the item
+            maintain_stock = frappe.db.get_value("Item", item.item_code, "is_stock_item")
+            if not maintain_stock:
+                continue  # Skip non-stock items
             if not item.get("delivery_note") and not item.get("dn_detail"):
                 has_non_referenced = True
                 break
-        
         if has_non_referenced:
             frappe.throw(_(
-                "When 'Update Stock' is not checked, all items must be referenced from a Delivery Note."
+                "When 'Update Stock' is not checked, all stock items must be referenced from a Delivery Note."
             ), title=_("Validation Error")) 
