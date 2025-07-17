@@ -20,18 +20,7 @@
   "name": "Hide ID Column Journal",
   "script": "frappe.listview_settings[\"Journal Entry\"]={\n    hide_name_column : true,\n}",
   "view": "List"
- },
- {
-  "docstatus": 0,
-  "doctype": "Client Script",
-  "dt": "Stock Entry",
-  "enabled": 1,
-  "modified": "2025-03-09 02:48:58.753885",
-  "module": "Business Needed Solutions",
-  "name": "Stock entry customisation",
-  "script": "frappe.ui.form.on('Stock Entry', {\n    before_save: function (frm) {\n        console.log(\"Before Save Triggered\"); // Debugging\n        console.log(\"Stock Entry Type:\", frm.doc.stock_entry_type); // Debugging\n        console.log(\"Outgoing Stock Entry:\", frm.doc.outgoing_stock_entry); // Debugging\n\n        // Check if Stock Entry Type is Material Transfer and outgoing_stock_entry is not set\n        if (frm.doc.stock_entry_type === 'Material Transfer' && !frm.doc.outgoing_stock_entry) {\n            console.log(\"Setting Add to Transit to 1\"); // Debugging\n            frm.set_value('add_to_transit', 1); // Set Add to Transit to 1\n        }\n    }\n});",
-  "view": "Form"
- },
+  },
  {
   "docstatus": 0,
   "doctype": "Client Script",

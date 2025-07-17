@@ -167,6 +167,11 @@ doc_events = {
         "validate": "business_needed_solutions.business_needed_solutions.overrides.item_validation.validate_expense_account_for_non_stock_items"
     },
     "Stock Entry": {
+        "validate": [
+            "business_needed_solutions.business_needed_solutions.overrides.warehouse_validation.validate_warehouse_restriction",
+            "business_needed_solutions.business_needed_solutions.overrides.auto_transit_validation.auto_set_transit_for_material_transfer",
+            "business_needed_solutions.business_needed_solutions.overrides.warehouse_filtering.validate_warehouse_filtering"
+        ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
             "business_needed_solutions.business_needed_solutions.overrides.value_difference_validation.validate_value_difference"
