@@ -13,12 +13,8 @@
   "restrict_same_warehouse",
   "auto_transit_material_transfer",
   "section_break_stock_entry",
-  "restrict_stock_entry",
-  "stock_restriction_override_roles",
-  "restrict_transaction_entry",
-  "transaction_restriction_override_roles",
-  "restrict_order_entry",
-  "order_restriction_override_roles",
+  "restrict_submission",
+  "submission_restriction_override_roles",
   "column_break_qfib",
   "restrict_value_difference",
   "max_allowed_value_difference",
@@ -65,16 +61,17 @@
   },
   {
    "default": "0",
-   "fieldname": "restrict_stock_entry",
+   "description": "Restrict submission of documents across all categories (Stock, Transaction, Order)",
+   "fieldname": "restrict_submission",
    "fieldtype": "Check",
-   "label": "Restrict Stock Entry on Submit"
+   "label": "Restrict Document Submission"
   },
   {
-   "depends_on": "restrict_stock_entry",
-   "description": "Select roles that can submit stock entries in addition to System Manager",
-   "fieldname": "stock_restriction_override_roles",
+   "depends_on": "restrict_submission",
+   "description": "Select roles that can submit documents in addition to System Manager",
+   "fieldname": "submission_restriction_override_roles",
    "fieldtype": "Table MultiSelect",
-   "label": "Override Stock Restriction",
+   "label": "Override Submission Restriction",
    "options": "Has Role"
   },
   {
@@ -174,34 +171,7 @@
    "mandatory_depends_on": "secondary_rate_display",
    "options": "print_uom\nweight_uom"
   },
-  {
-   "default": "0",
-   "fieldname": "restrict_transaction_entry",
-   "fieldtype": "Check",
-   "label": "Restrict Transaction Entry on Submit"
-  },
-  {
-   "depends_on": "restrict_transaction_entry",
-   "description": "Select roles that can submit transactions in addition to System Manager",
-   "fieldname": "transaction_restriction_override_roles",
-   "fieldtype": "Table MultiSelect",
-   "label": "Override Transaction Restriction",
-   "options": "Has Role"
-  },
-  {
-   "default": "0",
-   "fieldname": "restrict_order_entry",
-   "fieldtype": "Check",
-   "label": "Restrict Order Entry on Submit"
-  },
-  {
-   "depends_on": "restrict_order_entry",
-   "description": "Select roles that can submit orders in addition to System Manager",
-   "fieldname": "order_restriction_override_roles",
-   "fieldtype": "Table MultiSelect",
-   "label": "Override Order Restriction",
-   "options": "Has Role"
-  },
+
   {
    "fieldname": "column_break_qfib",
    "fieldtype": "Column Break"

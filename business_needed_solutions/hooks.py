@@ -173,55 +173,47 @@ doc_events = {
             "business_needed_solutions.business_needed_solutions.overrides.warehouse_filtering.validate_warehouse_filtering"
         ],
         "on_submit": [
-            "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
+            "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.business_needed_solutions.overrides.value_difference_validation.validate_value_difference"
         ]
     },
     "Delivery Note": {
         "on_submit": [
-            "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
-            "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification",
+            "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.business_needed_solutions.utils.update_delivery_note_status_for_bns_internal"
         ]
     },
     "Purchase Receipt": {
         "on_submit": [
-            "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
-            "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification",
+            "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.business_needed_solutions.utils.update_purchase_receipt_status_for_bns_internal"
         ]
     },
     "Stock Reconciliation": {
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification"
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Sales Invoice": {
-        "on_submit": [
-            "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
-            "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
-        ],
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
         "validate": "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference"
     },
     "Purchase Invoice": {
-        "on_submit": [
-            "business_needed_solutions.business_needed_solutions.overrides.stock_restriction.validate_stock_modification",
-            "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
-        ],
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
         "validate": "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference"
     },
     "Journal Entry": {
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Payment Entry": {
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_transaction_modification"
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Sales Order": {
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_order_modification"
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Purchase Order": {
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_order_modification"
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Payment Request": {
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.transaction_restriction.validate_order_modification"
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     }
 }
 
