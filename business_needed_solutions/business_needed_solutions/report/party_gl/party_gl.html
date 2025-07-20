@@ -43,20 +43,7 @@
 				<td>{%= frappe.datetime.str_to_user(data[i].posting_date) %}</td>
 				{% var longest_word = cstr(data[i].remarks || data[i].bill_no || "").split(" ").reduce((longest, word) => word.length > longest.length ? word : longest, ""); %}
 				<td {% if longest_word.length > 45 %} class="overflow-wrap-anywhere" {% endif %}>
-					
-					{% 
-						var show_voucher_type = data[i].voucher_type;
-						if (
-							(data[i].voucher_type === "Sales Invoice" && data[i].voucher_subtype !== "Sales Invoice") ||
-							(data[i].voucher_type === "Purchase Invoice" && data[i].voucher_subtype !== "Purchase Invoice")
-						) {
-							show_voucher_type = data[i].voucher_subtype;
-						} else if (data[i].voucher_type === "Payment Entry") {
-							show_voucher_type = "Journal Entry";
-						}
-					%}
-					<b>{%= show_voucher_type %}</b>
-
+					{%= data[i].voucher_type %}
 					<br>{%= data[i].voucher_no %}
 
 					{% if(!(filters.party || filters.account)) { %}
@@ -67,7 +54,7 @@
 						<br><small class="text-muted">{%= __("Bill No") %}: {%= data[i].bill_no %}</small>
 					{% } %}
 
-					{% if(data[i].remarks && data[i].remarks.trim() !== "" && data[i].remarks.trim() !== "No Remarks") { %}
+					{% if(data[i].remarks) { %}
 						<br><small>{%= __("Remarks") %}: {%= data[i].remarks %}</small>
 					{% } %}
 				</td>
