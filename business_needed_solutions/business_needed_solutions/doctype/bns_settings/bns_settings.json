@@ -10,15 +10,9 @@
   "column_break_pan",
   "enforce_pan_uniqueness",
   "enforce_stock_update_or_reference",
-  "restrict_same_warehouse",
-  "auto_transit_material_transfer",
-  "section_break_stock_entry",
+  "section_break_submission_control",
   "restrict_submission",
   "submission_restriction_override_roles",
-  "column_break_qfib",
-  "restrict_value_difference",
-  "max_allowed_value_difference",
-  "value_difference_override_roles",
   "enforce_expense_account_for_non_stock_items",
   "tab_break_wrem",
   "print_format",
@@ -60,6 +54,11 @@
    "label": "Enforce Stock Update or Reference"
   },
   {
+   "fieldname": "section_break_submission_control",
+   "fieldtype": "Section Break",
+   "label": "Submission Control"
+  },
+  {
    "default": "0",
    "description": "Restrict submission of documents across all categories (Stock, Transaction, Order)",
    "fieldname": "restrict_submission",
@@ -75,52 +74,10 @@
    "options": "Has Role"
   },
   {
-   "default": "1",
-   "fieldname": "restrict_value_difference",
-   "fieldtype": "Check",
-   "label": "Disallow Stock Entries with Value Difference"
-  },
-  {
-   "default": "0",
-   "depends_on": "restrict_value_difference",
-   "description": "Maximum allowed value difference (0 means no difference allowed)",
-   "fieldname": "max_allowed_value_difference",
-   "fieldtype": "Float",
-   "label": "Maximum Allowed Value Difference",
-   "mandatory_depends_on": "restrict_value_difference"
-  },
-  {
-   "depends_on": "restrict_value_difference",
-   "description": "Select roles that can submit stock entries with value difference in addition to System Manager",
-   "fieldname": "value_difference_override_roles",
-   "fieldtype": "Table MultiSelect",
-   "label": "Override Value Difference Restriction",
-   "options": "Has Role"
-  },
-  {
    "default": "0",
    "fieldname": "enforce_expense_account_for_non_stock_items",
    "fieldtype": "Check",
    "label": "Enforce Expense Account for Non-Stock Items"
-  },
-  {
-   "default": "0",
-   "description": "Restrict same warehouse in source and target for all stock entry types including Material Transfer",
-   "fieldname": "restrict_same_warehouse",
-   "fieldtype": "Check",
-   "label": "Restrict Same Warehouse in Source and Target"
-  },
-  {
-   "fieldname": "section_break_stock_entry",
-   "fieldtype": "Section Break",
-   "label": "Entry Settings"
-  },
-  {
-   "default": "1",
-   "description": "Automatically set 'Add to Transit' to 1 for Material Transfer type Stock Entries",
-   "fieldname": "auto_transit_material_transfer",
-   "fieldtype": "Check",
-   "label": "Auto Set Transit for Material Transfer"
   },
   {
    "fieldname": "tab_break_wrem",

@@ -1,53 +1,199 @@
-# stock_update_validation.py
+"""
+Business Needed Solutions - Stock Update Validation System
+
+This module provides validation for Sales Invoice and Purchase Invoice documents,
+ensuring that when stock updates are disabled, all stock items are properly referenced
+from their respective source documents.
+"""
+
 import frappe
 from frappe import _
+from typing import Optional, List
+import logging
 
-def validate_stock_update_or_reference(doc, method):
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+class StockUpdateValidationError(Exception):
+    """Custom exception for stock update validation errors."""
+    pass
+
+
+def validate_stock_update_or_reference(doc, method: Optional[str] = None) -> None:
     """
     Validate if either update_stock is enabled or all items are referenced 
     from Purchase Receipt or Delivery Note based on BNS Settings configuration.
+    
+    This function ensures that when stock updates are disabled in Sales Invoice or
+    Purchase Invoice, all stock items must be referenced from their respective
+    source documents (Delivery Note for Sales Invoice, Purchase Receipt for Purchase Invoice).
+    
+    Args:
+        doc: The Sales Invoice or Purchase Invoice document being validated
+        method (Optional[str]): The method being called
+        
+    Raises:
+        StockUpdateValidationError: If validation fails
     """
-    # Check BNS Settings without requiring permissions
-    enforce_stock_update_or_reference = frappe.db.get_single_value("BNS Settings", "enforce_stock_update_or_reference")
+    try:
+        # Check if validation is enabled in BNS Settings
+        if not _is_stock_update_validation_enabled():
+            logger.debug("Stock update validation is disabled in BNS Settings")
+            return
+        
+        # Only apply to Sales Invoice and Purchase Invoice
+        if doc.doctype not in ["Sales Invoice", "Purchase Invoice"]:
+            logger.debug(f"Validation skipped for non-invoice doctype: {doc.doctype}")
+            return
+        
+        # If update_stock is enabled, no need to check references
+        if doc.update_stock:
+            logger.debug(f"Stock update enabled for {doc.doctype} {doc.name}, skipping reference validation")
+            return
+        
+        # Validate item references based on document type
+        _validate_item_references(doc)
+        
+        logger.debug(f"Stock update validation passed for {doc.doctype} {doc.name}")
+        
+    except Exception as e:
+        logger.error(f"Error in stock update validation: {str(e)}")
+        raise
+
+
+def _is_stock_update_validation_enabled() -> bool:
+    """
+    Check if stock update validation is enabled in BNS Settings.
     
-    if not enforce_stock_update_or_reference:
-        return
+    Returns:
+        bool: True if validation is enabled, False otherwise
+    """
+    try:
+        return bool(frappe.db.get_single_value("BNS Settings", "enforce_stock_update_or_reference"))
+    except Exception as e:
+        logger.error(f"Error checking stock update validation setting: {str(e)}")
+        return False
+
+
+def _validate_item_references(doc) -> None:
+    """
+    Validate that all stock items are properly referenced.
     
-    # Only apply to Sales Invoice and Purchase Invoice
-    if doc.doctype not in ["Sales Invoice", "Purchase Invoice"]:
-        return
-    
-    # If update_stock is enabled, no need to check references
-    if doc.update_stock:
-        return
-    
-    # For Purchase Invoice, check if any items are NOT referenced from Purchase Receipt
+    Args:
+        doc: The invoice document being validated
+        
+    Raises:
+        StockUpdateValidationError: If validation fails
+    """
     if doc.doctype == "Purchase Invoice":
-        has_non_referenced = False
-        for item in doc.items:
-            # Fetch maintain_stock for the item
-            maintain_stock = frappe.db.get_value("Item", item.item_code, "is_stock_item")
-            if not maintain_stock:
-                continue  # Skip non-stock items
-            if not item.get("purchase_receipt") and not item.get("purchase_receipt_item"):
-                has_non_referenced = True
-                break
-        if has_non_referenced:
-            frappe.throw(_(
-                "When 'Update Stock' is not checked, all stock items must be referenced from a Purchase Receipt."
-            ), title=_("Validation Error"))
-    # For Sales Invoice, check if any items are NOT referenced from Delivery Note
+        _validate_purchase_invoice_references(doc)
     elif doc.doctype == "Sales Invoice":
-        has_non_referenced = False
-        for item in doc.items:
-            # Fetch maintain_stock for the item
-            maintain_stock = frappe.db.get_value("Item", item.item_code, "is_stock_item")
-            if not maintain_stock:
-                continue  # Skip non-stock items
-            if not item.get("delivery_note") and not item.get("dn_detail"):
-                has_non_referenced = True
-                break
-        if has_non_referenced:
-            frappe.throw(_(
-                "When 'Update Stock' is not checked, all stock items must be referenced from a Delivery Note."
-            ), title=_("Validation Error")) 
+        _validate_sales_invoice_references(doc)
+
+
+def _validate_purchase_invoice_references(doc) -> None:
+    """
+    Validate that all stock items in Purchase Invoice are referenced from Purchase Receipt.
+    
+    Args:
+        doc: The Purchase Invoice document
+        
+    Raises:
+        StockUpdateValidationError: If any stock item is not referenced
+    """
+    non_referenced_items = _get_non_referenced_stock_items(doc, "purchase_receipt", "purchase_receipt_item")
+    
+    if non_referenced_items:
+        logger.warning(f"Purchase Invoice {doc.name} has non-referenced stock items: {non_referenced_items}")
+        _raise_purchase_invoice_reference_error()
+
+
+def _validate_sales_invoice_references(doc) -> None:
+    """
+    Validate that all stock items in Sales Invoice are referenced from Delivery Note.
+    
+    Args:
+        doc: The Sales Invoice document
+        
+    Raises:
+        StockUpdateValidationError: If any stock item is not referenced
+    """
+    non_referenced_items = _get_non_referenced_stock_items(doc, "delivery_note", "dn_detail")
+    
+    if non_referenced_items:
+        logger.warning(f"Sales Invoice {doc.name} has non-referenced stock items: {non_referenced_items}")
+        _raise_sales_invoice_reference_error()
+
+
+def _get_non_referenced_stock_items(doc, reference_field: str, reference_item_field: str) -> List[str]:
+    """
+    Get list of stock items that are not referenced from source documents.
+    
+    Args:
+        doc: The invoice document
+        reference_field (str): The field name for the reference document
+        reference_item_field (str): The field name for the reference item
+        
+    Returns:
+        List[str]: List of item codes that are not referenced
+    """
+    non_referenced_items = []
+    
+    for item in doc.items:
+        # Skip non-stock items
+        if not _is_stock_item(item.item_code):
+            continue
+            
+        # Check if item is referenced
+        if not item.get(reference_field) and not item.get(reference_item_field):
+            non_referenced_items.append(item.item_code)
+    
+    return non_referenced_items
+
+
+def _is_stock_item(item_code: str) -> bool:
+    """
+    Check if an item is a stock item.
+    
+    Args:
+        item_code (str): The item code to check
+        
+    Returns:
+        bool: True if the item is a stock item, False otherwise
+    """
+    try:
+        return bool(frappe.db.get_value("Item", item_code, "is_stock_item"))
+    except Exception as e:
+        logger.error(f"Error checking stock item status for {item_code}: {str(e)}")
+        return False
+
+
+def _raise_purchase_invoice_reference_error() -> None:
+    """
+    Raise an error for Purchase Invoice reference validation failure.
+    
+    Raises:
+        StockUpdateValidationError: With appropriate error message
+    """
+    error_message = _(
+        "When 'Update Stock' is not checked, all stock items must be referenced from a Purchase Receipt."
+    )
+    
+    logger.error("Purchase Invoice reference validation failed")
+    frappe.throw(error_message, title=_("Validation Error"))
+
+
+def _raise_sales_invoice_reference_error() -> None:
+    """
+    Raise an error for Sales Invoice reference validation failure.
+    
+    Raises:
+        StockUpdateValidationError: With appropriate error message
+    """
+    error_message = _(
+        "When 'Update Stock' is not checked, all stock items must be referenced from a Delivery Note."
+    )
+    
+    logger.error("Sales Invoice reference validation failed")
+    frappe.throw(error_message, title=_("Validation Error")) 

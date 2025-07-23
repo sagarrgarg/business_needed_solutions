@@ -167,15 +167,7 @@ doc_events = {
         "validate": "business_needed_solutions.business_needed_solutions.overrides.item_validation.validate_expense_account_for_non_stock_items"
     },
     "Stock Entry": {
-        "validate": [
-            "business_needed_solutions.business_needed_solutions.overrides.warehouse_validation.validate_warehouse_restriction",
-            "business_needed_solutions.business_needed_solutions.overrides.auto_transit_validation.auto_set_transit_for_material_transfer",
-            "business_needed_solutions.business_needed_solutions.overrides.warehouse_filtering.validate_warehouse_filtering"
-        ],
-        "on_submit": [
-            "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
-            "business_needed_solutions.business_needed_solutions.overrides.value_difference_validation.validate_value_difference"
-        ]
+        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Delivery Note": {
         "on_submit": [
@@ -320,6 +312,6 @@ fixtures = [{"doctype": "Client Script", "filters": [["module" , "in" , ("Busine
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
 
-# Migration hook to reapply BNS Settings
-after_migrate = "business_needed_solutions.migration.after_migrate"
+# Migration hook removed - migration was a one-time operation and should not run on every migration
+# after_migrate = "business_needed_solutions.migration.after_migrate"
 
