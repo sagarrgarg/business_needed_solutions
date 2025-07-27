@@ -63,8 +63,8 @@ def make_bns_internal_purchase_receipt(source_name: str, target_doc: Optional[Di
             _set_missing_values,
         )
         
-        # Update document details
-        _update_purchase_receipt_details(doclist, dn, represents_company)
+        # Update delivery note with reference (this needs to be done after the document is created)
+        _update_delivery_note_reference(dn.name, doclist.name)
         
         logger.info(f"Successfully created internal Purchase Receipt from Delivery Note {source_name}")
         return doclist
@@ -148,25 +148,48 @@ def _clear_document_level_fields(target) -> None:
 
 def _update_details(source_doc, target_doc, source_parent) -> None:
     """Update details for the Purchase Receipt."""
-    target_doc.company = source_parent.get("represents_company")
-    
-    # Find supplier representing the delivery note's company
-    supplier = _find_internal_supplier(source_parent.company)
-    target_doc.supplier = supplier
-    
-    # Set internal transfer fields
-    target_doc.buying_price_list = source_doc.selling_price_list
-    target_doc.is_internal_supplier = 1
-    target_doc.bns_inter_company_reference = source_doc.name
-    
-    # Update delivery note with reference
-    _update_delivery_note_reference(source_doc.name, target_doc.name)
-    
-    # Handle addresses
-    _update_addresses(target_doc, source_doc)
-    
-    # Handle taxes
-    _update_taxes(target_doc)
+    # Handle case where source_parent might be None (when called as postprocess)
+    if source_parent is None:
+        # This is being called as a postprocess function, so we need to get the data differently
+        # The source_doc is the Delivery Note, and target_doc is the Purchase Receipt
+        represents_company = _get_representing_company(source_doc.customer)
+        target_doc.company = represents_company
+        
+        # Find supplier representing the delivery note's company
+        supplier = _find_internal_supplier(represents_company)
+        target_doc.supplier = supplier
+        
+        # Set internal transfer fields
+        target_doc.buying_price_list = source_doc.selling_price_list
+        target_doc.is_internal_supplier = 1
+        target_doc.bns_inter_company_reference = source_doc.name
+        
+        # Handle addresses
+        _update_addresses(target_doc, source_doc)
+        
+        # Handle taxes
+        _update_taxes(target_doc)
+    else:
+        # This is being called from the main function with proper parameters
+        target_doc.company = source_parent.get("represents_company")
+        
+        # Find supplier representing the delivery note's company
+        supplier = _find_internal_supplier(source_parent.company)
+        target_doc.supplier = supplier
+        
+        # Set internal transfer fields
+        target_doc.buying_price_list = source_doc.selling_price_list
+        target_doc.is_internal_supplier = 1
+        target_doc.bns_inter_company_reference = source_doc.name
+        
+        # Update delivery note with reference
+        _update_delivery_note_reference(source_doc.name, target_doc.name)
+        
+        # Handle addresses
+        _update_addresses(target_doc, source_doc)
+        
+        # Handle taxes
+        _update_taxes(target_doc)
 
 
 def _find_internal_supplier(company: str) -> str:
@@ -247,9 +270,7 @@ def _clear_item_level_fields(target) -> None:
             setattr(target, field, None)
 
 
-def _update_purchase_receipt_details(doclist, dn, represents_company: str) -> None:
-    """Update purchase receipt details after mapping."""
-    doclist.represents_company = represents_company
+
 
 
 def update_delivery_note_status_for_bns_internal(doc, method: Optional[str] = None) -> None:

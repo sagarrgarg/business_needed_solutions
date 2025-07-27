@@ -1,258 +1,326 @@
-# Business Needed Solutions (BNS)
+# Business Needed Solutions (BNS) - Enterprise Business Management Suite
 
-A comprehensive Frappe/ERPNext application that provides essential business solutions including document submission restrictions, internal transfer management, validation systems, and enhanced printing capabilities.
+## 🏢 **Transform Your ERPNext Experience**
 
-## 🚀 Features
-
-### 1. **Unified Submission Restriction System**
-- **Centralized Control**: Single setting to control submission restrictions across all document types
-- **Document Categories**: Automatically categorizes documents into Stock, Transaction, and Order types
-- **Role-based Overrides**: Configurable role permissions to bypass restrictions
-- **Smart Validation**: Intelligent handling of stock updates vs. references
-
-### 2. **Internal Transfer Management**
-- **Inter-company Transfers**: Seamless creation of Purchase Receipts from Delivery Notes for internal customers
-- **GST Validation**: Automatic GSTIN comparison for billing calculations
-- **Status Management**: Automatic status updates for internal transfers
-- **Address Handling**: Smart address swapping for internal transfers
-
-### 3. **Enhanced Validation Systems**
-- **PAN Uniqueness**: Ensures unique PAN numbers across Customers and Suppliers
-- **Item Validation**: Validates expense account configuration for non-stock items
-- **Stock Update Validation**: Ensures proper referencing when stock updates are disabled
-
-### 4. **Advanced Printing System**
-- **Configurable Formats**: Dynamic print format assignment from BNS Settings
-- **Direct Printing**: One-click printing with keyboard shortcuts (Ctrl+P)
-- **Sales Invoice Support**: Special handling for multiple invoice copies
-- **Fallback Formats**: Automatic fallback to default formats
-
-### 5. **Vehicle/Transporter Management**
-- **e-Waybill Integration**: Update vehicle and transporter details for e-Waybill documents
-- **Status Validation**: Ensures updates only when e-Waybill status allows
-- **Flexible Updates**: Support for partial updates (vehicle, transporter, or both)
-
-## 📁 Project Structure
-
-```
-business_needed_solutions/
-├── business_needed_solutions/
-│   ├── business_needed_solutions/
-│   │   ├── overrides/                    # Document validation overrides
-│   │   │   ├── submission_restriction.py # Unified submission restriction
-│   │   │   ├── pan_validation.py        # PAN uniqueness validation
-│   │   │   ├── item_validation.py       # Item expense account validation
-│   │   │   └── stock_update_validation.py # Stock update validation
-│   │   ├── doctype/                      # Custom DocTypes
-│   │   │   ├── bns_settings/            # Main settings configuration
-│   │   │   └── ...                      # Other custom DocTypes
-│   │   ├── utils.py                     # Utility functions
-│   │   └── __init__.py
-│   ├── migration.py                     # Migration scripts
-│   ├── update_vehicle.py               # Vehicle update functionality
-│   ├── test_submission_restriction.py  # Test suite
-│   └── hooks.py                        # App hooks and configurations
-├── sites/assets/business_needed_solutions/js/
-│   ├── direct_print.js                 # Direct printing system
-│   ├── discount_manipulation_by_type.js # Discount handling
-│   ├── sales_invoice_form.js           # Sales invoice enhancements
-│   └── ...                             # Other JavaScript files
-└── README.md                           # This file
-```
-
-## 🛠️ Installation
-
-1. **Install the App**:
-   ```bash
-   bench get-app business_needed_solutions
-   bench install-app business_needed_solutions
-   ```
-
-2. **Migrate the App**:
-   ```bash
-   bench migrate
-   ```
-
-3. **Setup BNS Settings**:
-   - Navigate to **BNS Settings** in the desk
-   - Configure your preferences for:
-     - Submission restrictions
-     - Print formats
-     - Validation settings
-     - Discount types
-
-## ⚙️ Configuration
-
-### BNS Settings Configuration
-
-#### 1. **Submission Restrictions**
-- **Enable/Disable**: Toggle submission restrictions globally
-- **Override Roles**: Assign roles that can bypass restrictions
-- **Document Categories**: Automatic categorization of documents
-
-#### 2. **Print Formats**
-- **Doctype Mapping**: Map document types to specific print formats
-- **Fallback Formats**: Default formats when not configured
-- **Dynamic Loading**: Automatic format loading from settings
-
-#### 3. **Validation Settings**
-- **PAN Uniqueness**: Enforce unique PAN across customers/suppliers
-- **Expense Account**: Require expense accounts for non-stock items
-- **Stock Updates**: Validate stock references when updates disabled
-
-#### 4. **Discount Configuration**
-- **Single/Triple Mode**: Switch between discount types
-- **Field Visibility**: Automatic field showing/hiding
-- **Property Setters**: Dynamic field property management
-
-## 🔧 Usage
-
-### Submission Restrictions
-
-The system automatically restricts document submissions based on configured settings:
-
-```python
-# Example: Document submission will be restricted unless user has override role
-# This is handled automatically by the system
-```
-
-### Internal Transfers
-
-Create Purchase Receipts from Delivery Notes for internal customers:
-
-```python
-# Via UI: Use the "Create Purchase Receipt" button on Delivery Notes
-# Via API: Call the make_bns_internal_purchase_receipt function
-```
-
-### Direct Printing
-
-Print documents directly with keyboard shortcuts:
-
-```javascript
-// Ctrl+P (or Cmd+P on Mac) will trigger direct printing
-// For Sales Invoices: Shows dropdown for invoice copy selection
-// For other documents: Direct PDF generation and printing
-```
-
-### Vehicle Updates
-
-Update vehicle and transporter details:
-
-```python
-# Via API: Call update_vehicle_or_transporter function
-update_vehicle_or_transporter(
-    doctype="Delivery Note",
-    docname="DN-001",
-    vehicle_no="MH12AB1234",
-    transporter="Transporter Name"
-)
-```
-
-## 🧪 Testing
-
-Run the comprehensive test suite:
-
-```python
-# Execute the test script
-python -c "from business_needed_solutions.test_submission_restriction import test_submission_restriction; test_submission_restriction()"
-```
-
-The test suite validates:
-- BNS Settings configuration
-- Document categorization
-- Permission checking
-- Legacy field cleanup
-
-## 🔒 Security Features
-
-- **Role-based Access**: Granular permission control
-- **Validation Layers**: Multiple validation points for data integrity
-- **Audit Trail**: Comprehensive logging of all operations
-- **Error Handling**: Graceful error handling with user-friendly messages
-
-## 📊 Logging
-
-The app includes comprehensive logging for debugging and monitoring:
-
-```python
-import logging
-logger = logging.getLogger(__name__)
-
-# Log levels used:
-# DEBUG: Detailed information for debugging
-# INFO: General information about operations
-# WARNING: Warning messages for potential issues
-# ERROR: Error messages for failed operations
-```
-
-## 🔄 Migration
-
-The app includes automatic migration scripts that handle:
-
-- **Settings Migration**: Automatic migration of old settings to new unified system
-- **Role Migration**: Transfer of override roles to new structure
-- **Field Cleanup**: Removal of deprecated fields
-- **Data Validation**: Verification of migrated data integrity
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes with proper documentation
-4. Add tests for new functionality
-5. Submit a pull request
-
-## 📝 Code Standards
-
-- **Type Hints**: All Python functions include type annotations
-- **Documentation**: Comprehensive docstrings for all functions
-- **Error Handling**: Proper exception handling with custom exceptions
-- **Logging**: Appropriate logging levels for debugging
-- **Testing**: Unit tests for critical functionality
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-1. **Print Formats Not Working**:
-   - Check BNS Settings configuration
-   - Verify print format exists
-   - Check browser popup settings
-
-2. **Submission Restrictions Not Working**:
-   - Verify BNS Settings are saved
-   - Check user roles and permissions
-   - Review document categorization
-
-3. **Internal Transfers Failing**:
-   - Ensure internal customer/supplier setup
-   - Verify company assignments
-   - Check GSTIN configurations
-
-### Debug Mode
-
-Enable debug logging for troubleshooting:
-
-```python
-import logging
-logging.getLogger('business_needed_solutions').setLevel(logging.DEBUG)
-```
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [license.txt](license.txt) file for details.
-
-## 👥 Authors
-
-- **Sagar Ratan Garg** - *Initial work* - [sagar1ratan1garg1@gmail.com](mailto:sagar1ratan1garg1@gmail.com)
-
-## 🙏 Acknowledgments
-
-- Frappe Framework team for the excellent platform
-- ERPNext community for continuous improvements
-- All contributors who have helped improve this application
+Business Needed Solutions is a comprehensive enterprise-grade application that enhances ERPNext with advanced business controls, compliance features, and professional printing capabilities. Designed specifically for Indian businesses and organizations requiring sophisticated workflow management.
 
 ---
 
-**Note**: This application is designed for Frappe/ERPNext version 15.0 and above. Please ensure compatibility with your ERPNext version before installation.
+## 🚀 **Key Features**
+
+### 📋 **Document Submission Control**
+- **Centralized Permission Management**: Control who can submit critical documents across your organization
+- **Smart Categorization**: Automatically categorizes documents into Stock, Transaction, and Order types
+- **Role-Based Overrides**: Grant specific roles permission to bypass restrictions
+- **Audit Trail**: Complete tracking of all submission activities
+
+### 🏦 **Indian Business Compliance**
+- **PAN Uniqueness Validation**: Ensure unique PAN numbers across customers and suppliers
+- **GST Compliance**: Built-in GST validation and reporting features
+- **e-Invoice Integration**: Seamless integration with e-invoice and e-waybill systems
+- **Tax Calculation**: Advanced tax calculation and reporting
+
+### 🖨️ **Professional Print Formats**
+- **Dynamic Print Templates**: Configurable print formats for all document types
+- **Company Branding**: Automatic inclusion of company logos and branding
+- **Bank Details**: Default bank account information on all invoices
+- **Multi-Copy Support**: Generate multiple invoice copies with different formats
+- **Direct Printing**: One-click printing with keyboard shortcuts
+
+### 🔄 **Internal Transfer Management**
+- **Inter-Company Transfers**: Seamless internal customer/supplier management
+- **Automatic Document Creation**: Generate Purchase Receipts from Delivery Notes
+- **GST Validation**: Automatic GSTIN comparison and validation
+- **Status Tracking**: Real-time status updates for internal transfers
+
+### 📊 **Advanced Reporting**
+- **Custom Reports**: Specialized reports for various business needs
+- **Almonds Sorting Report**: Industry-specific reporting for food processing
+- **Financial Reports**: Enhanced financial reporting capabilities
+- **Compliance Reports**: Built-in compliance and audit reports
+
+---
+
+## 🛠️ **Getting Started**
+
+### **Installation**
+1. Install the app in your ERPNext environment
+2. Run the migration script
+3. Configure BNS Settings
+4. Set up your print formats
+
+### **Initial Configuration**
+1. Navigate to **BNS Settings** in your ERPNext desk
+2. Configure your business preferences
+3. Set up print format mappings
+4. Configure submission restrictions
+5. Set up validation rules
+
+---
+
+## 📄 **Print Format Features**
+
+### **Available Print Formats**
+
+#### **1. Sales Invoice Formats**
+- **BNS SI Dynamic V1**: Professional sales invoice with e-invoice support
+- **Features**:
+  - Company logo and branding
+  - Bank account details
+  - GST summary tables
+  - e-Invoice QR codes
+  - Multiple copy support
+  - Payment terms display
+
+#### **2. Delivery Note Formats**
+- **BNS DN Dynamic V1**: Comprehensive delivery note format
+- **Features**:
+  - Vehicle and transporter details
+  - e-Waybill integration
+  - Shipping and dispatch information
+  - Terms of delivery
+  - Professional layout
+
+#### **3. Purchase Order Formats**
+- **BNS PO Dynamic V1**: Professional purchase order format
+- **BNS PO V1**: Standard purchase order format
+- **Features**:
+  - Supplier information
+  - Delivery terms
+  - Payment terms
+  - Professional branding
+
+#### **4. Sales Order Formats**
+- **BNS SO Dynamic V1**: Professional sales order format
+- **Features**:
+  - Customer information
+  - Delivery schedules
+  - Professional layout
+  - Company branding
+
+### **Print Format Configuration**
+
+#### **Setting Up Company Logo**
+1. **Upload Logo**: Go to **Company** settings
+2. **Add Logo**: Upload your company logo (recommended size: 200x200px)
+3. **Logo Field**: Set the logo in the "Logo for Printing" field
+4. **Automatic Display**: Logo will automatically appear on all print formats
+
+#### **Configuring Bank Details**
+1. **Bank Account Setup**: Create bank accounts in **Chart of Accounts**
+2. **Default Account**: Mark one account as default for the company
+3. **Account Information**: Fill in complete bank details:
+   - Account name
+   - Bank name
+   - Account number
+   - IFSC code
+   - Branch details
+4. **Automatic Display**: Bank details appear on all invoices
+
+#### **Print Format Settings**
+1. **BNS Settings**: Navigate to BNS Settings
+2. **Print Format Tab**: Go to the Print Options tab
+3. **Format Mapping**: Map document types to specific print formats
+4. **Rate Display**: Configure rate display options:
+   - Rate (Incl Tax)
+   - Rate (Excl Tax)
+   - Secondary rate display
+5. **Discount Configuration**: Set up discount display options
+
+### **Advanced Print Features**
+
+#### **Rate Display Options**
+- **Inclusive Tax**: Show rates including tax
+- **Exclusive Tax**: Show rates excluding tax
+- **Secondary Rates**: Display additional rate information
+- **UOM Conversion**: Show rates in different units of measurement
+- **Weight-based Rates**: Display rates per kilogram
+
+#### **Discount Management**
+- **Single Discount**: Standard single discount percentage
+- **Triple Compounded**: Advanced triple discount system
+- **Automatic Calculation**: Automatic discount calculations
+- **Field Visibility**: Dynamic field showing/hiding
+
+#### **Document Copy Support**
+- **Multiple Copies**: Generate different invoice copies
+- **Copy Types**: Original, Duplicate, Triplicate, etc.
+- **Format Variations**: Different formats for different copies
+- **Automatic Labeling**: Automatic copy labeling
+
+---
+
+## 🔧 **Configuration Guide**
+
+### **BNS Settings Configuration**
+
+#### **1. General Settings**
+- **Discount Type**: Choose between Single or Triple Compounded discounts
+- **PAN Uniqueness**: Enable/disable PAN uniqueness validation
+- **Stock Update Validation**: Control stock update requirements
+
+#### **2. Submission Control**
+- **Restrict Document Submission**: Enable global submission restrictions
+- **Override Roles**: Assign roles that can bypass restrictions
+- **Document Categories**: Automatic categorization of documents
+
+#### **3. Print Options**
+- **Rate Display**: Configure how rates are displayed
+- **Print Format Mapping**: Map document types to print formats
+- **Secondary Rate Display**: Configure additional rate information
+
+#### **4. Validation Settings**
+- **Expense Account Validation**: Require expense accounts for non-stock items
+- **Stock Reference Validation**: Validate stock references when updates disabled
+
+### **Document Submission Control**
+
+#### **How It Works**
+1. **Enable Restriction**: Check "Restrict Document Submission" in BNS Settings
+2. **Assign Override Roles**: Add roles that can submit documents
+3. **Automatic Enforcement**: System automatically restricts submissions
+4. **Role-Based Access**: Only assigned roles can submit documents
+
+#### **Document Categories**
+- **Stock Documents**: Stock Entry, Stock Reconciliation, etc.
+- **Transaction Documents**: Sales Invoice, Purchase Invoice, etc.
+- **Order Documents**: Sales Order, Purchase Order, etc.
+
+#### **Override Permissions**
+- **System Manager**: Always has override permissions
+- **Custom Roles**: Assign specific roles for override
+- **Granular Control**: Fine-tune permissions by document type
+
+### **Internal Transfer Setup**
+
+#### **Customer/Supplier Configuration**
+1. **Internal Customer**: Create customer with "Is Internal Customer" checked
+2. **Company Assignment**: Assign the company the customer represents
+3. **GSTIN Setup**: Configure GSTIN for internal transfers
+4. **Address Configuration**: Set up proper addresses for transfers
+
+#### **Transfer Process**
+1. **Create Delivery Note**: Create delivery note for internal customer
+2. **Generate Purchase Receipt**: Use "Create Purchase Receipt" button
+3. **Automatic Mapping**: System automatically maps all details
+4. **Status Updates**: Automatic status updates for both documents
+
+---
+
+## 📊 **Reports and Analytics**
+
+### **Available Reports**
+
+#### **1. Almonds Sorting Report**
+- **Purpose**: Track sorting and processing activities
+- **Features**:
+  - Batch-wise tracking
+  - Quality metrics
+  - Processing efficiency
+  - Cost analysis
+
+#### **2. Financial Reports**
+- **Bank GL Report**: Comprehensive bank ledger reports
+- **Party GL Report**: Customer and supplier ledger reports
+- **Accounts Payable Summary**: Enhanced payable reporting
+- **Accounts Receivable Summary**: Enhanced receivable reporting
+
+#### **3. Compliance Reports**
+- **PAN Validation Report**: Track PAN uniqueness compliance
+- **GST Compliance Report**: GST-related compliance reporting
+- **Document Submission Report**: Track submission activities
+
+### **Report Configuration**
+1. **Access Reports**: Navigate to Reports section
+2. **Select Report**: Choose the required report
+3. **Set Filters**: Configure report filters and parameters
+4. **Generate Report**: Generate and export reports
+
+---
+
+## 🔒 **Security and Compliance**
+
+### **Data Security**
+- **Role-Based Access**: Granular permission control
+- **Audit Trail**: Complete activity logging
+- **Data Validation**: Multiple validation layers
+- **Secure Storage**: Encrypted data storage
+
+### **Compliance Features**
+- **Indian Tax Compliance**: Built-in GST and tax compliance
+- **PAN Validation**: Automatic PAN uniqueness checking
+- **Document Control**: Submission restriction and approval workflows
+- **Audit Support**: Comprehensive audit trail and reporting
+
+---
+
+## 🎯 **Use Cases**
+
+### **Manufacturing Companies**
+- **Internal Transfers**: Manage inter-department transfers
+- **Quality Control**: Track sorting and processing activities
+- **Compliance**: Ensure tax and regulatory compliance
+- **Document Control**: Control critical document submissions
+
+### **Trading Companies**
+- **Customer Management**: Advanced customer validation
+- **Supplier Management**: Supplier compliance tracking
+- **Document Control**: Submission approval workflows
+- **Professional Printing**: Branded invoice and document formats
+
+### **Service Companies**
+- **Project Management**: Internal project transfers
+- **Client Management**: Advanced client validation
+- **Document Control**: Submission restriction and approval
+- **Professional Branding**: Company-branded documents
+
+---
+
+## 📞 **Support and Contact**
+
+### **Technical Support**
+- **Email**: sagar1ratan1garg1@gmail.com
+- **Documentation**: Comprehensive user guides and tutorials
+- **Training**: Available training sessions and workshops
+
+### **Commercial Licensing**
+- **License Types**: Available for different business sizes
+- **Pricing**: Contact for pricing information
+- **Customization**: Available custom development services
+
+---
+
+## 📋 **System Requirements**
+
+### **ERPNext Version**
+- **Minimum**: ERPNext 15.0
+- **Recommended**: Latest ERPNext version
+- **Compatibility**: Compatible with most ERPNext configurations
+
+### **Browser Requirements**
+- **Chrome**: Version 90+
+- **Firefox**: Version 88+
+- **Safari**: Version 14+
+- **Edge**: Version 90+
+
+---
+
+## 🔄 **Updates and Maintenance**
+
+### **Regular Updates**
+- **Feature Updates**: Regular new feature releases
+- **Bug Fixes**: Continuous bug fix and improvement updates
+- **Security Updates**: Regular security patches and updates
+- **Compliance Updates**: Updates for changing regulations
+
+### **Maintenance Support**
+- **Technical Support**: Available technical support
+- **Customization**: Custom development services
+- **Training**: User training and workshops
+- **Consulting**: Business process consulting
+
+---
+
+**Transform your ERPNext experience with Business Needed Solutions - The complete enterprise business management suite for modern organizations.**
+
+*For commercial licensing and support, contact: sagar1ratan1garg1@gmail.com*

@@ -1,9 +1,9 @@
 app_name = "business_needed_solutions"
 app_title = "Business Needed Solutions"
 app_publisher = "Sagar Ratan Garg"
-app_description = "Reports"
+app_description = "Enterprise-grade business solutions for ERPNext including document submission controls, PAN validation, dynamic print formats, internal transfer management, and Indian compliance features. Perfect for businesses requiring advanced workflow controls and professional document management."
 app_email = "sagar1ratan1garg1@gmail.com"
-app_license = "mit"
+app_license = "Commercial"
 
 # Apps
 # ------------------

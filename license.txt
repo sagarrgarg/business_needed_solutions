@@ -1,21 +1,53 @@
-MIT License
+COMMERCIAL LICENSE AGREEMENT
 
-Copyright (c) [year] [fullname]
+Copyright (c) 2025 Sagar Ratan Garg. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This software and associated documentation files (the "Software") are the 
+proprietary and confidential information of Sagar Ratan Garg ("Licensor").
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. LICENSE GRANT
+Subject to the terms and conditions of this Agreement, Licensor grants you a 
+limited, non-exclusive, non-transferable license to use the Software solely for 
+your internal business purposes.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+2. RESTRICTIONS
+You may not:
+- Copy, modify, or create derivative works of the Software
+- Reverse engineer, decompile, or disassemble the Software
+- Distribute, sublicense, or transfer the Software to any third party
+- Use the Software for commercial purposes without purchasing a commercial license
+- Remove or alter any proprietary notices or labels on the Software
+
+3. COMMERCIAL USE
+Commercial use of this Software requires a separate commercial license. 
+Commercial use includes but is not limited to:
+- Using the Software in a business environment
+- Generating revenue from the use of the Software
+- Providing services to clients using the Software
+- Using the Software in a production environment
+
+4. OWNERSHIP
+The Software is owned by Licensor and is protected by copyright laws and 
+international copyright treaties, as well as other intellectual property laws 
+and treaties.
+
+5. WARRANTY DISCLAIMER
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS 
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF 
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+6. LIMITATION OF LIABILITY
+IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY SPECIAL, INCIDENTAL, 
+INDIRECT, OR CONSEQUENTIAL DAMAGES WHATSOEVER ARISING OUT OF OR IN CONNECTION 
+WITH THE USE OR PERFORMANCE OF THE SOFTWARE.
+
+7. TERMINATION
+This license terminates automatically if you fail to comply with the terms 
+and conditions of this Agreement.
+
+8. CONTACT
+For commercial licensing inquiries, contact:
+Sagar Ratan Garg
+Email: sagar1ratan1garg1@gmail.com
+
+By using this Software, you agree to be bound by the terms of this Agreement.
