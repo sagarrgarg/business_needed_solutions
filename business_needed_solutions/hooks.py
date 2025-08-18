@@ -209,10 +209,10 @@ doc_events = {
     }
 }
 
-fixtures = [{"doctype": "Client Script", "filters": [["module" , "in" , ("Business Needed Solutions" )]]},
-            {"doctype": "Print Format", "filters": [["module" , "in" , ("Business Needed Solutions" )]],"overwrite": True},
-            {"doctype": "Custom Field", "filters": [["module" , "in" , ("Business Needed Solutions" )]],"overwrite": True}]
-
+# fixtures = [{"doctype": "Client Script", "filters": [["module" , "in" , ("Business Needed Solutions" )]]},
+#             {"doctype": "Print Format", "filters": [["module" , "in" , ("Business Needed Solutions" )]],"overwrite": True},
+#             {"doctype": "Custom Field", "filters": [["module" , "in" , ("Business Needed Solutions" )]],"overwrite": True}]
+fixtures = [{"doctype": "Report", "filters": [["module" , "in" , ("Business Needed Solutions" )]]}]
 
 
 # Scheduled Tasks
