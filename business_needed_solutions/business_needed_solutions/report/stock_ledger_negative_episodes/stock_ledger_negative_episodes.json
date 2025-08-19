@@ -15,7 +15,7 @@
  "module": "Business Needed Solutions",
  "name": "Stock Ledger Negative Episodes",
  "owner": "Administrator",
- "prepared_report": 0,
+ "prepared_report": 1,
  "ref_doctype": "Stock Ledger Entry",
  "report_name": "Stock Ledger Negative Episodes",
  "report_type": "Script Report",
