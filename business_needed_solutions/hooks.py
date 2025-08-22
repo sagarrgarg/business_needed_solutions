@@ -312,6 +312,6 @@ fixtures = [{"doctype": "Report", "filters": [["module" , "in" , ("Business Need
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
 
-# Migration hook removed - migration was a one-time operation and should not run on every migration
-# after_migrate = "business_needed_solutions.migration.after_migrate"
+# Migration hook to ensure BNS settings are applied after migrations
+after_migrate = "business_needed_solutions.business_needed_solutions.migration.after_migrate"
 
