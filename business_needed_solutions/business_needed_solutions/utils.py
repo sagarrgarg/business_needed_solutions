@@ -220,10 +220,22 @@ def _update_delivery_note_reference(dn_name: str, pr_name: str) -> None:
 
 def _update_addresses(target_doc, source_doc) -> None:
     """Update addresses for internal transfer."""
-    # Swap addresses as per internal transfer logic
-    update_address(target_doc, "supplier_address", "address_display", source_doc.company_address)
-    update_address(target_doc, "shipping_address", "shipping_address_display", source_doc.customer_address)
-    update_address(target_doc, "billing_address", "billing_address_display", source_doc.customer_address)
+    # For Purchase Receipt, don't swap shipping/dispatch addresses
+    if target_doc.doctype == "Purchase Receipt":
+        # Company address becomes supplier address
+        update_address(target_doc, "supplier_address", "address_display", source_doc.company_address)
+        # Keep shipping address as is
+        update_address(target_doc, "shipping_address", "shipping_address_display", source_doc.shipping_address_name)
+        # Keep dispatch address as is
+        if source_doc.dispatch_address_name:
+            update_address(target_doc, "dispatch_address", "dispatch_address_display", source_doc.dispatch_address_name)
+        # Customer address becomes billing address
+        update_address(target_doc, "billing_address", "billing_address_display", source_doc.customer_address)
+    else:
+        # For other doctypes, use the original swapping logic
+        update_address(target_doc, "supplier_address", "address_display", source_doc.company_address)
+        update_address(target_doc, "shipping_address", "shipping_address_display", source_doc.customer_address)
+        update_address(target_doc, "billing_address", "billing_address_display", source_doc.customer_address)
 
 
 def _update_taxes(target_doc) -> None:
