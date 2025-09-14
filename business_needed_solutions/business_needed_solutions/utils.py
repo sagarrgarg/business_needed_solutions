@@ -119,13 +119,10 @@ def _get_delivery_note_mapping() -> Dict[str, Any]:
 def _set_missing_values(source, target) -> None:
     """Set missing values for the target Purchase Receipt."""
     target.run_method("set_missing_values")
-
-    # Set up taxes based on the target company's tax template
-    if target.get("taxes_and_charges") and not target.get("taxes"):
-        from erpnext.controllers.accounts_controller import get_taxes_and_charges
-        taxes = get_taxes_and_charges("Purchase Taxes and Charges Template", target.taxes_and_charges)
-        for tax in taxes:
-            target.append("taxes", tax)
+    
+    # Clear tax template and taxes
+    target.taxes_and_charges = None
+    target.taxes = []
             
     if not target.get("items"):
         raise BNSValidationError(_("All items have already been received"))
@@ -240,15 +237,9 @@ def _update_addresses(target_doc, source_doc) -> None:
 
 def _update_taxes(target_doc) -> None:
     """Update taxes for the purchase receipt."""
-    update_taxes(
-        target_doc,
-        party=target_doc.supplier,
-        party_type="Supplier",
-        company=target_doc.company,
-        doctype=target_doc.doctype,
-        party_address=target_doc.supplier_address,
-        company_address=target_doc.shipping_address,
-    )
+    # Clear tax template and taxes - we don't want automatic tax assignment
+    target_doc.taxes_and_charges = None
+    target_doc.taxes = []
 
 
 def _update_item(source, target, source_parent) -> None:
