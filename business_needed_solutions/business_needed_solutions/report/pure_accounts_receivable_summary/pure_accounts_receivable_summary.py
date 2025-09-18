@@ -264,6 +264,33 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 		if self.filters.show_gl_balance:
 			gl_balance_map = get_gl_balance(self.filters.report_date, self.filters.company)
 
+		# Calculate opening balances
+		opening_balances = {}
+		if self.filters.get("from_date"):
+			for party_type in self.party_type:
+				accounts = frappe.get_all(
+					"Account",
+					filters={"account_type": self.account_type, "company": self.filters.company},
+					pluck="name"
+				)
+				if not accounts:
+					continue
+
+				opening_entries = frappe.db.sql("""
+					SELECT party, SUM(debit) - SUM(credit) as balance
+					FROM `tabGL Entry`
+					WHERE posting_date < %s
+					AND party_type = %s
+					AND account in %s
+					AND company = %s
+					AND is_cancelled = 0
+					GROUP BY party
+				""", (self.filters.from_date, party_type, tuple(accounts), self.filters.company), as_dict=1)
+
+				for entry in opening_entries:
+					if entry.party:
+						opening_balances[entry.party] = entry.balance
+
 		exclude_groups = self.filters.get(
 			"exclude_customer_group" if self.account_type == "Receivable" else "exclude_supplier_group"
 		) or []
@@ -290,6 +317,9 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 				row.party_name = frappe.get_cached_value(doctype, party, fieldname)
 
 			row.update(party_dict)
+
+			# Add opening balance
+			row.opening = opening_balances.get(party, 0.0)
 
 			# Advance against party
 			row.advance = party_advance_amount.get(party, 0)
@@ -375,9 +405,10 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 				fieldname="party_name",
 				fieldtype="Data",
 			)
-		self.add_column(_("Invoiced Amount"), fieldname="invoiced")
-		self.add_column(_("Paid Amount"), fieldname="purepaid")
-		self.add_column(_("Outstanding Amount"), fieldname="outstanding")
+			self.add_column(_("Opening Balance"), fieldname="opening")
+			self.add_column(_("Invoiced Amount"), fieldname="invoiced")
+			self.add_column(_("Paid Amount"), fieldname="purepaid")
+			self.add_column(_("Outstanding Amount"), fieldname="outstanding")
 
 		if self.filters.show_gl_balance:
 			self.add_column(_("GL Balance"), fieldname="gl_balance")
