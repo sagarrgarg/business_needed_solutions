@@ -18,11 +18,15 @@
   "print_format",
   "section_break_vlqx",
   "rate_incl_tax",
-  "column_break_giiq",
   "rate_excl_tax",
+  "column_break_giiq",
+  "is_item_amount_tax_incl",
+  "show_item_code",
+  "bns_show_item_barcode",
   "section_break_qbpg",
   "secondary_rate_display",
-  "secondary_rate_field"
+  "secondary_rate_field",
+  "column_break_qfib"
  ],
  "fields": [
   {
@@ -128,16 +132,33 @@
    "mandatory_depends_on": "secondary_rate_display",
    "options": "print_uom\nweight_uom"
   },
-
   {
    "fieldname": "column_break_qfib",
    "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_item_amount_tax_incl",
+   "fieldtype": "Check",
+   "label": "Item Amount Incl Tax"
+  },
+  {
+   "default": "0",
+   "fieldname": "show_item_code",
+   "fieldtype": "Check",
+   "label": "Show Item Code"
+  },
+  {
+   "default": "0",
+   "fieldname": "bns_show_item_barcode",
+   "fieldtype": "Check",
+   "label": "Show Item Barcode (If Available)"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2025-07-04 02:39:54.877886",
+ "modified": "2025-09-22 02:55:56.144200",
  "modified_by": "Administrator",
  "module": "Business Needed Solutions",
  "name": "BNS Settings",
@@ -180,5 +201,6 @@
  "row_format": "Dynamic",
  "sort_field": "modified",
  "sort_order": "DESC",
- "states": []
+ "states": [],
+ "track_changes": 1
 }
