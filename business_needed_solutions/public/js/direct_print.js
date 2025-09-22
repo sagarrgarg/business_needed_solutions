@@ -272,20 +272,8 @@ business_needed_solutions.DirectPrint = class DirectPrint {
      * @param {string} option - The print option
      */
     print_with_option(frm, option) {
-        frappe.call({
-            method: "frappe.client.set_value",
-            args: {
-                doctype: frm.doc.doctype,
-                name: frm.doc.name,
-                fieldname: "invoice_copy",
-                value: option
-            },
-            callback: (response) => {
-                if (!response.exc) {
-                    this.generate_pdf(frm);
-                }
-            }
-        });
+        // Directly generate PDF with the selected option without updating the document
+        this.generate_pdf(frm, option);
     }
 
     /**
@@ -293,7 +281,7 @@ business_needed_solutions.DirectPrint = class DirectPrint {
      * 
      * @param {Object} frm - The form object
      */
-    generate_pdf(frm) {
+    generate_pdf(frm, selectedOption = null) {
         // Validate configuration
         if (!this._is_doctype_configured(frm.doc.doctype)) {
             this._show_configuration_error(frm.doc.doctype);
@@ -308,7 +296,7 @@ business_needed_solutions.DirectPrint = class DirectPrint {
         }
         
         // Generate PDF URL
-        const pdf_url = this._build_pdf_url(frm, formats[0]);
+        const pdf_url = this._build_pdf_url(frm, formats[0], selectedOption);
         
         // Open print window
         this._open_print_window(pdf_url);
@@ -344,7 +332,7 @@ business_needed_solutions.DirectPrint = class DirectPrint {
      * @param {string} print_format - The print format to use
      * @returns {string} The PDF URL
      */
-    _build_pdf_url(frm, print_format) {
+    _build_pdf_url(frm, print_format, selectedOption = null) {
         const letterhead = frm.doc.letter_head || '';
         const no_letterhead = letterhead === '' ? 1 : 0;
         
@@ -358,6 +346,20 @@ business_needed_solutions.DirectPrint = class DirectPrint {
         
         if (letterhead) {
             params.append('letterhead', letterhead);
+        }
+
+        // Add invoice_copy parameter for Sales Invoice
+        if (frm.doc.doctype === 'Sales Invoice') {
+            const copyMap = {
+                "Original for Recipient": "1",
+                "Duplicate for Transporter": "2",
+                "Duplicate for Supplier": "3",
+                "Triplicate for Supplier": "4"
+            };
+            
+            // Use selectedOption if provided, otherwise use default "1"
+            const copyValue = selectedOption ? copyMap[selectedOption] : "1";
+            params.append('invoice_copy', copyValue);
         }
         
         return frappe.urllib.get_full_url(
