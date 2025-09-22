@@ -272,7 +272,7 @@ business_needed_solutions.DirectPrint = class DirectPrint {
      * @param {string} option - The print option
      */
     print_with_option(frm, option) {
-        // Directly generate PDF with the selected option without updating the document
+        // Generate PDF with the selected option without updating the document
         this.generate_pdf(frm, option);
     }
 
@@ -357,8 +357,15 @@ business_needed_solutions.DirectPrint = class DirectPrint {
                 "Triplicate for Supplier": "4"
             };
             
-            // Use selectedOption if provided, otherwise use default "1"
-            const copyValue = selectedOption ? copyMap[selectedOption] : "1";
+            // Use selectedOption if provided, otherwise use the document's invoice_copy value or default to "1"
+            let copyValue;
+            if (selectedOption) {
+                copyValue = copyMap[selectedOption];
+            } else if (frm.doc.invoice_copy) {
+                copyValue = copyMap[frm.doc.invoice_copy] || "1";
+            } else {
+                copyValue = "1";
+            }
             params.append('invoice_copy', copyValue);
         }
         
