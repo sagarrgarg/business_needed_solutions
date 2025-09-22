@@ -366,7 +366,15 @@ business_needed_solutions.DirectPrint = class DirectPrint {
             } else {
                 copyValue = "1";
             }
+            
+            // Ensure invoice_copy is added to both params and as a direct query parameter
             params.append('invoice_copy', copyValue);
+            
+            // Build the base URL with invoice_copy parameter
+            const baseUrl = `/api/method/frappe.utils.print_format.download_pdf?${params.toString()}`;
+            
+            // Add invoice_copy parameter directly to ensure it's not lost
+            return frappe.urllib.get_full_url(`${baseUrl}&invoice_copy=${copyValue}`);
         }
         
         return frappe.urllib.get_full_url(
