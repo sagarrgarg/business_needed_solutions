@@ -48,7 +48,20 @@ app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js",
 
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
-doctype_js = {"Delivery Note" : "public/js/delivery_note.js"}
+doctype_js = {
+              # Stock Transactions
+              "Stock Entry" : "public/js/stock_entry_grid_controls.js",
+              
+              # Sales Documents
+              "Sales Invoice" : "public/js/stock_entry_grid_controls.js",
+              "Sales Order" : "public/js/stock_entry_grid_controls.js",
+              "Delivery Note" : ["public/js/delivery_note.js", "public/js/stock_entry_grid_controls.js"],
+              
+              # Purchase Documents
+              "Purchase Invoice" : "public/js/stock_entry_grid_controls.js",
+              "Purchase Order" : "public/js/stock_entry_grid_controls.js",
+              "Purchase Receipt" : "public/js/stock_entry_grid_controls.js"
+}
 
 
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}

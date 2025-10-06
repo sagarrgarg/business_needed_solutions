@@ -8,8 +8,11 @@
   "general_section",
   "discount_type",
   "column_break_pan",
-  "enforce_pan_uniqueness",
+  "enforce_pan_uniqueness", 
   "enforce_stock_update_or_reference",
+  "section_break_grid_controls",
+  "enable_uom_restriction",
+  "enable_conversion_tags",
   "section_break_submission_control",
   "restrict_submission",
   "submission_restriction_override_roles",
@@ -29,6 +32,25 @@
   "column_break_qfib"
  ],
  "fields": [
+  {
+   "fieldname": "section_break_grid_controls",
+   "fieldtype": "Section Break",
+   "label": "Grid Controls"
+  },
+  {
+   "default": "1",
+   "description": "Enable UOM restriction in Stock Entry grid based on Item's allowed UOMs",
+   "fieldname": "enable_uom_restriction",
+   "fieldtype": "Check",
+   "label": "Enable UOM Restriction"
+  },
+  {
+   "default": "1", 
+   "description": "Show conversion tags/badges in Stock Entry grid",
+   "fieldname": "enable_conversion_tags",
+   "fieldtype": "Check",
+   "label": "Enable Conversion Tags"
+  },
   {
    "default": "Single",
    "fieldname": "discount_type",
