@@ -46,9 +46,13 @@ def validate_expense_account_for_non_stock_items(doc, method: Optional[str] = No
             logger.debug(f"Validation skipped for non-Item doctype: {doc.doctype}")
             return
         
-        # Check if item is a stock item
+        # Skip validation for stock items and fixed assets
         if doc.is_stock_item:
             logger.debug(f"Validation skipped for stock item: {doc.name}")
+            return
+            
+        if doc.is_fixed_asset:
+            logger.debug(f"Validation skipped for fixed asset: {doc.name}")
             return
         
         # Validate expense account configuration
