@@ -4,38 +4,49 @@
  "creation": "2025-04-05 02:44:18.812451",
  "doctype": "DocType",
  "engine": "InnoDB",
- "field_order": [
-  "general_section",
-  "discount_type",
-  "column_break_pan",
-  "enforce_pan_uniqueness", 
-  "enforce_stock_update_or_reference",
-  "section_break_grid_controls",
-  "enable_uom_restriction",
-  "enable_conversion_tags",
-  "section_break_submission_control",
-  "restrict_submission",
-  "submission_restriction_override_roles",
-  "enforce_expense_account_for_non_stock_items",
-  "tab_break_wrem",
-  "print_format",
-  "section_break_vlqx",
-  "rate_incl_tax",
-  "rate_excl_tax",
-  "column_break_giiq",
-  "is_item_amount_tax_incl",
-  "show_item_code",
-  "bns_show_item_barcode",
-  "section_break_qbpg",
-  "secondary_rate_display",
-  "secondary_rate_field",
-  "column_break_qfib"
+"field_order": [
+ "tab_break_general",
+ "general_section",
+ "discount_type",
+ "column_break_pan",
+ "enforce_pan_uniqueness",
+ "enforce_stock_update_or_reference",
+ "enforce_expense_account_for_non_stock_items",
+ 
+ "tab_break_grid",
+ "item_grid_section",
+ "enable_uom_restriction",
+ "enable_conversion_tags",
+ 
+ "tab_break_submission",
+ "submission_section",
+ "restrict_submission",
+ "submission_restriction_override_roles",
+ 
+ "tab_break_print",
+ "print_format_section",
+ "print_format",
+ "section_break_rates",
+ "rate_incl_tax",
+ "rate_excl_tax",
+ "column_break_rates",
+ "is_item_amount_tax_incl",
+ "secondary_rate_display",
+ "secondary_rate_field",
+ "section_break_display",
+ "show_item_code",
+ "bns_show_item_barcode"
  ],
- "fields": [
-  {
-   "fieldname": "section_break_grid_controls",
-   "fieldtype": "Section Break",
-   "label": "Grid Controls"
+"fields": [
+ {
+  "fieldname": "tab_break_general",
+  "fieldtype": "Tab Break",
+  "label": "General Settings"
+ },
+ {
+  "fieldname": "general_section",
+  "fieldtype": "Section Break",
+  "label": "General Controls"
   },
   {
    "default": "1",
@@ -71,13 +82,15 @@
    "default": "0",
    "fieldname": "enforce_pan_uniqueness",
    "fieldtype": "Check",
-   "label": "Enforce PAN Uniqueness"
+   "label": "Enforce PAN Uniqueness",
+   "description": "Ensures PAN numbers are unique across all customers and suppliers to prevent duplicate entries and maintain data integrity."
   },
   {
    "default": "0",
    "fieldname": "enforce_stock_update_or_reference",
    "fieldtype": "Check",
-   "label": "Enforce Stock Update or Reference"
+   "label": "Enforce Stock Update or Reference",
+   "description": "Requires stock items in invoices to either update stock directly or reference a delivery note/purchase receipt for accurate inventory tracking."
   },
   {
    "fieldname": "section_break_submission_control",
@@ -103,12 +116,43 @@
    "default": "0",
    "fieldname": "enforce_expense_account_for_non_stock_items",
    "fieldtype": "Check",
-   "label": "Enforce Expense Account for Non-Stock Items"
+   "label": "Enforce Expense Account for Non-Stock Items",
+   "description": "Requires non-stock items (except fixed assets) to have an expense account configured for proper accounting and tracking."
   },
   {
-   "fieldname": "tab_break_wrem",
-   "fieldtype": "Tab Break",
-   "label": "Print Options"
+   "fieldname": "tab_break_grid",
+  "fieldtype": "Tab Break",
+  "label": "Item Grid Controls"
+ },
+ {
+  "fieldname": "item_grid_section",
+  "fieldtype": "Section Break",
+  "label": "Item Grid Settings"
+ },
+ {
+  "fieldname": "tab_break_submission",
+  "fieldtype": "Tab Break",
+  "label": "Document Submission"
+ },
+ {
+  "fieldname": "submission_section",
+  "fieldtype": "Section Break",
+  "label": "Submission Controls"
+ },
+ {
+  "fieldname": "tab_break_print",
+  "fieldtype": "Tab Break",
+  "label": "Print Settings"
+ },
+ {
+  "fieldname": "print_format_section",
+  "fieldtype": "Section Break",
+  "label": "Print Format Options"
+ },
+ {
+  "fieldname": "section_break_display",
+  "fieldtype": "Section Break",
+  "label": "Item Display Options"
   },
   {
    "default": "1",

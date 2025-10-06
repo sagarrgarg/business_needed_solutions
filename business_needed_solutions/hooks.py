@@ -50,17 +50,17 @@ app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js",
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 doctype_js = {
               # Stock Transactions
-              "Stock Entry" : "public/js/stock_entry_grid_controls.js",
+              "Stock Entry" : "public/js/doctype_item_grid_controls.js",
               
               # Sales Documents
-              "Sales Invoice" : "public/js/stock_entry_grid_controls.js",
-              "Sales Order" : "public/js/stock_entry_grid_controls.js",
-              "Delivery Note" : ["public/js/delivery_note.js", "public/js/stock_entry_grid_controls.js"],
+              "Sales Invoice" : "public/js/doctype_item_grid_controls.js",
+              "Sales Order" : "public/js/doctype_item_grid_controls.js",
+              "Delivery Note" : ["public/js/delivery_note.js", "public/js/doctype_item_grid_controls.js"],
               
               # Purchase Documents
-              "Purchase Invoice" : "public/js/stock_entry_grid_controls.js",
-              "Purchase Order" : "public/js/stock_entry_grid_controls.js",
-              "Purchase Receipt" : "public/js/stock_entry_grid_controls.js"
+              "Purchase Invoice" : "public/js/doctype_item_grid_controls.js",
+              "Purchase Order" : "public/js/doctype_item_grid_controls.js",
+              "Purchase Receipt" : "public/js/doctype_item_grid_controls.js"
 }
 
 
