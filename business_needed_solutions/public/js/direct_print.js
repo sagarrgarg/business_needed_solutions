@@ -343,10 +343,9 @@ business_needed_solutions.DirectPrint = class DirectPrint {
                 "Triplicate for Supplier": "4"
             };
             
+            // Always use selectedOption if provided, otherwise default to "1"
             if (selectedOption) {
-                copyValue = copyMap[selectedOption];
-            } else if (frm.doc.invoice_copy) {
-                copyValue = copyMap[frm.doc.invoice_copy] || "1";
+                copyValue = copyMap[selectedOption] || "1";
             }
         }
 
@@ -371,9 +370,11 @@ business_needed_solutions.DirectPrint = class DirectPrint {
         // Convert parameters to URLSearchParams
         const params = new URLSearchParams(baseParams);
 
-        // Build the final URL
+        // Build the final URL with proper method
         const url = `/api/method/frappe.utils.print_format.download_pdf?${params.toString()}`;
-        return frappe.urllib.get_full_url(url);
+        
+        // Return the full URL with proper method
+        return url;
     }
 
     /**
@@ -382,7 +383,16 @@ business_needed_solutions.DirectPrint = class DirectPrint {
      * @param {string} pdf_url - The PDF URL
      */
     _open_print_window(pdf_url) {
-        const printWindow = window.open(pdf_url);
+        // Use frappe.urllib.get_full_url to ensure proper URL formatting
+        const full_url = frappe.urllib.get_full_url(pdf_url);
+        
+        // Open in new window with specific parameters for better browser compatibility
+        const printWindow = window.open(
+            full_url,
+            '_blank',
+            'height=600,width=800,location=no,menubar=no,status=no,titlebar=no,toolbar=no'
+        );
+        
         if (printWindow) {
             printWindow.addEventListener('load', () => printWindow.print());
         } else {
