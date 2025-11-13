@@ -127,7 +127,10 @@ def execute(filters=None):
 		if party:
 			secondary_dict[party] = row
 
-	# 3. Gather Party Link information:
+	# 3. Identify common parties (appear in both AR and AP)
+	common_parties = set(main_dict.keys()) & set(secondary_dict.keys())
+
+	# 4. Gather Party Link information:
 	#    - primary_map: maps primary_party -> [secondary_party1, ...]
 	#    - skip_set: all secondary_party, to be skipped entirely.
 	party_links = frappe.get_all(
@@ -148,53 +151,113 @@ def execute(filters=None):
 
 		skip_set.add(secondary)
 
-	# 4. Decide which fields/columns we want to adjust by (R - P).
-	#    This includes 'outstanding', ageing columns, and total_due.
-	#    Add more fields if needed (e.g., future_amount).
-	# columns_to_adjust = ["outstanding", "total_due"]
-	# # Example: if you know your age ranges are range0..range4, include those:
-	# for i in range(5):
-	# 	columns_to_adjust.append(f"range{i}")
-
+	# 5. Get currency fields for adjustments
 	currency_fields = []
-
 	for col in main_columns:
-		# if the column is meant to hold currency values
 		if col.get("fieldtype") == "Currency":
-			# store the fieldname for easy reference
 			currency_fields.append(col["fieldname"])
 
-	# 5. Build the final data. For each party in main_dict:
-	#    - Skip if it appears as a secondary_party.
-	#    - If it appears in primary_map, subtract the corresponding secondary amounts.
+	# 6. Build the final data with new logic:
+	#    - For common parties: categorize by net balance (debit -> Receivable, credit -> Payable)
+	#    - For Party Links: still apply netting but respect net balance categorization
 	final_data = []
+	processed_common_parties = set()
+	
 	for party, row in main_dict.items():
-		if party in skip_set:
-			# This means the party is listed as a secondary_party somewhere => skip it
-			continue
+		# Check if this party is a common party (both Customer and Supplier)
+		is_common_party = party in common_parties
+		
+		if is_common_party:
+			# Calculate net balance: AR outstanding - AP outstanding
+			ar_outstanding = flt(row.get("outstanding", 0.0))
+			ap_outstanding = flt(secondary_dict[party].get("outstanding", 0.0))
+			net_balance = ar_outstanding - ap_outstanding
+			
+			# Only show in Receivable if net balance is positive (debit)
+			if net_balance <= 0:
+				processed_common_parties.add(party)
+				continue  # Skip this party, it will appear in Payable report
+			
+			# Net balance is positive, show in Receivable
+			# Make a copy so we don't overwrite main_dict
+			updated_row = row.copy()
+			
+			# Subtract AP amounts from AR amounts for all currency fields
+			sec_row = secondary_dict[party]
+			updated_row["secondary_party_type"] = sec_row["party_type"]
+			updated_row["secondary_party"] = sec_row["party"]
+			updated_row["is_common_party"] = True
+			
+			for fieldname in currency_fields:
+				updated_row[fieldname] = (
+					flt(updated_row.get(fieldname, 0.0)) 
+					- flt(sec_row.get(fieldname, 0.0))
+				)
+			
+			processed_common_parties.add(party)
+		else:
+			# Not a common party, apply existing Party Link logic
+			# Make a copy so we don't overwrite main_dict
+			updated_row = row.copy()
+			
+			# Check if party is a secondary party in Party Link
+			if party in skip_set:
+				# Secondary party: find its primary party and net against it
+				# Find the primary party for this secondary
+				primary_party_for_secondary = None
+				for primary_party, secondary_list in primary_map.items():
+					if party in secondary_list:
+						primary_party_for_secondary = primary_party
+						break
+				
+				if primary_party_for_secondary:
+					# Check if primary party exists in main_dict (same report type)
+					has_primary_in_report = primary_party_for_secondary in main_dict
+					
+					if has_primary_in_report:
+						# Primary party is in this report, skip secondary (it will be netted into primary)
+						continue
+					else:
+						# Primary party is not in this report, but check if it has opposite side outstanding
+						# For Receivable: secondary is Customer, primary is Supplier
+						# Check if primary Supplier has AP outstanding in secondary_dict
+						if primary_party_for_secondary in secondary_dict:
+							primary_row = secondary_dict[primary_party_for_secondary]
+							updated_row["secondary_party_type"] = primary_row["party_type"]
+							updated_row["secondary_party"] = primary_party_for_secondary
+							# Net AR - AP for all currency fields
+							for fieldname in currency_fields:
+								updated_row[fieldname] = (
+									flt(updated_row.get(fieldname, 0.0)) 
+									- flt(primary_row.get(fieldname, 0.0))
+								)
 
-		# Make a copy so we don't overwrite main_dict
-		updated_row = row.copy()
+			# For primary parties: net against their secondary parties
+			if party in primary_map:
+				for secondary_party in primary_map[party]:
+					# Skip if secondary party is already processed as common party
+					if secondary_party in processed_common_parties:
+						continue
+					
+					# If the secondary party has Payable amounts in secondary_dict
+					if secondary_party in secondary_dict:
+						sec_row = secondary_dict[secondary_party]
+						updated_row["secondary_party_type"] = sec_row["party_type"]
+						updated_row["secondary_party"] = sec_row["party"]
+						for fieldname in currency_fields:
+							updated_row[fieldname] = (
+								flt(updated_row.get(fieldname, 0.0)) 
+								- flt(sec_row.get(fieldname, 0.0))
+							)
+		
+		# Only add if outstanding is positive after adjustments
+		if flt(updated_row.get("outstanding", 0.0)) > 0:
+			party_name = updated_row.get("party_name") or party
+			gl_url = f"/app/query-report/Party%20GL?company={quote(company)}&from_date={quote(str(from_date))}&to_date={quote(str(to_date))}&account=undefined&party=%5B%22{quote(party)}%22%5D&party_name={quote(party_name)}&group_by=Group+by+Voucher+%28Consolidated%29&project=undefined&include_dimensions=1&include_default_book_entries=1"
+			button_html = f'<a href="{gl_url}" target="_blank" class="btn btn-xs btn-default">GL: {party_name}</a>'
 
-		# For each linked secondary party, subtract the relevant columns
-		if party in primary_map:
-			for secondary_party in primary_map[party]:
-				# If the secondary party has Payable amounts in secondary_dict
-				if secondary_party in secondary_dict:
-					sec_row = secondary_dict[secondary_party]
-					updated_row["secondary_party_type"] = sec_row["party_type"]
-					updated_row["secondary_party"] = sec_row["party"]
-					for fieldname in currency_fields:
-						updated_row[fieldname] = (
-							flt(updated_row.get(fieldname, 0.0)) 
-							- flt(sec_row.get(fieldname, 0.0))
-						)
-		party_name = updated_row.get("party_name") or party
-		gl_url = f"/app/query-report/Party%20GL?company={quote(company)}&from_date={quote(str(from_date))}&to_date={quote(str(to_date))}&account=undefined&party=%5B%22{quote(party)}%22%5D&party_name={quote(party_name)}&group_by=Group+by+Voucher+%28Consolidated%29&project=undefined&include_dimensions=1&include_default_book_entries=1"
-		button_html = f'<a href="{gl_url}" target="_blank" class="btn btn-xs btn-default">GL: {party_name}</a>'
-
-		updated_row["party_gl_link"] = button_html
-		final_data.append(updated_row)
+			updated_row["party_gl_link"] = button_html
+			final_data.append(updated_row)
 
 	main_columns.append(
 		{
