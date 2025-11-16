@@ -319,12 +319,19 @@ def group_by_item(entries, item_details, price_list_rates, filters, company_curr
 			# Add "% Less" column when group_by = Item
 			if filters.get("group_by") == "Item":
 				row.append("")  # Empty for "% Less" - user will fill this
-				# Calculate Expected Amount as base value (without % Less discount)
-				# User can add formula in Excel: =IF(OR(ISBLANK(J2),J2=0),I2*E2,I2*E2*(1-J2))
+				# Add Excel formula for Expected Amount: Expected Price List Rate × Total Qty × (1 - % Less)
 				# Column positions: I=Expected Price List Rate, E=Total Qty, J=% Less, K=Expected Amount
-				# For now, show base calculation. User can add formula manually in Excel if needed
-				base_expected_amount = item_data["price_list_rate"] * item_data["stock_qty"] if item_data["price_list_rate"] else None
-				row.append(base_expected_amount)
+				# Row number calculation: idx + 2 (idx starts at 0, +1 for header, +1 for 1-based Excel)
+				# Note: If filters are included in export, row numbers will be offset, but Excel will still work
+				row_num = idx + 2
+				# Formula: If % Less is blank or 0, use base calculation, else apply discount
+				# Using ISBLANK and =0 check for better compatibility
+				if item_data["price_list_rate"]:
+					# Create formula as string - openpyxl will recognize strings starting with "=" as formulas
+					expected_amount_formula = f"=IF(OR(ISBLANK(J{row_num}),J{row_num}=0),I{row_num}*E{row_num},I{row_num}*E{row_num}*(1-J{row_num}))"
+					row.append(expected_amount_formula)
+				else:
+					row.append(None)
 			else:
 				row.append(expected_amount)
 		
