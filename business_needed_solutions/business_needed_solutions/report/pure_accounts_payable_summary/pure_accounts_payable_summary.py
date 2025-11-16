@@ -41,6 +41,7 @@ def execute(filters=None):
 	secondary_columns, secondary_data = AccountsReceivablePayableSummary(filters).run(secondary_args)
 
 	# Add city column if add_supplier_cities is checked
+	supplier_cities = {}
 	if filters.get("add_supplier_cities"):
 		main_columns.append({
 			"label": _("City"),
@@ -49,14 +50,16 @@ def execute(filters=None):
 			"width": 120
 		})
 		
-		# Get supplier cities
-		supplier_cities = {}
-		supplier_list = [d.get("party") for d in main_data if d.get("party_type") == "Supplier"]
-		if supplier_list:
+		# Get supplier cities - include all parties that might appear (including common parties)
+		# First, get all parties from main_data
+		all_parties = [d.get("party") for d in main_data if d.get("party")]
+		
+		# Check which of these exist as Supplier (for common parties)
+		if all_parties:
 			supplier_addresses = frappe.get_all(
 				"Supplier",
 				fields=["name", "supplier_primary_address"],
-				filters={"name": ["in", supplier_list]}
+				filters={"name": ["in", all_parties]}
 			)
 			
 			address_list = [d.supplier_primary_address for d in supplier_addresses if d.supplier_primary_address]
@@ -72,9 +75,9 @@ def execute(filters=None):
 					if supplier.supplier_primary_address:
 						supplier_cities[supplier.name] = address_city_map.get(supplier.supplier_primary_address, "")
 			
-			# Add city to main_data
+			# Add city to main_data for suppliers
 			for row in main_data:
-				if row.get("party_type") == "Supplier":
+				if row.get("party_type") == "Supplier" or row.get("party") in supplier_cities:
 					row["city"] = supplier_cities.get(row.get("party"), "")
 
 	# 2. Convert main_data and secondary_data to dictionaries keyed by 'party'.
@@ -215,6 +218,10 @@ def execute(filters=None):
 		
 		# Only add if outstanding is positive after adjustments
 		if flt(updated_row.get("outstanding", 0.0)) > 0:
+			# For common parties in Payable report, ensure supplier city is set
+			if filters.get("add_supplier_cities") and is_common_party:
+				updated_row["city"] = supplier_cities.get(party, updated_row.get("city", ""))
+			
 			party_name = updated_row.get("party_name") or party
 			gl_url = f"/app/query-report/Party%20GL?company={quote(company)}&from_date={quote(str(from_date))}&to_date={quote(str(to_date))}&account=undefined&party=%5B%22{quote(party)}%22%5D&party_name={quote(party_name)}&group_by=Group+by+Voucher+%28Consolidated%29&project=undefined&include_dimensions=1&include_default_book_entries=1"
 			button_html = f'<a href="{gl_url}" target="_blank" class="btn btn-xs btn-default">GL: {party_name}</a>'
