@@ -1,4 +1,41 @@
+.print-format {
+    margin-top: 37mm;
+    margin-left: 2mm;
+    margin-right: 2mm;
+}
+
+.print-heading {
+    border-bottom: 1px solid #000;
+    margin-bottom: -5mm;
+    color: #000;
+    font-weight: bold;
+}
+
+h6 {
+    font-weight: bold;
+    margin-top: 0px;
+    margin-bottom: 0px;
+}
+
+.no-border td {
+    border: none;
+    padding: 2px 4px;
+}
+
 #header-html {
     position: static;
     top: 0;
+}
+
+.page-footer-1 {
+    content: counter(page);
+    border-top: 2px solid black;
+    margin-top: -35mm !important;
+    margin-bottom: -5mm !important;
+}
+
+#footer-html {
+    position: fixed;
+    bottom: 0;
+    width: 100%;
 }

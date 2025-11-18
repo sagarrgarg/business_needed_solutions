@@ -1,30 +1,44 @@
-<h2 class="text-center">{%= __("Statement of Account") %}</h2>
-
-<h3 class="text-center">
-	{%= filters.company %}
-</h3>
-<h4 class="text-center">
-	{% if (filters.party_name) { %}
-		{%= filters.party_name %}
-	{% } else if (filters.party && filters.party.length) { %}
-		{%= filters.party %}
-	{% } else if (filters.account) { %}
-		{%= filters.account %}
-	{% } %}
-</h4>
-
-<h6 class="text-center">
-	{% if (filters.tax_id) { %}
-	{%= __("Tax Id: ")%}	{%= filters.tax_id %}
-	{% } %}
-</h6>
-
-<h5 class="text-center">
-	{%= frappe.datetime.str_to_user(filters.from_date) %}
-	{%= __("to") %}
-	{%= frappe.datetime.str_to_user(filters.to_date) %}
-</h5>
-<hr>
+<div id="header-html">
+	<div class="row print-heading" style="line-height:1.1;padding:10px">
+		<div class="col-xs-3 column-break">
+			<div id="company-logo-container"></div>
+		</div>
+		<div class="col-xs-6 column-break text-center">
+			<h3 style="margin-bottom:5px; margin-top:10px;"><b>{%= filters.company %}</b></h3>
+			<div id="company-previously-known-as" style="font-size:0.85em; margin-bottom:10px;"></div>
+			<div style="margin-top:15px;">
+				<h4 style="margin-bottom:5px;">
+					{% if (filters.party_name) { %}
+						<b>{%= filters.party_name %}</b>
+					{% } else if (filters.party && filters.party.length) { %}
+						<b>{%= filters.party[0] %}</b>
+					{% } else if (filters.account) { %}
+						<b>{%= filters.account %}</b>
+					{% } %}
+				</h4>
+				{% if (filters.tax_id) { %}
+					<div style="font-size:0.9em; margin-bottom:5px;">{%= __("Tax Id: ")%}{%= filters.tax_id %}</div>
+				{% } %}
+				<div id="party-address-container" style="font-size:0.85rem; text-align:left; display:inline-block;"></div>
+			</div>
+		</div>
+		<div class="col-xs-3 column-break text-right">
+			<h2 style="margin-top:5mm; margin-bottom:15px;"><b>{%= __("Party Ledger") %}</b></h2>
+			<div class="invoice-meta">
+				<table class="table-condensed no-border" style="width:100%; font-size:0.9em; text-align:left;">
+					<tr>
+						<td><b>{%= __("From Date:") %}</b></td>
+						<td>{%= frappe.datetime.str_to_user(filters.from_date) %}</td>
+					</tr>
+					<tr>
+						<td><b>{%= __("To Date:") %}</b></td>
+						<td><b>{%= frappe.datetime.str_to_user(filters.to_date) %}</b></td>
+					</tr>
+				</table>
+			</div>
+		</div>
+	</div>
+</div>
 <table class="table table-bordered">
 	<thead>
 		<tr>
@@ -86,3 +100,9 @@
 	</tbody>
 </table>
 <p class="text-right text-muted">Printed On {%= frappe.datetime.str_to_user(frappe.datetime.get_datetime_as_string()) %}</p>
+
+<div id="footer-html">
+	<div class="text-center small page-footer-1">
+		{%= __("Page {0} of {1}", ['<span class="page"></span>', '<span class="topage"></span>']) %}<br>This is a computer generated document and does not require a signature.
+	</div>
+</div>

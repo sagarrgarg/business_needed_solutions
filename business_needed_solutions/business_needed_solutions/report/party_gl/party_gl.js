@@ -245,6 +245,95 @@ frappe.query_reports["Party GL"] = {
 			fieldtype: "Check",
 		},
 	],
+	onload: function(report) {
+		// Load company and party details for header
+		report.on("after_render", function() {
+			loadHeaderDetails(report);
+		});
+		// Also load immediately
+		setTimeout(function() {
+			loadHeaderDetails(report);
+		}, 500);
+	},
 };
+
+function loadHeaderDetails(report) {
+	var company = report.get_filter_value("company");
+	var party = report.get_filter_value("party");
+	
+	if (company) {
+		frappe.call({
+			method: "frappe.client.get",
+			args: {
+				doctype: "Company",
+				name: company,
+				fields: ["logo_for_printing", "bns_previously_known_as"]
+			},
+			callback: function(r) {
+				if (r.message) {
+					var company_data = r.message;
+					
+					// Load logo
+					var logoContainer = document.getElementById("company-logo-container");
+					if (logoContainer && company_data.logo_for_printing) {
+						logoContainer.innerHTML = '<div><img height="125px" width="150px" src="' + company_data.logo_for_printing + '"></div>';
+					}
+					
+					// Load previously known as
+					var previouslyKnownAs = document.getElementById("company-previously-known-as");
+					if (previouslyKnownAs && company_data.bns_previously_known_as) {
+						previouslyKnownAs.innerHTML = "Previously Known As: " + company_data.bns_previously_known_as;
+					}
+				}
+			}
+		});
+	}
+	
+	if (party && party.length > 0) {
+		var party_name = party[0];
+		
+		// Determine party type
+		frappe.db.exists("Customer", party_name).then(function(is_customer) {
+			var party_type = is_customer ? "Customer" : "Supplier";
+			
+			// Get primary address
+			frappe.call({
+				method: "frappe.contacts.doctype.address.address.get_default_address",
+				args: {
+					doctype: party_type,
+					name: party_name
+				},
+				callback: function(addr_r) {
+					if (addr_r.message) {
+						frappe.call({
+							method: "frappe.client.get",
+							args: {
+								doctype: "Address",
+								name: addr_r.message,
+								fields: ["address_line1", "address_line2", "city", "state", "pincode", "country"]
+							},
+							callback: function(addr_detail_r) {
+								if (addr_detail_r.message) {
+									var addr = addr_detail_r.message;
+									var addressContainer = document.getElementById("party-address-container");
+									if (addressContainer && addr.address_line1) {
+										var html = '<p style="margin-bottom:2px;">' + addr.address_line1;
+										if (addr.address_line2) {
+											html += ' ' + addr.address_line2 + '<br>';
+										} else {
+											html += '<br>';
+										}
+										html += addr.city + ', ' + addr.state + ', ' + addr.country + ': ' + addr.pincode + '</p>';
+										addressContainer.innerHTML = html;
+									}
+								}
+							}
+						});
+					}
+				}
+			});
+		});
+	}
+}
 
 erpnext.utils.add_dimensions("Party GL", 15);
