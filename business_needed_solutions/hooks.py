@@ -67,7 +67,9 @@ doctype_js = {
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 doctype_list_js = {
     "Delivery Note" : "public/js/delivery_note_list.js",
-    "Purchase Receipt" : "public/js/purchase_receipt_list.js"
+    "Purchase Receipt" : "public/js/purchase_receipt_list.js",
+    "Sales Invoice" : "public/js/sales_invoice_list.js",
+    "Purchase Invoice" : "public/js/purchase_invoice_list.js"
 }
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -186,7 +188,8 @@ doc_events = {
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.business_needed_solutions.utils.update_delivery_note_status_for_bns_internal"
-        ]
+        ],
+        "on_cancel": "business_needed_solutions.business_needed_solutions.utils.validate_delivery_note_cancellation"
     },
     "Purchase Receipt": {
         "on_submit": [
@@ -198,11 +201,17 @@ doc_events = {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Sales Invoice": {
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
+        "on_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
+            "business_needed_solutions.business_needed_solutions.utils.update_sales_invoice_status_for_bns_internal"
+        ],
         "validate": "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference"
     },
     "Purchase Invoice": {
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
+        "on_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
+            "business_needed_solutions.business_needed_solutions.utils.update_purchase_invoice_status_for_bns_internal"
+        ],
         "validate": "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference"
     },
     "Journal Entry": {

@@ -63,5 +63,77 @@ frappe.ui.form.on('Sales Invoice', {
                 d.show();
             }, __('e-Waybill'));
         }
+        
+        // BNS Internal Purchase Invoice/Receipt buttons
+        // Show if: status is "BNS Internally Transferred" and docstatus == 1
+        if (
+            frm.doc.status === "BNS Internally Transferred" &&
+            frm.doc.docstatus == 1
+        ) {
+            // Always show Purchase Invoice button if status is BNS Internally Transferred
+            // (assume PI needs to be created when SI is generated)
+            frm.add_custom_button(
+                __("BNS Internal Purchase Invoice"),
+                function() {
+                    frappe.model.open_mapped_doc({
+                        method: "business_needed_solutions.business_needed_solutions.utils.make_bns_internal_purchase_invoice",
+                        frm: frm,
+                    });
+                },
+                __("Create")
+            );
+            
+            // Check if Purchase Receipt button should be shown
+            // Show if: any item maintains stock (is_stock_item) OR if SI is made from Delivery Note
+            if (frm.doc.items && frm.doc.items.length > 0) {
+                // Check if SI is made from Delivery Note (items have delivery_note reference)
+                let has_dn_reference = frm.doc.items.some(item => item.delivery_note);
+                
+                if (has_dn_reference) {
+                    // Show PR button immediately if DN reference exists
+                    frm.add_custom_button(
+                        __("BNS Internal Purchase Receipt"),
+                        function() {
+                            frappe.model.open_mapped_doc({
+                                method: "business_needed_solutions.business_needed_solutions.utils.make_bns_internal_purchase_receipt_from_si",
+                                frm: frm,
+                            });
+                        },
+                        __("Create")
+                    );
+                    frm.page.set_inner_btn_group_as_primary(__("Create"));
+                } else {
+                    // Check if any item maintains stock by fetching from Item doctype
+                    let item_codes = frm.doc.items
+                        .filter(item => item.item_code)
+                        .map(item => item.item_code);
+                    
+                    if (item_codes.length > 0) {
+                        frappe.db.get_list("Item", {
+                            filters: {
+                                name: ["in", item_codes],
+                                is_stock_item: 1
+                            },
+                            fields: ["name"],
+                            limit: 1
+                        }).then(r => {
+                            if (r && r.length > 0) {
+                                frm.add_custom_button(
+                                    __("BNS Internal Purchase Receipt"),
+                                    function() {
+                                        frappe.model.open_mapped_doc({
+                                            method: "business_needed_solutions.business_needed_solutions.utils.make_bns_internal_purchase_receipt_from_si",
+                                            frm: frm,
+                                        });
+                                    },
+                                    __("Create")
+                                );
+                                frm.page.set_inner_btn_group_as_primary(__("Create"));
+                            }
+                        });
+                    }
+                }
+            }
+        }
     }
 });
