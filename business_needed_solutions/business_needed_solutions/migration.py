@@ -28,6 +28,9 @@ def after_migrate():
         # Add "BNS Internally Transferred" to status field options
         add_bns_status_option()
         
+        # Add linked documents for BNS Internal Transfers
+        add_bns_internal_transfer_links()
+        
         # Apply existing BNS Settings to ensure all property setters are up to date
         if frappe.db.exists("BNS Settings"):
             bns_settings = frappe.get_doc("BNS Settings")
@@ -114,3 +117,69 @@ def add_bns_status_option():
             logger.error(f"Error adding BNS status option for {doctype}: {str(e)}")
             frappe.db.rollback()
             # Continue with other doctypes even if one fails
+
+
+def add_bns_internal_transfer_links():
+    """
+    Add linked documents for BNS Internal Transfers:
+    - Sales Invoice -> Purchase Invoice (via bns_inter_company_reference)
+    - Purchase Invoice -> Sales Invoice (via bns_inter_company_reference)
+    
+    This creates DocType Link records so that linked documents appear
+    in the "Linked Documents" section of each doctype form.
+    """
+    links_to_create = [
+        {
+            "parent": "Sales Invoice",
+            "link_doctype": "Purchase Invoice",
+            "link_fieldname": "bns_inter_company_reference",
+            "group": "BNS Internal Transfer",
+            "custom": 1
+        },
+        {
+            "parent": "Purchase Invoice",
+            "link_doctype": "Sales Invoice",
+            "link_fieldname": "bns_inter_company_reference",
+            "group": "BNS Internal Transfer",
+            "custom": 1
+        }
+    ]
+    
+    for link_config in links_to_create:
+        try:
+            parent = link_config["parent"]
+            link_doctype = link_config["link_doctype"]
+            link_fieldname = link_config["link_fieldname"]
+            group = link_config.get("group", "")
+            
+            # Check if link already exists
+            existing_link = frappe.db.exists("DocType Link", {
+                "parent": parent,
+                "link_doctype": link_doctype,
+                "link_fieldname": link_fieldname,
+                "custom": 1
+            })
+            
+            if existing_link:
+                logger.info(f"Link from {parent} to {link_doctype} via {link_fieldname} already exists")
+                continue
+            
+            # Create new DocType Link
+            link_doc = frappe.new_doc("DocType Link")
+            link_doc.update({
+                "parent": parent,
+                "parenttype": "DocType",
+                "parentfield": "links",
+                "link_doctype": link_doctype,
+                "link_fieldname": link_fieldname,
+                "group": group,
+                "custom": 1
+            })
+            link_doc.insert(ignore_permissions=True)
+            frappe.db.commit()
+            logger.info(f"Created link from {parent} to {link_doctype} via {link_fieldname}")
+            
+        except Exception as e:
+            logger.error(f"Error creating link from {link_config.get('parent')} to {link_config.get('link_doctype')}: {str(e)}")
+            frappe.db.rollback()
+            # Continue with other links even if one fails

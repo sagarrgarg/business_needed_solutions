@@ -1,5 +1,134 @@
 frappe.ui.form.on('Sales Invoice', {
     refresh: function(frm) {
+        // Show button to convert to BNS Internal if customer is BNS internal but SI is not marked
+        if (frm.doc.docstatus == 1) {
+            frappe.db.get_value("Customer", frm.doc.customer, "is_bns_internal_customer", (r) => {
+                if (r && r.is_bns_internal_customer && !frm.doc.is_bns_internal_customer) {
+                    frm.add_custom_button(__('Convert to BNS Internal'), function() {
+                        // Check if PI exists with supplier_invoice_number matching SI name
+                        frappe.call({
+                            method: 'business_needed_solutions.business_needed_solutions.utils.get_purchase_invoice_by_supplier_invoice',
+                            args: {
+                                sales_invoice: frm.doc.name
+                            },
+                            callback: function(pi_result) {
+                                let pi_details = null;
+                                let default_pi = null;
+                                
+                                if (pi_result.message && pi_result.message.found) {
+                                    pi_details = pi_result.message;
+                                    default_pi = pi_details.name;
+                                }
+                                
+                                const fields = [
+                                    {
+                                        label: __('Purchase Invoice'),
+                                        fieldname: 'purchase_invoice',
+                                        fieldtype: 'Link',
+                                        options: 'Purchase Invoice',
+                                        reqd: 0,
+                                        default: default_pi,
+                                        description: __('Optional: Link existing Purchase Invoice')
+                                    }
+                                ];
+                                
+                                // Add details section if PI found
+                                if (pi_details) {
+                                    fields.push({
+                                        fieldtype: 'Section Break',
+                                        label: __('Purchase Invoice Details')
+                                    });
+                                    fields.push({
+                                        fieldtype: 'HTML',
+                                        options: `
+                                            <div style="padding: 10px; background: #f0f0f0; border-radius: 4px;">
+                                                <strong>${__('Found Purchase Invoice')}:</strong> ${pi_details.name}<br>
+                                                <strong>${__('Supplier')}:</strong> ${pi_details.supplier || '-'}<br>
+                                                <strong>${__('Posting Date')}:</strong> ${pi_details.posting_date || '-'}<br>
+                                                <strong>${__('Grand Total')}:</strong> ${frappe.format(pi_details.grand_total || 0, {fieldtype: 'Currency'})}<br>
+                                                <strong>${__('Status')}:</strong> ${pi_details.status || '-'}
+                                            </div>
+                                        `
+                                    });
+                                }
+                                
+                                const d = new frappe.ui.Dialog({
+                                    title: __('Convert to BNS Internally Transferred'),
+                                    fields: fields,
+                                    primary_action_label: __('Convert'),
+                                    primary_action(values) {
+                                        if (values.purchase_invoice) {
+                                            // Validate items match before converting
+                                            frappe.call({
+                                                method: 'business_needed_solutions.business_needed_solutions.utils.validate_si_pi_items_match',
+                                                args: {
+                                                    sales_invoice: frm.doc.name,
+                                                    purchase_invoice: values.purchase_invoice
+                                                },
+                                                callback: function(validation_result) {
+                                                    if (validation_result.message && !validation_result.message.match) {
+                                                        frappe.msgprint({
+                                                            title: __('Validation Failed'),
+                                                            message: validation_result.message.message || __('Items and quantities do not match'),
+                                                            indicator: 'red'
+                                                        });
+                                                        return;
+                                                    }
+                                                    
+                                                    // Proceed with conversion
+                                                    frappe.call({
+                                                        method: 'business_needed_solutions.business_needed_solutions.utils.convert_sales_invoice_to_bns_internal',
+                                                        args: {
+                                                            sales_invoice: frm.doc.name,
+                                                            purchase_invoice: values.purchase_invoice
+                                                        },
+                                                        freeze: true,
+                                                        freeze_message: __('Converting...'),
+                                                        callback: function(r) {
+                                                            if (!r.exc) {
+                                                                frappe.show_alert({
+                                                                    message: r.message.message || __('Converted successfully'),
+                                                                    indicator: 'green'
+                                                                });
+                                                                frm.reload_doc();
+                                                                d.hide();
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            });
+                                        } else {
+                                            // No PI provided, just convert SI
+                                            frappe.call({
+                                                method: 'business_needed_solutions.business_needed_solutions.utils.convert_sales_invoice_to_bns_internal',
+                                                args: {
+                                                    sales_invoice: frm.doc.name,
+                                                    purchase_invoice: null
+                                                },
+                                                freeze: true,
+                                                freeze_message: __('Converting...'),
+                                                callback: function(r) {
+                                                    if (!r.exc) {
+                                                        frappe.show_alert({
+                                                            message: r.message.message || __('Converted successfully'),
+                                                            indicator: 'green'
+                                                        });
+                                                        frm.reload_doc();
+                                                        d.hide();
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                });
+                                d.show();
+                            }
+                        });
+                    }, __('Actions'));
+                }
+            });
+        }
+        
         // Only show button if the e-Waybill status is 'Pending' or 'Not Applicable'
         if (["Pending", "Not Applicable"].includes(frm.doc.e_waybill_status)) {
             frm.add_custom_button(__('Update Vehicle/Transporter Info'), function() {

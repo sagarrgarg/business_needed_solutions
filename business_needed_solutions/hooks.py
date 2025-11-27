@@ -26,7 +26,9 @@ app_license = "Commercial"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
-app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js",
+app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=14",
+                  "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=1",
+                  "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=1",
                   "/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=3",
                   "/assets/business_needed_solutions/js/direct_print.js?v=4",
                   "/assets/business_needed_solutions/js/item.js",
