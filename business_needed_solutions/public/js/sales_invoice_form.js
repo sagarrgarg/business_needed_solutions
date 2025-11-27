@@ -1,9 +1,15 @@
 frappe.ui.form.on('Sales Invoice', {
     refresh: function(frm) {
         // Show button to convert to BNS Internal if customer is BNS internal but SI is not marked
+        // OR if SI is marked but status is not "BNS Internally Transferred"
         if (frm.doc.docstatus == 1) {
             frappe.db.get_value("Customer", frm.doc.customer, "is_bns_internal_customer", (r) => {
-                if (r && r.is_bns_internal_customer && !frm.doc.is_bns_internal_customer) {
+                if (r && r.is_bns_internal_customer) {
+                    // Check if SI needs conversion: either flag not set OR flag set but status not updated
+                    const needs_conversion = !frm.doc.is_bns_internal_customer || 
+                                           (frm.doc.is_bns_internal_customer && frm.doc.status !== "BNS Internally Transferred");
+                    
+                    if (needs_conversion) {
                     frm.add_custom_button(__('Convert to BNS Internal'), function() {
                         // Check if PI exists with supplier_invoice_number matching SI name
                         frappe.call({
@@ -125,8 +131,121 @@ frappe.ui.form.on('Sales Invoice', {
                             }
                         });
                     }, __('Actions'));
+                    }
                 }
             });
+        }
+        
+        // Link/Unlink with Purchase Invoice buttons
+        if (frm.doc.docstatus == 1) {
+            if (frm.doc.bns_inter_company_reference) {
+                // Show Unlink button if already linked
+                frm.add_custom_button(__('Unlink Purchase Invoice'), function() {
+                    frappe.confirm(
+                        __('Are you sure you want to unlink this Sales Invoice from Purchase Invoice {0}?', frm.doc.bns_inter_company_reference),
+                        function() {
+                            frappe.call({
+                                method: 'business_needed_solutions.business_needed_solutions.utils.unlink_si_pi',
+                                args: {
+                                    sales_invoice: frm.doc.name
+                                },
+                                freeze: true,
+                                freeze_message: __('Unlinking...'),
+                                callback: function(r) {
+                                    if (!r.exc) {
+                                        frappe.show_alert({
+                                            message: r.message.message || __('Unlinked successfully'),
+                                            indicator: 'green'
+                                        });
+                                        frm.reload_doc();
+                                    }
+                                }
+                            });
+                        }
+                    );
+                }, __('Actions'));
+            } else {
+                // Check if there's a PI with bill_no matching SI name
+                frappe.call({
+                    method: 'business_needed_solutions.business_needed_solutions.utils.get_purchase_invoice_by_supplier_invoice',
+                    args: {
+                        sales_invoice: frm.doc.name
+                    },
+                    callback: function(pi_result) {
+                        // Only show link button if PI found with matching bill_no
+                        if (pi_result.message && pi_result.message.found) {
+                            frm.add_custom_button(__('Link Purchase Invoice'), function() {
+                                const fields = [
+                                    {
+                                        label: __('Purchase Invoice'),
+                                        fieldname: 'purchase_invoice',
+                                        fieldtype: 'Link',
+                                        options: 'Purchase Invoice',
+                                        reqd: 1,
+                                        default: pi_result.message.name,
+                                        get_filters: function() {
+                                            const filters = {
+                                                'docstatus': 1
+                                            };
+                                            // Filter by company match
+                                            if (frm.doc.company) {
+                                                filters['company'] = frm.doc.company;
+                                            }
+                                            // Filter by date: PI posting_date should be >= SI posting_date
+                                            if (frm.doc.posting_date) {
+                                                filters['posting_date'] = ['>=', frm.doc.posting_date];
+                                            }
+                                            // Filter by bill_no matching SI name
+                                            if (frm.doc.name) {
+                                                filters['bill_no'] = frm.doc.name;
+                                            }
+                                            return filters;
+                                        },
+                                        description: __('Purchase Invoice with matching supplier invoice number')
+                                    }
+                                ];
+                                
+                                const d = new frappe.ui.Dialog({
+                                    title: __('Link Purchase Invoice'),
+                                    fields: fields,
+                                    primary_action_label: __('Link'),
+                                    primary_action(values) {
+                                        if (!values.purchase_invoice) {
+                                            frappe.msgprint({
+                                                title: __('Validation Error'),
+                                                message: __('Purchase Invoice is required'),
+                                                indicator: 'red'
+                                            });
+                                            return;
+                                        }
+                                        
+                                        frappe.call({
+                                            method: 'business_needed_solutions.business_needed_solutions.utils.link_si_pi',
+                                            args: {
+                                                sales_invoice: frm.doc.name,
+                                                purchase_invoice: values.purchase_invoice
+                                            },
+                                            freeze: true,
+                                            freeze_message: __('Linking...'),
+                                            callback: function(r) {
+                                                if (!r.exc) {
+                                                    frappe.show_alert({
+                                                        message: r.message.message || __('Linked successfully'),
+                                                        indicator: 'green'
+                                                    });
+                                                    frm.reload_doc();
+                                                    d.hide();
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                                d.show();
+                            }, __('Actions'));
+                        }
+                    }
+                });
+            }
         }
         
         // Only show button if the e-Waybill status is 'Pending' or 'Not Applicable'

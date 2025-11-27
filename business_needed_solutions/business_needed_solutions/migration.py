@@ -31,6 +31,9 @@ def after_migrate():
         # Add linked documents for BNS Internal Transfers
         add_bns_internal_transfer_links()
         
+        # Remove old is_bns_internal_customer field from Purchase Receipt
+        remove_old_pr_internal_customer_field()
+        
         # Apply existing BNS Settings to ensure all property setters are up to date
         if frappe.db.exists("BNS Settings"):
             bns_settings = frappe.get_doc("BNS Settings")
@@ -124,6 +127,8 @@ def add_bns_internal_transfer_links():
     Add linked documents for BNS Internal Transfers:
     - Sales Invoice -> Purchase Invoice (via bns_inter_company_reference)
     - Purchase Invoice -> Sales Invoice (via bns_inter_company_reference)
+    - Delivery Note -> Purchase Receipt (via bns_inter_company_reference)
+    - Purchase Receipt -> Delivery Note (via bns_inter_company_reference)
     
     This creates DocType Link records so that linked documents appear
     in the "Linked Documents" section of each doctype form.
@@ -139,6 +144,20 @@ def add_bns_internal_transfer_links():
         {
             "parent": "Purchase Invoice",
             "link_doctype": "Sales Invoice",
+            "link_fieldname": "bns_inter_company_reference",
+            "group": "BNS Internal Transfer",
+            "custom": 1
+        },
+        {
+            "parent": "Delivery Note",
+            "link_doctype": "Purchase Receipt",
+            "link_fieldname": "bns_inter_company_reference",
+            "group": "BNS Internal Transfer",
+            "custom": 1
+        },
+        {
+            "parent": "Purchase Receipt",
+            "link_doctype": "Delivery Note",
             "link_fieldname": "bns_inter_company_reference",
             "group": "BNS Internal Transfer",
             "custom": 1
@@ -183,3 +202,38 @@ def add_bns_internal_transfer_links():
             logger.error(f"Error creating link from {link_config.get('parent')} to {link_config.get('link_doctype')}: {str(e)}")
             frappe.db.rollback()
             # Continue with other links even if one fails
+
+
+def remove_old_pr_internal_customer_field():
+    """
+    Remove the old is_bns_internal_customer field from Purchase Receipt.
+    
+    This field was renamed to is_bns_internal_supplier, so we need to:
+    1. Delete the old custom field record
+    2. Drop the old column from the database table
+    """
+    try:
+        # Delete the old custom field record
+        old_field_name = "Purchase Receipt-is_bns_internal_customer"
+        if frappe.db.exists("Custom Field", old_field_name):
+            frappe.delete_doc("Custom Field", old_field_name, force=1, ignore_permissions=True)
+            frappe.db.commit()
+            logger.info(f"Deleted old custom field: {old_field_name}")
+        
+        # Drop the old column from the database table if it exists
+        table_name = "tabPurchase Receipt"
+        column_name = "is_bns_internal_customer"
+        
+        # Check if column exists
+        columns = frappe.db.sql(f"SHOW COLUMNS FROM `{table_name}` LIKE '{column_name}'", as_dict=True)
+        if columns:
+            frappe.db.sql(f"ALTER TABLE `{table_name}` DROP COLUMN `{column_name}`")
+            frappe.db.commit()
+            logger.info(f"Dropped column {column_name} from {table_name}")
+        else:
+            logger.info(f"Column {column_name} does not exist in {table_name}, skipping drop")
+            
+    except Exception as e:
+        logger.error(f"Error removing old PR internal customer field: {str(e)}")
+        frappe.db.rollback()
+        # Don't raise - this is not critical if the field doesn't exist

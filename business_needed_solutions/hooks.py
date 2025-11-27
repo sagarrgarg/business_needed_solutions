@@ -26,11 +26,12 @@ app_license = "Commercial"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
-app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=14",
-                  "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=1",
-                  "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=1",
-                  "/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=3",
-                  "/assets/business_needed_solutions/js/direct_print.js?v=4",
+app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=114",
+                  "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=211",
+                  "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=44",
+                  "/assets/business_needed_solutions/js/delivery_note.js?v=130",
+                  "/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=34",
+                  "/assets/business_needed_solutions/js/direct_print.js?v=45",
                   "/assets/business_needed_solutions/js/item.js",
                 ]
 
@@ -57,12 +58,12 @@ doctype_js = {
               # Sales Documents
               "Sales Invoice" : "public/js/doctype_item_grid_controls.js",
               "Sales Order" : "public/js/doctype_item_grid_controls.js",
-              "Delivery Note" : ["public/js/delivery_note.js", "public/js/doctype_item_grid_controls.js"],
+              "Delivery Note" : ["public/js/delivery_note.js?v=130", "public/js/doctype_item_grid_controls.js"],
               
               # Purchase Documents
               "Purchase Invoice" : "public/js/doctype_item_grid_controls.js",
               "Purchase Order" : "public/js/doctype_item_grid_controls.js",
-              "Purchase Receipt" : "public/js/doctype_item_grid_controls.js"
+              "Purchase Receipt" : ["public/js/purchase_receipt_form.js", "public/js/doctype_item_grid_controls.js"]
 }
 
 
@@ -187,6 +188,7 @@ doc_events = {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Delivery Note": {
+        "validate": "business_needed_solutions.business_needed_solutions.utils.validate_bns_internal_delivery_note_return",
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.business_needed_solutions.utils.update_delivery_note_status_for_bns_internal"
@@ -203,11 +205,14 @@ doc_events = {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Sales Invoice": {
+        "validate": [
+            "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference",
+            "business_needed_solutions.business_needed_solutions.utils.validate_bns_internal_customer_return"
+        ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.business_needed_solutions.utils.update_sales_invoice_status_for_bns_internal"
-        ],
-        "validate": "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference"
+        ]
     },
     "Purchase Invoice": {
         "on_submit": [

@@ -1,9 +1,15 @@
 frappe.ui.form.on('Purchase Invoice', {
     refresh: function(frm) {
         // Show button to convert to BNS Internal if supplier is BNS internal but PI is not marked
+        // OR if PI is marked but status is not "BNS Internally Transferred"
         if (frm.doc.docstatus == 1) {
             frappe.db.get_value("Supplier", frm.doc.supplier, "is_bns_internal_supplier", (r) => {
-                if (r && r.is_bns_internal_supplier && !frm.doc.is_bns_internal_supplier) {
+                if (r && r.is_bns_internal_supplier) {
+                    // Check if PI needs conversion: either flag not set OR flag set but status not updated
+                    const needs_conversion = !frm.doc.is_bns_internal_supplier || 
+                                           (frm.doc.is_bns_internal_supplier && frm.doc.status !== "BNS Internally Transferred");
+                    
+                    if (needs_conversion) {
                     frm.add_custom_button(__('Convert to BNS Internal'), function() {
                         // Check if SI exists with name matching PI's bill_no
                         frappe.call({
@@ -125,8 +131,122 @@ frappe.ui.form.on('Purchase Invoice', {
                             }
                         });
                     }, __('Actions'));
+                    }
                 }
             });
+        }
+        
+        // Link/Unlink with Sales Invoice buttons
+        if (frm.doc.docstatus == 1) {
+            if (frm.doc.bns_inter_company_reference) {
+                // Show Unlink button if already linked
+                frm.add_custom_button(__('Unlink Sales Invoice'), function() {
+                    frappe.confirm(
+                        __('Are you sure you want to unlink this Purchase Invoice from Sales Invoice {0}?', frm.doc.bns_inter_company_reference),
+                        function() {
+                            frappe.call({
+                                method: 'business_needed_solutions.business_needed_solutions.utils.unlink_si_pi',
+                                args: {
+                                    purchase_invoice: frm.doc.name
+                                },
+                                freeze: true,
+                                freeze_message: __('Unlinking...'),
+                                callback: function(r) {
+                                    if (!r.exc) {
+                                        frappe.show_alert({
+                                            message: r.message.message || __('Unlinked successfully'),
+                                            indicator: 'green'
+                                        });
+                                        frm.reload_doc();
+                                    }
+                                }
+                            });
+                        }
+                    );
+                }, __('Actions'));
+            } else if (frm.doc.bill_no) {
+                // Only show link button if bill_no exists and matches an SI
+                frappe.call({
+                    method: 'frappe.client.get',
+                    args: {
+                        doctype: 'Sales Invoice',
+                        name: frm.doc.bill_no
+                    },
+                    callback: function(si_result) {
+                        // Only show if SI exists and is submitted
+                        if (!si_result.exc && si_result.message && si_result.message.docstatus == 1) {
+                            frm.add_custom_button(__('Link Sales Invoice'), function() {
+                                const fields = [
+                                    {
+                                        label: __('Sales Invoice'),
+                                        fieldname: 'sales_invoice',
+                                        fieldtype: 'Link',
+                                        options: 'Sales Invoice',
+                                        reqd: 1,
+                                        default: frm.doc.bill_no,
+                                        get_filters: function() {
+                                            const filters = {
+                                                'docstatus': 1
+                                            };
+                                            // Filter by company match
+                                            if (frm.doc.company) {
+                                                filters['company'] = frm.doc.company;
+                                            }
+                                            // Filter by date: SI posting_date should be <= PI posting_date
+                                            if (frm.doc.posting_date) {
+                                                filters['posting_date'] = ['<=', frm.doc.posting_date];
+                                            }
+                                            // Filter by name matching bill_no
+                                            if (frm.doc.bill_no) {
+                                                filters['name'] = frm.doc.bill_no;
+                                            }
+                                            return filters;
+                                        },
+                                        description: __('Sales Invoice matching supplier invoice number')
+                                    }
+                                ];
+                                
+                                const d = new frappe.ui.Dialog({
+                                    title: __('Link Sales Invoice'),
+                                    fields: fields,
+                                    primary_action_label: __('Link'),
+                                    primary_action(values) {
+                                        if (!values.sales_invoice) {
+                                            frappe.msgprint({
+                                                title: __('Validation Error'),
+                                                message: __('Sales Invoice is required'),
+                                                indicator: 'red'
+                                            });
+                                            return;
+                                        }
+                                        
+                                        frappe.call({
+                                            method: 'business_needed_solutions.business_needed_solutions.utils.link_si_pi',
+                                            args: {
+                                                sales_invoice: values.sales_invoice,
+                                                purchase_invoice: frm.doc.name
+                                            },
+                                            freeze: true,
+                                            freeze_message: __('Linking...'),
+                                            callback: function(r) {
+                                                if (!r.exc) {
+                                                    frappe.show_alert({
+                                                        message: r.message.message || __('Linked successfully'),
+                                                        indicator: 'green'
+                                                    });
+                                                    frm.reload_doc();
+                                                    d.hide();
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                                d.show();
+                            }, __('Actions'));
+                        }
+                    }
+                });
+            }
         }
     }
 });
