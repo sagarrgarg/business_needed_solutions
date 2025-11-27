@@ -26,6 +26,13 @@ frappe.query_reports["Internal Transfer Receive Mismatch"] = {
 			}
 		},
 		{
+			"fieldname": "company_address",
+			"label": __("Company Address"),
+			"fieldtype": "Link",
+			"options": "Address",
+			"reqd": 0
+		},
+		{
 			"fieldname": "from_date",
 			"label": __("From Date"),
 			"fieldtype": "Date",
@@ -39,6 +46,19 @@ frappe.query_reports["Internal Transfer Receive Mismatch"] = {
 			"default": frappe.datetime.get_today(),
 			"reqd": 0
 		}
-	]
+	],
+	"onload": function(report) {
+		// Set up company_address query filter
+		if (report.get_filter('company_address')) {
+			report.get_filter('company_address').df.get_query = function() {
+				return {
+					query: "business_needed_solutions.business_needed_solutions.business_needed_solutions.report.internal_transfer_receive_mismatch.internal_transfer_receive_mismatch.company_address_query",
+					filters: {
+						"is_company_address": 1
+					}
+				}
+			}
+		}
+	}
 };
 

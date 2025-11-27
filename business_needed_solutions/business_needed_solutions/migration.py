@@ -51,15 +51,14 @@ def add_bns_status_option():
     - Purchase Receipt
     - Sales Invoice
     - Purchase Invoice
-    """
-    doctypes_status_options = {
-        "Delivery Note": "\nDraft\nTo Bill\nCompleted\nReturn Issued\nCancelled\nClosed\nBNS Internally Transferred",
-        "Purchase Receipt": "\nDraft\nPartly Billed\nTo Bill\nCompleted\nReturn Issued\nCancelled\nClosed\nBNS Internally Transferred",
-        "Sales Invoice": "\nDraft\nReturn\nCredit Note Issued\nSubmitted\nPaid\nPartly Paid\nUnpaid\nUnpaid and Discounted\nPartly Paid and Discounted\nOverdue and Discounted\nOverdue\nCancelled\nInternal Transfer\nBNS Internally Transferred",
-        "Purchase Invoice": "\nDraft\nReturn\nDebit Note Issued\nSubmitted\nPaid\nPartly Paid\nUnpaid\nOverdue\nCancelled\nInternal Transfer\nBNS Internally Transferred"
-    }
     
-    for doctype, new_options in doctypes_status_options.items():
+    This function APPENDS the status option instead of overwriting to preserve
+    system statuses that may be added in future ERPNext versions.
+    """
+    new_status = "BNS Internally Transferred"
+    doctypes = ["Delivery Note", "Purchase Receipt", "Sales Invoice", "Purchase Invoice"]
+    
+    for doctype in doctypes:
         try:
             # Check if property setter already exists
             existing_ps_name = frappe.db.exists("Property Setter", {
@@ -69,17 +68,34 @@ def add_bns_status_option():
             })
             
             if existing_ps_name:
-                # Update existing property setter
+                # Update existing property setter - APPEND only if missing
                 ps = frappe.get_doc("Property Setter", existing_ps_name)
                 # Check if BNS Internally Transferred is already in options
-                if "BNS Internally Transferred" not in ps.value:
-                    ps.value = new_options
+                existing_options = ps.value.split('\n') if ps.value else []
+                if new_status not in existing_options:
+                    # Append the new status option
+                    ps.value = ps.value + "\n" + new_status
                     ps.save(ignore_permissions=True)
                     frappe.db.commit()
-                    logger.info(f"Updated status options for {doctype}")
+                    logger.info(f"Appended '{new_status}' to status options for {doctype}")
                 else:
-                    logger.info(f"Status option already exists for {doctype}")
+                    logger.info(f"Status option '{new_status}' already exists for {doctype}")
             else:
+                # Get default options from DocField if available
+                try:
+                    meta = frappe.get_meta(doctype)
+                    status_field = meta.get_field("status")
+                    default_options = status_field.options or ""
+                except Exception:
+                    default_options = ""
+                
+                # Append new status to default options
+                if default_options:
+                    new_value = default_options + "\n" + new_status
+                else:
+                    # Fallback: use newline-separated format
+                    new_value = "\n" + new_status
+                
                 # Create new property setter
                 ps = frappe.new_doc("Property Setter")
                 ps.update({
@@ -87,12 +103,12 @@ def add_bns_status_option():
                     "doc_type": doctype,
                     "field_name": "status",
                     "property": "options",
-                    "value": new_options,
+                    "value": new_value,
                     "property_type": "Text"
                 })
                 ps.save(ignore_permissions=True)
                 frappe.db.commit()
-                logger.info(f"Created status options property setter for {doctype}")
+                logger.info(f"Created status options property setter for {doctype} with '{new_status}'")
                 
         except Exception as e:
             logger.error(f"Error adding BNS status option for {doctype}: {str(e)}")

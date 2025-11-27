@@ -227,11 +227,10 @@ def _find_internal_supplier(company: str) -> str:
 
 
 def _update_delivery_note_reference(dn_name: str, pr_name: str) -> None:
-    """Update delivery note with purchase receipt reference and status."""
+    """Update delivery note with purchase receipt reference."""
+    # Do NOT update status here - it's handled by on_submit hook
     frappe.db.set_value("Delivery Note", dn_name, {
-        "bns_inter_company_reference": pr_name,
-        "status": "BNS Internally Transferred",
-        "per_billed": 100
+        "bns_inter_company_reference": pr_name
     })
 
 
@@ -325,13 +324,17 @@ def update_delivery_note_status_for_bns_internal(doc, method: Optional[str] = No
     if doc.docstatus != 1:
         return
     
+    # Guard: prevent infinite loops - if already updated, skip
+    if doc.status == "BNS Internally Transferred":
+        return
+    
     # Check if customer is BNS internal
     is_bns_internal = doc.get("is_bns_internal_customer") or False
     if not is_bns_internal:
         customer_internal = frappe.db.get_value("Customer", doc.customer, "is_bns_internal_customer")
         if not customer_internal:
             return
-
+    
     try:
         # Check GSTIN match
         billing_address_gstin = getattr(doc, 'billing_address_gstin', None)
@@ -341,21 +344,15 @@ def update_delivery_note_status_for_bns_internal(doc, method: Optional[str] = No
             if billing_address_gstin == company_gstin:
                 # SAME GSTIN - Set as internal transfer
                 per_billed = 100
-                update_fields = {
-                    "status": "BNS Internally Transferred",
-                    "per_billed": per_billed,
-                    "is_bns_internal_customer": 1
-                }
-                frappe.db.set_value("Delivery Note", doc.name, update_fields)
+                doc.db_set("status", "BNS Internally Transferred", update_modified=False)
+                doc.db_set("per_billed", per_billed, update_modified=False)
+                doc.db_set("is_bns_internal_customer", 1, update_modified=False)
                 frappe.clear_cache(doctype="Delivery Note")
                 logger.info(f"Updated Delivery Note {doc.name} status to BNS Internally Transferred (same GSTIN)")
             else:
                 # DIFFERENT GSTIN - Set as To Bill
-                update_fields = {
-                    "status": "To Bill",
-                    "is_bns_internal_customer": 0
-                }
-                frappe.db.set_value("Delivery Note", doc.name, update_fields)
+                doc.db_set("status", "To Bill", update_modified=False)
+                doc.db_set("is_bns_internal_customer", 0, update_modified=False)
                 frappe.clear_cache(doctype="Delivery Note")
                 logger.info(f"Updated Delivery Note {doc.name} status to To Bill (different GSTIN)")
         
@@ -382,6 +379,10 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
         method (Optional[str]): The method being called
     """
     if doc.docstatus != 1:
+        return
+    
+    # Guard: prevent infinite loops - if already updated, skip
+    if doc.status == "BNS Internally Transferred":
         return
 
     try:
@@ -422,26 +423,19 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
         if is_bns_internal:
             # TRANSFER UNDER SAME GSTIN - from DN
             per_billed = 100
-            update_fields = {
-                "status": "BNS Internally Transferred",
-                "per_billed": per_billed,
-                "is_bns_internal_customer": 1
-            }
+            doc.db_set("status", "BNS Internally Transferred", update_modified=False)
+            doc.db_set("per_billed", per_billed, update_modified=False)
+            doc.db_set("is_bns_internal_customer", 1, update_modified=False)
             if doc.represents_company:
-                update_fields["represents_company"] = doc.represents_company
-            frappe.db.set_value("Purchase Receipt", doc.name, update_fields)
+                doc.db_set("represents_company", doc.represents_company, update_modified=False)
             frappe.clear_cache(doctype="Purchase Receipt")
             logger.info(f"Updated Purchase Receipt {doc.name} status to BNS Internally Transferred (from DN)")
         else:
             # TRANSFER UNDER DIFFERENT GSTIN - from SI
             # Status should remain "To Bill" (default), but ensure it's set
-            current_status = frappe.db.get_value("Purchase Receipt", doc.name, "status")
-            update_fields = {
-                "is_bns_internal_customer": 0
-            }
-            if current_status != "To Bill":
-                update_fields["status"] = "To Bill"
-            frappe.db.set_value("Purchase Receipt", doc.name, update_fields)
+            if doc.status != "To Bill":
+                doc.db_set("status", "To Bill", update_modified=False)
+            doc.db_set("is_bns_internal_customer", 0, update_modified=False)
             frappe.clear_cache(doctype="Purchase Receipt")
             logger.info(f"Updated Purchase Receipt {doc.name} status to To Bill (from SI)")
         
@@ -742,10 +736,10 @@ def _clear_item_level_fields_pi(target) -> None:
 
 
 def _update_sales_invoice_reference(si_name: str, pi_name: str) -> None:
-    """Update sales invoice with purchase invoice reference and status."""
+    """Update sales invoice with purchase invoice reference."""
+    # Do NOT update status here - it's handled by on_submit hook
     frappe.db.set_value("Sales Invoice", si_name, {
-        "bns_inter_company_reference": pi_name,
-        "status": "BNS Internally Transferred"
+        "bns_inter_company_reference": pi_name
     })
 
 
@@ -862,7 +856,7 @@ def _update_details_pr_from_si(source_doc, target_doc, source_parent) -> None:
         target_doc.supplier = supplier
         
         target_doc.buying_price_list = source_doc.selling_price_list
-        target_doc.is_internal_supplier = 1
+        # Do NOT set is_internal_supplier - only set bns_inter_company_reference for BNS internal transfers
         target_doc.bns_inter_company_reference = source_doc.name
         
         # Set supplier_delivery_note = SI name (TRANSFER UNDER DIFFERENT GSTIN)
@@ -879,7 +873,7 @@ def _update_details_pr_from_si(source_doc, target_doc, source_parent) -> None:
         target_doc.supplier = supplier
         
         target_doc.buying_price_list = source_doc.selling_price_list
-        target_doc.is_internal_supplier = 1
+        # Do NOT set is_internal_supplier - only set bns_inter_company_reference for BNS internal transfers
         target_doc.bns_inter_company_reference = source_doc.name
         
         # Set supplier_delivery_note = SI name (TRANSFER UNDER DIFFERENT GSTIN)
@@ -908,13 +902,9 @@ def _update_item_pr_from_si(source, target, source_parent) -> None:
 def _update_sales_invoice_pr_reference(si_name: str, pr_name: str) -> None:
     """Update sales invoice with purchase receipt reference."""
     # Note: Sales Invoice doesn't have a direct PR reference field like DN does
-    # We can store it in a custom field if needed, or just update status
-    # For now, we'll just ensure status is updated if not already set
-    current_status = frappe.db.get_value("Sales Invoice", si_name, "status")
-    if current_status != "BNS Internally Transferred":
-        frappe.db.set_value("Sales Invoice", si_name, {
-            "status": "BNS Internally Transferred"
-        })
+    # Do NOT update status here - it's handled by on_submit hook
+    # Status will be updated automatically when SI is submitted
+    pass
 
 
 def update_sales_invoice_status_for_bns_internal(doc, method: Optional[str] = None) -> None:
@@ -926,6 +916,10 @@ def update_sales_invoice_status_for_bns_internal(doc, method: Optional[str] = No
         doc: The Sales Invoice document
         method (Optional[str]): The method being called
     """
+    # Guard: prevent infinite loops - if already updated, skip
+    if doc.status == "BNS Internally Transferred":
+        return
+    
     # Ensure is_bns_internal_customer is set from Customer if not already set
     if not doc.get("is_bns_internal_customer") and doc.customer:
         customer_internal = frappe.db.get_value("Customer", doc.customer, "is_bns_internal_customer")
@@ -938,8 +932,8 @@ def update_sales_invoice_status_for_bns_internal(doc, method: Optional[str] = No
     try:
         # Update status immediately on the document object so it shows without refresh
         doc.status = "BNS Internally Transferred"
-        # Also update in database
-        frappe.db.set_value("Sales Invoice", doc.name, "status", "BNS Internally Transferred", update_modified=False)
+        # Also update in database using db_set
+        doc.db_set("status", "BNS Internally Transferred", update_modified=False)
         frappe.clear_cache(doctype="Sales Invoice")
         logger.info(f"Updated Sales Invoice {doc.name} status to BNS Internally Transferred")
         
@@ -962,6 +956,10 @@ def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] =
         method (Optional[str]): The method being called
     """
     if doc.docstatus != 1:
+        return
+    
+    # Guard: prevent infinite loops - if already updated, skip
+    if doc.status == "BNS Internally Transferred":
         return
     
     # Check if it's a BNS internal transfer
@@ -1016,16 +1014,12 @@ def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] =
             if represents_company:
                 doc.represents_company = represents_company
         
-        # Update status immediately on document and in database
+        # Update status immediately on document and in database using db_set
         doc.status = "BNS Internally Transferred"
-        update_fields = {
-            "status": "BNS Internally Transferred",
-            "is_bns_internal_supplier": 1
-        }
+        doc.db_set("status", "BNS Internally Transferred", update_modified=False)
+        doc.db_set("is_bns_internal_supplier", 1, update_modified=False)
         if doc.represents_company:
-            update_fields["represents_company"] = doc.represents_company
-        
-        frappe.db.set_value("Purchase Invoice", doc.name, update_fields)
+            doc.db_set("represents_company", doc.represents_company, update_modified=False)
         frappe.clear_cache(doctype="Purchase Invoice")
         logger.info(f"Updated Purchase Invoice {doc.name} status to BNS Internally Transferred")
         

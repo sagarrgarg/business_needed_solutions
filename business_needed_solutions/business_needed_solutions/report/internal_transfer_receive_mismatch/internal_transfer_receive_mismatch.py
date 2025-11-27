@@ -29,6 +29,41 @@ from frappe import _
 from frappe.utils import today
 
 
+@frappe.whitelist()
+def company_address_query(doctype, txt, searchfield, start, page_len, filters):
+	"""
+	Query to fetch only company addresses for the report filter.
+	"""
+	conditions = ["is_company_address = 1"]
+	values = []
+
+	if txt:
+		conditions.append(f"{searchfield} like %s")
+		values.append(f"%{txt}%")
+
+	# If company filter is provided, try to match via address title
+	company = None
+	if filters:
+		company = filters.get("company")
+		if company:
+			conditions.append("address_title = %s")
+			values.append(company)
+
+	where_clause = " AND ".join(conditions)
+	query = f"""
+		SELECT
+			name,
+			IFNULL(address_title, name) AS address_title
+		FROM `tabAddress`
+		WHERE {where_clause}
+		ORDER BY modified DESC
+		LIMIT %s
+		OFFSET %s
+	"""
+	values.extend([page_len, start])
+	return frappe.db.sql(query, tuple(values))
+
+
 def execute(filters=None):
 	"""
 	Execute the report and return columns and data.
@@ -74,6 +109,18 @@ def get_columns():
 			"fieldtype": "Dynamic Link",
 			"options": "document_type",
 			"width": 150
+		},
+		{
+			"fieldname": "company_address_name",
+			"label": _("Company Address (Name)"),
+			"fieldtype": "Data",
+			"width": 180
+		},
+		{
+			"fieldname": "customer_address_name",
+			"label": _("Customer Address (Name)"),
+			"fieldtype": "Data",
+			"width": 180
 		},
 		{
 			"fieldname": "grand_total",
@@ -164,6 +211,10 @@ def get_delivery_note_mismatches(filters=None):
 			conditions.append("dn.customer = %s")
 			values.append(filters.customer)
 		
+		if filters.get("company_address"):
+			conditions.append("dn.company_address = %s")
+			values.append(filters.company_address)
+		
 		if filters.get("from_date"):
 			conditions.append("dn.posting_date >= %s")
 			values.append(filters.from_date)
@@ -179,7 +230,9 @@ def get_delivery_note_mismatches(filters=None):
 		SELECT 
 			dn.posting_date,
 			dn.name,
-			dn.grand_total
+			dn.grand_total,
+			dn.company_address as company_address_name,
+			dn.customer_address as customer_address_name
 		FROM 
 			`tabDelivery Note` dn
 		JOIN 
@@ -346,6 +399,8 @@ def get_delivery_note_mismatches(filters=None):
 			"document_type": "Delivery Note",
 			"document_name": dn_name,
 			"grand_total": dn.get("grand_total") or 0.0,
+			"company_address_name": dn.get("company_address_name") or "",
+			"customer_address_name": dn.get("customer_address_name") or "",
 			"missing_document": missing_doc,
 			"mismatch_reason": mismatch_reason,
 			"purchase_receipt": purchase_receipt,
@@ -383,6 +438,10 @@ def get_sales_invoice_mismatches(filters=None):
 			conditions.append("si.customer = %s")
 			values.append(filters.customer)
 		
+		if filters.get("company_address"):
+			conditions.append("si.company_address = %s")
+			values.append(filters.company_address)
+		
 		if filters.get("from_date"):
 			conditions.append("si.posting_date >= %s")
 			values.append(filters.from_date)
@@ -398,7 +457,9 @@ def get_sales_invoice_mismatches(filters=None):
 		SELECT 
 			si.posting_date,
 			si.name,
-			si.grand_total
+			si.grand_total,
+			si.company_address as company_address_name,
+			si.customer_address as customer_address_name
 		FROM 
 			`tabSales Invoice` si
 		JOIN 
@@ -464,6 +525,8 @@ def get_sales_invoice_mismatches(filters=None):
 				"document_type": "Sales Invoice",
 				"document_name": si_name,
 				"grand_total": si.get("grand_total") or 0.0,
+				"company_address_name": si.get("company_address_name") or "",
+				"customer_address_name": si.get("customer_address_name") or "",
 				"missing_document": " / ".join(missing_docs) if missing_docs else "Purchase Invoice / Purchase Receipt",
 				"mismatch_reason": " | ".join(reasons) if reasons else "Mismatch detected",
 				"purchase_receipt": pr_mismatch.get("purchase_receipt") if pr_mismatch else None,
