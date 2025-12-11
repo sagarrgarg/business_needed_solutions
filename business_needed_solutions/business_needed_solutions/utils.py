@@ -555,18 +555,29 @@ def _update_delivery_note_reference(dn_name: str, pr_name: str) -> None:
 
 def _update_addresses(target_doc, source_doc) -> None:
     """Update addresses for internal transfer."""
-    # For Purchase Receipt, don't swap shipping/dispatch addresses
+    # For Purchase Receipt, swap shipping/dispatch addresses (inverse)
     if target_doc.doctype == "Purchase Receipt":
         # Company address becomes supplier address
         update_address(target_doc, "supplier_address", "address_display", source_doc.company_address)
-        # Keep shipping address as is
-        update_address(target_doc, "shipping_address", "shipping_address_display", source_doc.shipping_address_name)
         # Customer address becomes billing address
         update_address(target_doc, "billing_address", "billing_address_display", source_doc.customer_address)
-        # Explicitly clear dispatch address and templates for BNS internal transfers
-        target_doc.dispatch_address = None
-        target_doc.dispatch_address_name = None
-        target_doc.dispatch_address_display = None
+        # Shipping address = Dispatch address from source (inverse)
+        if source_doc.dispatch_address_name:
+            update_address(target_doc, "shipping_address", "shipping_address_display", source_doc.dispatch_address_name)
+        else:
+            # Clear shipping address if not in source document
+            target_doc.shipping_address = None
+            target_doc.shipping_address_name = None
+            target_doc.shipping_address_display = None
+        # Dispatch address = Shipping address from source (inverse)
+        if source_doc.shipping_address_name:
+            update_address(target_doc, "dispatch_address", "dispatch_address_display", source_doc.shipping_address_name)
+        else:
+            # Clear dispatch address if not in source document
+            target_doc.dispatch_address = None
+            target_doc.dispatch_address_name = None
+            target_doc.dispatch_address_display = None
+        # Clear templates for BNS internal transfers
         target_doc.dispatch_address_template = None
         target_doc.shipping_address_template = None
     else:
@@ -1047,14 +1058,23 @@ def _update_addresses_pi(target_doc, source_doc) -> None:
     update_address(target_doc, "supplier_address", "address_display", source_doc.company_address)
     # Customer address becomes billing address
     update_address(target_doc, "billing_address", "billing_address_display", source_doc.customer_address)
-    # Shipping address
+    # Shipping address = Dispatch address from source (inverse)
+    if source_doc.dispatch_address_name:
+        update_address(target_doc, "shipping_address", "shipping_address_display", source_doc.dispatch_address_name)
+    else:
+        # Clear shipping address if not in source document
+        target_doc.shipping_address = None
+        target_doc.shipping_address_name = None
+        target_doc.shipping_address_display = None
+    # Dispatch address = Shipping address from source (inverse)
     if source_doc.shipping_address_name:
-        update_address(target_doc, "shipping_address", "shipping_address_display", source_doc.shipping_address_name)
-    
-    # Explicitly clear dispatch address and templates for BNS internal transfers
-    target_doc.dispatch_address = None
-    target_doc.dispatch_address_name = None
-    target_doc.dispatch_address_display = None
+        update_address(target_doc, "dispatch_address", "dispatch_address_display", source_doc.shipping_address_name)
+    else:
+        # Clear dispatch address if not in source document
+        target_doc.dispatch_address = None
+        target_doc.dispatch_address_name = None
+        target_doc.dispatch_address_display = None
+    # Clear templates for BNS internal transfers
     target_doc.dispatch_address_template = None
     target_doc.shipping_address_template = None
 
