@@ -63,7 +63,10 @@ doctype_js = {
               # Purchase Documents
               "Purchase Invoice" : "public/js/doctype_item_grid_controls.js",
               "Purchase Order" : "public/js/doctype_item_grid_controls.js",
-              "Purchase Receipt" : ["public/js/purchase_receipt_form.js", "public/js/doctype_item_grid_controls.js"]
+              "Purchase Receipt" : ["public/js/purchase_receipt_form.js", "public/js/doctype_item_grid_controls.js"],
+              
+              # Warehouse
+              "Warehouse" : "public/js/warehouse.js"
 }
 
 
@@ -183,6 +186,9 @@ doc_events = {
     },
     "Item": {
         "validate": "business_needed_solutions.business_needed_solutions.overrides.item_validation.validate_expense_account_for_non_stock_items"
+    },
+    "Stock Ledger Entry": {
+        "validate": "business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.validate_sle_warehouse_negative_stock"
     },
     "Stock Entry": {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
@@ -345,4 +351,7 @@ fixtures = [
 
 # Migration hook to ensure BNS settings are applied after migrations
 after_migrate = "business_needed_solutions.business_needed_solutions.migration.after_migrate"
+
+# Apply warehouse negative stock restriction patches on app initialization
+after_app_init = "business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.apply_patches"
 

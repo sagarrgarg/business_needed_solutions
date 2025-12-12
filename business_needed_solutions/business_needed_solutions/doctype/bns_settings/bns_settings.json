@@ -22,6 +22,7 @@
  "submission_section",
  "restrict_submission",
  "submission_restriction_override_roles",
+ "enable_per_warehouse_negative_stock_disallow",
  
  "tab_break_print",
  "print_format_section",
@@ -111,6 +112,14 @@
    "fieldtype": "Table MultiSelect",
    "label": "Override Submission Restriction",
    "options": "Has Role"
+  },
+  {
+   "default": "0",
+   "description": "Enable warehouse-level negative stock restriction. When enabled, warehouses can individually disallow negative stock even if 'Allow Negative Stock' is enabled in Stock Settings.",
+   "fieldname": "enable_per_warehouse_negative_stock_disallow",
+   "fieldtype": "Check",
+   "insert_after": "submission_restriction_override_roles",
+   "label": "Enable Per Warehouse Negative Stock Disallow"
   },
   {
    "default": "0",
