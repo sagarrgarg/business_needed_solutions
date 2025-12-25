@@ -44,6 +44,118 @@ def get_fiscal_year_dates(report_date, company):
 	return "2023-04-01", "2024-03-31"
 
 
+def get_supplier_invoice_and_received_amounts(parties, company, report_date, show_future_payments=0, from_date=None):
+	"""
+	Get supplier invoice amounts (including debit notes) for parties that are linked to suppliers.
+	Uses Purchase Invoice directly like Purchase Register does.
+	Returns dict: {party: {"received_invoice_amount": x}}
+	"""
+	from frappe.query_builder.functions import Sum, Abs
+	
+	result = {}
+	if not parties:
+		return result
+	
+	# Get payable account types
+	payable_accounts = frappe.get_all(
+		"Account",
+		filters={"account_type": "Payable", "company": company},
+		pluck="name"
+	)
+	
+	if not payable_accounts:
+		return result
+	
+	# Query Purchase Invoices directly (like Purchase Register does)
+	pi = frappe.qb.DocType("Purchase Invoice")
+	
+	# Build query for supplier invoices (Purchase Invoices) including debit notes
+	# Sum absolute values of base_grand_total to get total invoice amount including debit notes
+	supplier_invoices_query = (
+		frappe.qb.from_(pi)
+		.select(pi.supplier, Sum(Abs(pi.base_grand_total)).as_("amount"))
+		.where(
+			(pi.supplier.isin(parties))
+			& (pi.docstatus == 1)
+			& (pi.credit_to.isin(payable_accounts))
+			& (pi.posting_date <= report_date)
+		)
+	)
+	
+	# Add from_date filter if provided
+	if from_date:
+		supplier_invoices_query = supplier_invoices_query.where(pi.posting_date >= from_date)
+	
+	supplier_invoices_query = supplier_invoices_query.groupby(pi.supplier)
+	
+	invoice_data = supplier_invoices_query.run(as_dict=True)
+	
+	# Combine invoice amounts
+	for row in invoice_data:
+		party = row["supplier"]
+		if party not in result:
+			result[party] = {"received_invoice_amount": 0.0}
+		result[party]["received_invoice_amount"] = flt(row["amount"])
+	
+	return result
+
+
+def get_customer_invoice_and_paid_amounts(parties, company, report_date, show_future_payments=0, from_date=None):
+	"""
+	Get customer invoice amounts (Sales Invoices including Credit Notes) for customer parties.
+	Uses Sales Invoice directly like Sales Register does.
+	Returns dict: {party: {"invoiced_amount": x}}
+	"""
+	from frappe.query_builder.functions import Sum, Abs
+	
+	result = {}
+	if not parties:
+		return result
+	
+	# Get receivable account types
+	receivable_accounts = frappe.get_all(
+		"Account",
+		filters={"account_type": "Receivable", "company": company},
+		pluck="name"
+	)
+	
+	if not receivable_accounts:
+		return result
+	
+	# Query Sales Invoices directly (like Sales Register does)
+	si = frappe.qb.DocType("Sales Invoice")
+	
+	# Build query for customer invoices (Sales Invoices) including credit notes
+	# Sum absolute values of base_grand_total to get total invoice amount including credit notes
+	customer_invoices_query = (
+		frappe.qb.from_(si)
+		.select(si.customer, Sum(Abs(si.base_grand_total)).as_("amount"))
+		.where(
+			(si.customer.isin(parties))
+			& (si.docstatus == 1)
+			& (si.debit_to.isin(receivable_accounts))
+			& (si.posting_date <= report_date)
+		)
+	)
+	
+	# Add from_date filter if provided
+	if from_date:
+		customer_invoices_query = customer_invoices_query.where(si.posting_date >= from_date)
+	
+	customer_invoices_query = customer_invoices_query.groupby(si.customer)
+	
+	invoice_data = customer_invoices_query.run(as_dict=True)
+	
+	# Combine invoice amounts
+	for row in invoice_data:
+		party = row["customer"]
+		if party not in result:
+			result[party] = {"invoiced_amount": 0.0}
+		result[party]["invoiced_amount"] = flt(row["amount"])
+	
+	return result
+
+
 
 
 
@@ -157,6 +269,55 @@ def execute(filters=None):
 		if col.get("fieldtype") == "Currency":
 			currency_fields.append(col["fieldname"])
 
+	# 5a. Build mapping of customer parties to their linked supplier parties
+	# and get supplier invoice/received amounts for those suppliers
+	customer_to_supplier_map = {}
+	supplier_parties_to_query = set()
+	
+	for pl in party_links:
+		# If secondary_role is Supplier, then primary_party (Customer) is linked to a supplier
+		if pl.secondary_role == "Supplier":
+			customer_to_supplier_map[pl.primary_party] = pl.secondary_party
+			supplier_parties_to_query.add(pl.secondary_party)
+		# If primary_role is Supplier, then secondary_party (Customer) is linked to a supplier
+		if pl.primary_role == "Supplier":
+			customer_to_supplier_map[pl.secondary_party] = pl.primary_party
+			supplier_parties_to_query.add(pl.primary_party)
+	
+	# Also include common parties - they are both customer and supplier
+	for party in common_parties:
+		customer_to_supplier_map[party] = party
+		supplier_parties_to_query.add(party)
+	
+	# Get supplier amounts keyed by supplier party
+	supplier_amounts_by_supplier = {}
+	if supplier_parties_to_query:
+		supplier_amounts_by_supplier = get_supplier_invoice_and_received_amounts(
+			list(supplier_parties_to_query),
+			company,
+			report_date,
+			filters.get("show_future_payments", 0),
+			filters.get("from_date")
+		)
+	
+	# Map supplier amounts back to customer parties
+	supplier_amounts = {}
+	for customer_party, supplier_party in customer_to_supplier_map.items():
+		if supplier_party in supplier_amounts_by_supplier:
+			supplier_amounts[customer_party] = supplier_amounts_by_supplier[supplier_party]
+	
+	# 5b. Get customer invoice and paid amounts for all customer parties
+	customer_parties_to_query = list(main_dict.keys())
+	customer_amounts = {}
+	if customer_parties_to_query:
+		customer_amounts = get_customer_invoice_and_paid_amounts(
+			customer_parties_to_query,
+			company,
+			report_date,
+			filters.get("show_future_payments", 0),
+			filters.get("from_date")
+		)
+
 	# 6. Build the final data with new logic:
 	#    - For common parties: categorize by net balance (debit -> Receivable, credit -> Payable)
 	#    - For Party Links: still apply netting but respect net balance categorization
@@ -253,10 +414,27 @@ def execute(filters=None):
 		# Only add if outstanding is positive after adjustments
 		if flt(updated_row.get("outstanding", 0.0)) > 0:
 			party_name = updated_row.get("party_name") or party
-			gl_url = f"/app/query-report/Party%20GL?company={quote(company)}&from_date={quote(str(from_date))}&to_date={quote(str(to_date))}&account=undefined&party=%5B%22{quote(party)}%22%5D&party_name={quote(party_name)}&group_by=Group+by+Voucher+%28Consolidated%29&project=undefined&include_dimensions=1&include_default_book_entries=1"
+			
+			# Get Receivable accounts to filter Party GL by account_type
+			receivable_accounts = frappe.get_all(
+				"Account",
+				filters={"account_type": "Receivable", "company": company},
+				pluck="name"
+			)
+			account_filter = quote(",".join(receivable_accounts)) if receivable_accounts else "undefined"
+			
+			gl_url = f"/app/query-report/Party%20GL?company={quote(company)}&from_date={quote(str(from_date))}&to_date={quote(str(to_date))}&account={account_filter}&party=%5B%22{quote(party)}%22%5D&party_name={quote(party_name)}&group_by=Group+by+Voucher+%28Consolidated%29&project=undefined&include_dimensions=1&include_default_book_entries=1"
 			button_html = f'<a href="{gl_url}" target="_blank" class="btn btn-xs btn-default">GL: {party_name}</a>'
 
 			updated_row["party_gl_link"] = button_html
+			
+			# Add the 2 new columns:
+			# 1. Received Invoice Amount (if party linked to supplier, then supplier's received invoice including debit note)
+			updated_row["received_invoice_amount"] = flt(supplier_amounts.get(party, {}).get("received_invoice_amount", 0.0))
+			
+			# 2. Invoiced Amount (Invoices we sent to customer incl credit note)
+			updated_row["invoiced_amount"] = flt(customer_amounts.get(party, {}).get("invoiced_amount", 0.0))
+			
 			final_data.append(updated_row)
 
 	main_columns.append(
@@ -285,6 +463,44 @@ def execute(filters=None):
 			"width": 120,
 		}
 	)
+	
+	# Find the index of "Opening Balance" column and insert the 2 new columns after it
+	opening_balance_index = None
+	for i, col in enumerate(main_columns):
+		if col.get("fieldname") == "opening":
+			opening_balance_index = i
+			break
+	
+	# Add the 2 new columns right after Opening Balance
+	if opening_balance_index is not None:
+		insert_index = opening_balance_index + 1
+		main_columns.insert(insert_index, {
+			"label": _("Received Invoice Amount"),
+			"fieldname": "received_invoice_amount",
+			"fieldtype": "Currency",
+			"width": 150,
+		})
+		main_columns.insert(insert_index + 1, {
+			"label": _("Invoiced Amount"),
+			"fieldname": "invoiced_amount",
+			"fieldtype": "Currency",
+			"width": 150,
+		})
+	else:
+		# Fallback: add at the end if opening balance not found
+		main_columns.append({
+			"label": _("Received Invoice Amount"),
+			"fieldname": "received_invoice_amount",
+			"fieldtype": "Currency",
+			"width": 150,
+		})
+		main_columns.append({
+			"label": _("Invoiced Amount"),
+			"fieldname": "invoiced_amount",
+			"fieldtype": "Currency",
+			"width": 150,
+		})
+	
 	# 6. You can return the same columns from the main dataset
 	#    (they now reflect the differences).
 	#    No extra "r_minus_p" column is needed since you replaced
@@ -308,26 +524,12 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 
 		self.get_party_total(args)
 
-		party = None
-		for party_type in self.party_type:
-			if self.filters.get(scrub(party_type)):
-				party = self.filters.get(scrub(party_type))
-
-		party_advance_amount = (
-			get_partywise_advanced_payment_amount(
-				self.party_type,
-				self.filters.report_date,
-				self.filters.show_future_payments,
-				self.filters.company,
-				party=party,
-			)
-			or {}
-		)
-
 		if self.filters.show_gl_balance:
-			gl_balance_map = get_gl_balance(self.filters.report_date, self.filters.company)
+			gl_balance_map = get_gl_balance(self.filters.report_date, self.filters.company, self.account_type)
 
 		# Calculate opening balances
+		# For Receivable (Asset): debit - credit (positive = customer owes us)
+		# For Payable (Liability): credit - debit (positive = we owe supplier)
 		opening_balances = {}
 		if self.filters.get("from_date"):
 			for party_type in self.party_type:
@@ -339,8 +541,16 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 				if not accounts:
 					continue
 
-				opening_entries = frappe.db.sql("""
-					SELECT party, SUM(debit) - SUM(credit) as balance
+				# Use different formula based on account type
+				if self.account_type == "Payable":
+					# For Payable: credit - debit (positive means we owe)
+					balance_formula = "SUM(credit) - SUM(debit)"
+				else:
+					# For Receivable: debit - credit (positive means customer owes)
+					balance_formula = "SUM(debit) - SUM(credit)"
+
+				opening_entries = frappe.db.sql(f"""
+					SELECT party, {balance_formula} as balance
 					FROM `tabGL Entry`
 					WHERE posting_date < %s
 					AND party_type = %s
@@ -383,13 +593,6 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 
 			# Add opening balance
 			row.opening = opening_balances.get(party, 0.0)
-
-			# Advance against party
-			row.advance = party_advance_amount.get(party, 0)
-			row.purepaid = row.paid
-			# In AR/AP, advance shown in paid columns,
-			# but in summary report advance shown in separate column
-			row.paid -= row.advance
 
 			if self.filters.show_gl_balance:
 				row.gl_balance = gl_balance_map.get(party)
@@ -469,8 +672,6 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 				fieldtype="Data",
 			)
 			self.add_column(_("Opening Balance"), fieldname="opening")
-			self.add_column(_("Invoiced Amount"), fieldname="invoiced")
-			self.add_column(_("Paid Amount"), fieldname="purepaid")
 			self.add_column(_("Outstanding Amount"), fieldname="outstanding")
 
 		if self.filters.show_gl_balance:
@@ -507,13 +708,38 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 			)
 
 
-def get_gl_balance(report_date, company):
-	return frappe._dict(
-		frappe.db.get_all(
-			"GL Entry",
-			fields=["party", "sum(debit -  credit)"],
-			filters={"posting_date": ("<=", report_date), "is_cancelled": 0, "company": company},
-			group_by="party",
-			as_list=1,
-		)
+def get_gl_balance(report_date, company, account_type):
+	"""
+	Get GL balance for parties filtered by account_type.
+	For Receivable (Asset): debit - credit (positive = customer owes us)
+	For Payable (Liability): credit - debit (positive = we owe supplier)
+	"""
+	# Get accounts of the specified account_type
+	accounts = frappe.get_all(
+		"Account",
+		filters={"account_type": account_type, "company": company},
+		pluck="name"
 	)
+	
+	if not accounts:
+		return frappe._dict()
+	
+	# Use different formula based on account type
+	if account_type == "Payable":
+		# For Payable: credit - debit (positive means we owe)
+		balance_formula = "SUM(credit) - SUM(debit)"
+	else:
+		# For Receivable: debit - credit (positive means customer owes)
+		balance_formula = "SUM(debit) - SUM(credit)"
+	
+	balance_data = frappe.db.sql(f"""
+		SELECT party, {balance_formula} as balance
+		FROM `tabGL Entry`
+		WHERE posting_date <= %s
+		AND account IN %s
+		AND company = %s
+		AND is_cancelled = 0
+		GROUP BY party
+	""", (report_date, tuple(accounts), company), as_dict=1)
+	
+	return frappe._dict([(d.party, d.balance) for d in balance_data if d.party])
