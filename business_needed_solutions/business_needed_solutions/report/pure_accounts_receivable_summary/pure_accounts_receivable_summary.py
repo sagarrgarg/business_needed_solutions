@@ -181,9 +181,30 @@ def execute(filters=None):
 		if not customers:
 			return [], []
 
+	# Prepare filters for secondary (Payable) run - map Customer filters to Supplier filters
+	secondary_filters = frappe._dict(filters.copy())
+	secondary_filters.party_type = "Supplier"
+	secondary_filters.party = []
+
+	if filters.get("party_type") == "Customer" and filters.get("party"):
+		party_links = frappe.get_all(
+			"Party Link",
+			fields=["primary_party", "primary_role", "secondary_party", "secondary_role"],
+		)
+		mapped_suppliers = set()
+		for pl in party_links:
+			# Customer (primary) -> Supplier (secondary)
+			if pl.secondary_role == "Supplier" and pl.primary_party in filters["party"]:
+				mapped_suppliers.add(pl.secondary_party)
+			# Supplier (primary) -> Customer (secondary) where the customer is selected
+			if pl.primary_role == "Supplier" and pl.secondary_party in filters["party"]:
+				mapped_suppliers.add(pl.primary_party)
+
+		secondary_filters.party = list(mapped_suppliers)
+
 	# 1. Get columns & data for Receivable (main) and Payable (secondary).
 	main_columns, main_data = AccountsReceivablePayableSummary(filters).run(args)
-	secondary_columns, secondary_data = AccountsReceivablePayableSummary(filters).run(secondary_args)
+	secondary_columns, secondary_data = AccountsReceivablePayableSummary(secondary_filters).run(secondary_args)
 
 	# Filter main_data based on customers if sales person filter is applied
 	if customers:
@@ -263,11 +284,30 @@ def execute(filters=None):
 
 		skip_set.add(secondary)
 
-	# 5. Get currency fields for adjustments
-	currency_fields = []
-	for col in main_columns:
-		if col.get("fieldtype") == "Currency":
-			currency_fields.append(col["fieldname"])
+	# 5. Define numeric fields to net (non-ageing)
+	numeric_fields = [
+		"invoiced",
+		"paid",
+		"credit_note",
+		"outstanding",
+		"total_due",
+		"future_amount",
+		"opening",
+	]
+
+	if filters.get("show_gl_balance"):
+		numeric_fields.extend(["gl_balance", "diff"])
+
+	if filters.get("show_future_payments"):
+		numeric_fields.append("remaining_balance")
+
+	# Ageing buckets (range1, range2, ...) taken directly from columns
+	ageing_bucket_fields = [
+		col.get("fieldname")
+		for col in main_columns
+		if col.get("fieldname", "").startswith("range")
+	]
+	ageing_bucket_fields = [f for f in ageing_bucket_fields if f]
 
 	# 5a. Build mapping of customer parties to their linked supplier parties
 	# and get supplier invoice/received amounts for those suppliers
@@ -343,13 +383,18 @@ def execute(filters=None):
 			# Make a copy so we don't overwrite main_dict
 			updated_row = row.copy()
 			
-			# Subtract AP amounts from AR amounts for all currency fields
 			sec_row = secondary_dict[party]
 			updated_row["secondary_party_type"] = sec_row["party_type"]
 			updated_row["secondary_party"] = sec_row["party"]
 			updated_row["is_common_party"] = True
 			
-			for fieldname in currency_fields:
+			for fieldname in numeric_fields:
+				updated_row[fieldname] = (
+					flt(updated_row.get(fieldname, 0.0)) 
+					- flt(sec_row.get(fieldname, 0.0))
+				)
+
+			for fieldname in ageing_bucket_fields:
 				updated_row[fieldname] = (
 					flt(updated_row.get(fieldname, 0.0)) 
 					- flt(sec_row.get(fieldname, 0.0))
@@ -386,8 +431,14 @@ def execute(filters=None):
 							primary_row = secondary_dict[primary_party_for_secondary]
 							updated_row["secondary_party_type"] = primary_row["party_type"]
 							updated_row["secondary_party"] = primary_party_for_secondary
-							# Net AR - AP for all currency fields
-							for fieldname in currency_fields:
+							# Net AR - AP for defined numeric fields
+							for fieldname in numeric_fields:
+								updated_row[fieldname] = (
+									flt(updated_row.get(fieldname, 0.0)) 
+									- flt(primary_row.get(fieldname, 0.0))
+								)
+
+							for fieldname in ageing_bucket_fields:
 								updated_row[fieldname] = (
 									flt(updated_row.get(fieldname, 0.0)) 
 									- flt(primary_row.get(fieldname, 0.0))
@@ -405,7 +456,13 @@ def execute(filters=None):
 						sec_row = secondary_dict[secondary_party]
 						updated_row["secondary_party_type"] = sec_row["party_type"]
 						updated_row["secondary_party"] = sec_row["party"]
-						for fieldname in currency_fields:
+						for fieldname in numeric_fields:
+							updated_row[fieldname] = (
+								flt(updated_row.get(fieldname, 0.0)) 
+								- flt(sec_row.get(fieldname, 0.0))
+							)
+
+						for fieldname in ageing_bucket_fields:
 							updated_row[fieldname] = (
 								flt(updated_row.get(fieldname, 0.0)) 
 								- flt(sec_row.get(fieldname, 0.0))
