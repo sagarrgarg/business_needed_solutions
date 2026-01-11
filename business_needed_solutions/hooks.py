@@ -247,7 +247,8 @@ doc_events = {
 fixtures = [
             # {"doctype": "Client Script", "filters": [["module" , "in" , ("Business Needed Solutions" )]]},
             # {"doctype": "Print Format", "filters": [["module" , "in" , ("Business Needed Solutions" )]],"overwrite": True},
-            {"doctype": "Custom Field", "filters": [["module" , "in" , ("Business Needed Solutions" )]],"overwrite": True}
+            {"doctype": "Custom Field", "filters": [["module" , "in" , ("Business Needed Solutions" )]],"overwrite": True},
+            {"doctype":"Terms and Conditions", "filters": [["name" , "in" , ("General" )]],"overwrite": True}
         ]
 # fixtures = [{"doctype": "Report", "filters": [["module" , "in" , ("Business Needed Solutions" )]]}]
 

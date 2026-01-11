@@ -1,0 +1,14 @@
+[
+ {
+  "buying": 0,
+  "disabled": 0,
+  "docstatus": 0,
+  "doctype": "Terms and Conditions",
+  "hr": 0,
+  "modified": "2026-01-11 21:09:15.731854",
+  "name": "General",
+  "selling": 1,
+  "terms": "<div class=\"ql-editor read-mode\"><ol><li data-list=\"ordered\"><span class=\"ql-ui\" contenteditable=\"false\"></span>Payment shall be made strictly as per this invoice or the MSME Act, whichever is applicable.</li><li data-list=\"ordered\"><span class=\"ql-ui\" contenteditable=\"false\"></span>Delayed payments shall attract interest at <strong>24% per annum</strong> until realization.</li><li data-list=\"ordered\"><span class=\"ql-ui\" contenteditable=\"false\"></span>Invoice shall be deemed accepted if no written objection is raised within <strong>7 days</strong>.</li><li data-list=\"ordered\"><span class=\"ql-ui\" contenteditable=\"false\"></span>Goods once sold shall not be returned, replaced, or exchanged under any circumstances.</li><li data-list=\"ordered\"><span class=\"ql-ui\" contenteditable=\"false\"></span>All disputes are subject to <strong>Delhi jurisdiction only</strong>.<br></li></ol></div>",
+  "title": "General"
+ }
+]
