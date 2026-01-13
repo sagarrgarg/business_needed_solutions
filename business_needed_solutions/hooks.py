@@ -57,12 +57,12 @@ doctype_js = {
               
               # Sales Documents
               "Sales Invoice" : "public/js/doctype_item_grid_controls.js",
-              "Sales Order" : "public/js/doctype_item_grid_controls.js",
+              "Sales Order" : ["public/js/doctype_item_grid_controls.js", "public/js/update_items_override.js"],
               "Delivery Note" : ["public/js/delivery_note.js?v=130", "public/js/doctype_item_grid_controls.js"],
               
               # Purchase Documents
               "Purchase Invoice" : "public/js/doctype_item_grid_controls.js",
-              "Purchase Order" : "public/js/doctype_item_grid_controls.js",
+              "Purchase Order" : ["public/js/doctype_item_grid_controls.js", "public/js/update_items_override.js"],
               "Purchase Receipt" : ["public/js/purchase_receipt_form.js", "public/js/doctype_item_grid_controls.js"],
               
               # Warehouse

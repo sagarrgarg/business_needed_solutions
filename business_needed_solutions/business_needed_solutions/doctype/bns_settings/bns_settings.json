@@ -17,6 +17,7 @@
  "item_grid_section",
  "enable_uom_restriction",
  "enable_conversion_tags",
+ "enable_custom_update_items_po_so",
  
  "tab_break_submission",
  "submission_section",
@@ -63,6 +64,13 @@
    "fieldtype": "Check",
    "label": "Enable Conversion Tags"
   },
+ {
+  "default": "0",
+  "description": "When enabled, ERPNext's standard 'Update Items' button on Sales Order / Purchase Order will be replaced by BNS Update Items (supports Price List Rate + Discounts based pricing).",
+  "fieldname": "enable_custom_update_items_po_so",
+  "fieldtype": "Check",
+  "label": "Enable BNS Update Items for Sales/Purchase Orders"
+ },
   {
    "default": "Single",
    "fieldname": "discount_type",
