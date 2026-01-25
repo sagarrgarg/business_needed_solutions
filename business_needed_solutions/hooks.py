@@ -161,9 +161,9 @@ doctype_list_js = {
 # ---------------
 # Override standard doctype classes
 
-# override_doctype_class = {
-# 	"ToDo": "custom_app.overrides.CustomToDo"
-# }
+override_doctype_class = {
+    "Stock Entry": "business_needed_solutions.business_needed_solutions.overrides.stock_entry_component_qty_variance.BNSStockEntry"
+}
 
 # Document Events
 # ---------------
