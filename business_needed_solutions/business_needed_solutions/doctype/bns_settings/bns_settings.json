@@ -12,6 +12,12 @@
   "enforce_pan_uniqueness",
   "enforce_expense_account_for_non_stock_items",
 
+  "tab_break_gst_compliance",
+  "gst_compliance_section",
+  "block_purchase_invoice_same_gstin",
+  "column_break_gst",
+  "enable_internal_dn_ewaybill",
+
   "tab_break_grid",
   "item_grid_section",
   "enable_uom_restriction",
@@ -83,6 +89,34 @@
    "fieldname": "enforce_expense_account_for_non_stock_items",
    "fieldtype": "Check",
    "label": "Enforce Expense Account for Non-Stock Items"
+  },
+  {
+   "fieldname": "tab_break_gst_compliance",
+   "fieldtype": "Tab Break",
+   "label": "GST & Compliance"
+  },
+  {
+   "fieldname": "gst_compliance_section",
+   "fieldtype": "Section Break",
+   "label": "GST Validation Controls"
+  },
+  {
+   "default": "0",
+   "description": "Block Purchase Invoice submission when Supplier GSTIN and Company GSTIN are the same.",
+   "fieldname": "block_purchase_invoice_same_gstin",
+   "fieldtype": "Check",
+   "label": "Block Purchase Invoice with Same GSTIN"
+  },
+  {
+   "fieldname": "column_break_gst",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "description": "Auto-generate e-Waybill for Delivery Notes when customer is BNS internal and billing GSTIN equals company GSTIN (respects GST Settings thresholds).",
+   "fieldname": "enable_internal_dn_ewaybill",
+   "fieldtype": "Check",
+   "label": "Auto e-Waybill for Internal Customer DN"
   },
   {
    "fieldname": "tab_break_grid",
@@ -269,7 +303,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-01-25 14:00:00.000000",
+ "modified": "2026-01-25 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "Business Needed Solutions",
  "name": "BNS Settings",
