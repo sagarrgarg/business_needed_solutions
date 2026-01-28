@@ -11,12 +11,6 @@ frappe.query_reports["Party GL"] = {
 			default: frappe.defaults.get_user_default("Company"),
 			reqd: 1,
 		},
-		// {
-		// 	fieldname: "finance_book",
-		// 	label: __("Finance Book"),
-		// 	fieldtype: "Link",
-		// 	options: "Finance Book",
-		// },
 		{
 			fieldname: "from_date",
 			label: __("From Date"),
@@ -37,7 +31,7 @@ frappe.query_reports["Party GL"] = {
 			fieldname: "account",
 			label: __("Account"),
 			fieldtype: "MultiSelectList",
-			hidden:1,
+			hidden: 1,
 			options: "Account",
 			get_data: function (txt) {
 				return frappe.db.get_link_options("Account", txt, {
@@ -49,7 +43,7 @@ frappe.query_reports["Party GL"] = {
 			fieldname: "voucher_no",
 			label: __("Voucher No"),
 			fieldtype: "Data",
-			hidden:1,
+			hidden: 1,
 			on_change: function () {
 				frappe.query_report.set_filter_value("group_by", "Group by Voucher (Consolidated)");
 			},
@@ -58,63 +52,43 @@ frappe.query_reports["Party GL"] = {
 			fieldname: "against_voucher_no",
 			label: __("Against Voucher No"),
 			fieldtype: "Data",
-			hidden:1,
+			hidden: 1,
 		},
 		{
 			fieldname: "party",
 			label: __("Party"),
 			fieldtype: "MultiSelectList",
-		
 			get_data: function (txt) {
-				// Hardcode the party types to be "Customer" and "Supplier"
 				let party_types = ["Customer", "Supplier"];
-		
-				// For each type, fetch matching options
 				let promises = party_types.map((party_type) =>
 					frappe.db.get_link_options(party_type, txt)
 				);
-		
-				// Merge the lists from each doctype
 				return Promise.all(promises).then((results) => {
 					let options = [].concat(...results);
 					return options;
 				});
 			},
-		
 			on_change: function () {
-				// Get the current list of selected parties
 				let parties = frappe.query_report.get_filter_value("party") || [];
-		
-				// If the user selects more than one item,
-				// keep ONLY the newly selected item (the last in the array)
 				if (parties.length > 1) {
 					let newest = parties[parties.length - 1];
 					parties = [newest];
 					frappe.query_report.set_filter_value("party", parties);
 				}
-		
-				// Now `parties` has either 0 or 1 item
 				if (!parties.length) {
-					// If nothing is selected, clear the dependent fields
 					frappe.query_report.set_filter_value("party_name", "");
 					frappe.query_report.set_filter_value("tax_id", "");
 					return;
 				}
-		
-				// We have exactly 1 selected party now
 				let party = parties[0];
-		
-				// Check if it's a Customer or Supplier, fetch name & tax_id
 				let party_types = ["Customer", "Supplier"];
 				party_types.forEach((party_type) => {
 					frappe.db.exists(party_type, party).then((exists) => {
 						if (exists) {
 							let fieldname = erpnext.utils.get_party_name(party_type) || "name";
-		
 							frappe.db.get_value(party_type, party, fieldname, function (value) {
 								frappe.query_report.set_filter_value("party_name", value[fieldname]);
 							});
-		
 							frappe.db.get_value(party_type, party, "tax_id", function (value) {
 								frappe.query_report.set_filter_value("tax_id", value["tax_id"]);
 							});
@@ -123,9 +97,6 @@ frappe.query_reports["Party GL"] = {
 				});
 			},
 		},
-		
-		
-		
 		{
 			fieldname: "party_name",
 			label: __("Party Name"),
@@ -138,26 +109,14 @@ frappe.query_reports["Party GL"] = {
 		{
 			fieldname: "group_by",
 			label: __("Group by"),
-			hidden:1,
+			hidden: 1,
 			fieldtype: "Select",
 			options: [
 				"",
-				{
-					label: __("Group by Voucher"),
-					value: "Group by Voucher",
-				},
-				{
-					label: __("Group by Voucher (Consolidated)"),
-					value: "Group by Voucher (Consolidated)",
-				},
-				{
-					label: __("Group by Account"),
-					value: "Group by Account",
-				},
-				{
-					label: __("Group by Party"),
-					value: "Group by Party",
-				},
+				{ label: __("Group by Voucher"), value: "Group by Voucher" },
+				{ label: __("Group by Voucher (Consolidated)"), value: "Group by Voucher (Consolidated)" },
+				{ label: __("Group by Account"), value: "Group by Account" },
+				{ label: __("Group by Party"), value: "Group by Party" },
 			],
 			default: "Group by Voucher (Consolidated)",
 		},
@@ -171,13 +130,13 @@ frappe.query_reports["Party GL"] = {
 			fieldname: "presentation_currency",
 			label: __("Currency"),
 			fieldtype: "Select",
-			hidden:1,
+			hidden: 1,
 			options: erpnext.get_presentation_currency_list(),
 		},
 		{
 			fieldname: "cost_center",
 			label: __("Cost Center"),
-			default:"",
+			default: "",
 			fieldtype: "MultiSelectList",
 			get_data: function (txt) {
 				return frappe.db.get_link_options("Cost Center", txt, {
@@ -188,7 +147,7 @@ frappe.query_reports["Party GL"] = {
 		{
 			fieldname: "project",
 			label: __("Project"),
-			hidden:1,
+			hidden: 1,
 			fieldtype: "MultiSelectList",
 			get_data: function (txt) {
 				return frappe.db.get_link_options("Project", txt, {
@@ -217,7 +176,7 @@ frappe.query_reports["Party GL"] = {
 			fieldname: "show_cancelled_entries",
 			label: __("Show Cancelled Entries"),
 			fieldtype: "Check",
-			hidden:1,
+			hidden: 1,
 		},
 		{
 			fieldname: "show_net_values_in_party_account",
@@ -245,94 +204,238 @@ frappe.query_reports["Party GL"] = {
 			fieldtype: "Check",
 		},
 	],
+	
 	onload: function(report) {
-		// Load company and party details for header
-		report.on("after_render", function() {
-			loadHeaderDetails(report);
-		});
-		// Also load immediately
+		// Add Download Statement button after a short delay
 		setTimeout(function() {
-			loadHeaderDetails(report);
-		}, 500);
+			if (!document.querySelector('.btn-download-statement')) {
+				report.page.add_inner_button(__("Download Statement"), function() {
+					downloadStatementPDF(report);
+				}).addClass('btn-primary btn-download-statement');
+			}
+		}, 300);
+		
+		// Load statement meta on initial render
+		setTimeout(function() {
+			loadStatementMeta(report);
+		}, 800);
+	},
+	
+	after_datatable_render: function(datatable) {
+		// Load statement meta after datatable renders
+		loadStatementMeta(frappe.query_report);
 	},
 };
 
-function loadHeaderDetails(report) {
-	var company = report.get_filter_value("company");
-	var party = report.get_filter_value("party");
+// Global storage for statement metadata (used by HTML template during PDF generation)
+window._party_gl_statement_meta = null;
+
+/**
+ * Load all statement metadata from server in a single call.
+ * This ensures all data is available for both screen and PDF rendering.
+ */
+function loadStatementMeta(report) {
+	var filters = report.get_filter_values();
 	
-	if (company) {
-		frappe.call({
-			method: "frappe.client.get",
-			args: {
-				doctype: "Company",
-				name: company,
-				fields: ["logo_for_printing", "bns_previously_known_as"]
-			},
-			callback: function(r) {
-				if (r.message) {
-					var company_data = r.message;
-					
-					// Load logo
-					var logoContainer = document.getElementById("company-logo-container");
-					if (logoContainer && company_data.logo_for_printing) {
-						logoContainer.innerHTML = '<div><img height="125px" width="150px" src="' + company_data.logo_for_printing + '"></div>';
-					}
-					
-					// Load previously known as
-					var previouslyKnownAs = document.getElementById("company-previously-known-as");
-					if (previouslyKnownAs && company_data.bns_previously_known_as) {
-						previouslyKnownAs.innerHTML = "Previously Known As: " + company_data.bns_previously_known_as;
-					}
-				}
-			}
-		});
+	if (!filters.party || !filters.party.length) {
+		return;
 	}
 	
-	if (party && party.length > 0) {
-		var party_name = party[0];
-		
-		// Determine party type
-		frappe.db.exists("Customer", party_name).then(function(is_customer) {
-			var party_type = is_customer ? "Customer" : "Supplier";
-			
-			// Get primary address
-			frappe.call({
-				method: "frappe.contacts.doctype.address.address.get_default_address",
-				args: {
-					doctype: party_type,
-					name: party_name
-				},
-				callback: function(addr_r) {
-					if (addr_r.message) {
-						frappe.call({
-							method: "frappe.client.get",
-							args: {
-								doctype: "Address",
-								name: addr_r.message,
-								fields: ["address_line1", "address_line2", "city", "state", "pincode", "country"]
-							},
-							callback: function(addr_detail_r) {
-								if (addr_detail_r.message) {
-									var addr = addr_detail_r.message;
-									var addressContainer = document.getElementById("party-address-container");
-									if (addressContainer && addr.address_line1) {
-										var html = '<p style="margin-bottom:2px;">' + addr.address_line1;
-										if (addr.address_line2) {
-											html += ' ' + addr.address_line2 + '<br>';
-										} else {
-											html += '<br>';
-										}
-										html += addr.city + ', ' + addr.state + ', ' + addr.country + ': ' + addr.pincode + '</p>';
-										addressContainer.innerHTML = html;
-									}
-								}
-							}
-						});
-					}
+	console.log("Loading statement meta for party:", filters.party);
+	
+	// Call the server-side method to get all metadata
+	frappe.call({
+		method: "business_needed_solutions.business_needed_solutions.report.party_gl.party_gl.get_statement_meta",
+		args: { filters: filters },
+		async: false,  // Synchronous to ensure data is available before PDF
+		callback: function(r) {
+			if (r.message) {
+				console.log("Statement meta loaded:", r.message);
+				
+				window._party_gl_statement_meta = r.message;
+				
+				// Store on report object for template access during PDF generation
+				report._statement_meta = r.message;
+				
+				// Also store on frappe.query_report to ensure it's accessible
+				if (frappe.query_report) {
+					frappe.query_report._statement_meta = r.message;
 				}
-			});
+				
+				// Update DOM elements with the loaded data
+				updateDOMWithMeta(r.message, filters);
+				
+				// Update closing balance from report data
+				updateClosingBalance(report);
+			}
+		},
+		error: function(r) {
+			console.error("Error loading statement meta:", r);
+		}
+	});
+}
+
+/**
+ * Update DOM elements with metadata for on-screen display.
+ */
+function updateDOMWithMeta(meta, filters) {
+	var currency = filters.presentation_currency || frappe.boot.sysdefaults.currency;
+	
+	// Company Info
+	if (meta.company) {
+		var logoContainer = document.getElementById("company-logo-container");
+		if (logoContainer && meta.company.logo) {
+			logoContainer.innerHTML = '<img src="' + meta.company.logo + '" height="125px" width="150px">';
+		}
+		
+		var nameDisplay = document.getElementById("company-name-display");
+		if (nameDisplay) {
+			nameDisplay.innerHTML = '<b>' + (meta.company.name || '') + '</b>';
+		}
+		
+		var pkaDisplay = document.getElementById("company-previously-known-as");
+		if (pkaDisplay && meta.company.previously_known_as) {
+			pkaDisplay.innerHTML = "Previously Known As: " + meta.company.previously_known_as;
+		}
+		
+		// PAN and COI
+		var panCoiDisplay = document.getElementById("company-pan-coi");
+		if (panCoiDisplay) {
+			var parts = [];
+			if (meta.company.pan) parts.push('<strong>PAN:</strong> ' + meta.company.pan);
+			if (meta.company.gstin) parts.push('<strong>GSTIN:</strong> ' + meta.company.gstin);
+			if (meta.company.date_of_incorporation) parts.push('<strong>COI:</strong> ' + frappe.datetime.str_to_user(meta.company.date_of_incorporation));
+			panCoiDisplay.innerHTML = parts.join(' | ');
+		}
+	}
+	
+	// Party Info - in header
+	if (meta.party) {
+		var partyAddrHeader = document.getElementById("party-address-header");
+		if (partyAddrHeader) {
+			partyAddrHeader.innerHTML = meta.party.address || '';
+		}
+	}
+	
+	// Company details
+	if (meta.company) {
+		var companyDetails = document.getElementById("company-details");
+		if (companyDetails) {
+			var parts = [];
+			if (meta.company.pan) parts.push('PAN: ' + meta.company.pan);
+			if (meta.company.gstin) parts.push('GSTIN: ' + meta.company.gstin);
+			var html = parts.join(' | ');
+			
+			var parts2 = [];
+			if (meta.company.cin) parts2.push('CIN: ' + meta.company.cin);
+			if (meta.company.msme_no) {
+				var msmeText = 'MSME: ' + meta.company.msme_no;
+				if (meta.company.msme_type) msmeText += ' (' + meta.company.msme_type + ')';
+				parts2.push(msmeText);
+			}
+			if (parts2.length > 0) {
+				html += '<br>' + parts2.join(' | ');
+			}
+			companyDetails.innerHTML = html;
+		}
+	}
+	
+	// Bank Details (for Customers)
+	if (meta.bank_details && Object.keys(meta.bank_details).length > 0) {
+		var bankContainer = document.getElementById("bank-details-container");
+		if (bankContainer) {
+			bankContainer.style.display = "block";
+		}
+		
+		var bankContent = document.getElementById("bank-details-content");
+		if (bankContent) {
+			var bank = meta.bank_details;
+			var html = '';
+			if (bank.bank) html += '<div class="bank-row"><span class="bank-label">Bank Name:</span> ' + bank.bank + '</div>';
+			if (bank.account_name) html += '<div class="bank-row"><span class="bank-label">Account Name:</span> ' + bank.account_name + '</div>';
+			if (bank.bank_account_no) html += '<div class="bank-row"><span class="bank-label">Account Number:</span> ' + bank.bank_account_no + '</div>';
+			if (bank.branch_code) html += '<div class="bank-row"><span class="bank-label">Branch/IFSC:</span> ' + bank.branch_code + '</div>';
+			if (bank.iban) html += '<div class="bank-row"><span class="bank-label">IBAN:</span> ' + bank.iban + '</div>';
+			bankContent.innerHTML = html;
+		}
+	}
+}
+
+/**
+ * Update closing balance from report data.
+ */
+function updateClosingBalance(report) {
+	if (!report.data || !report.data.length) return;
+	
+	// Find the last row which should be the closing balance
+	var lastRow = report.data[report.data.length - 1];
+	
+	// The balance field is formatted as "123.45 Dr" or "123.45 Cr"
+	var closingBalance = lastRow.balance || '';
+	
+	var container = document.getElementById("closing-balance-display");
+	if (container && closingBalance) {
+		container.innerHTML = closingBalance;
+	}
+	
+	// Also store it in meta for PDF
+	if (report._statement_meta) {
+		report._statement_meta.closing_balance = closingBalance;
+	}
+	if (window._party_gl_statement_meta) {
+		window._party_gl_statement_meta.closing_balance = closingBalance;
+	}
+}
+
+/**
+ * Download Statement as PDF.
+ * Ensures meta data is loaded before triggering PDF generation.
+ */
+async function downloadStatementPDF(report) {
+	var filters = report.get_filter_values();
+	
+	if (!filters.party || !filters.party.length) {
+		frappe.msgprint(__("Please select a Party first"));
+		return;
+	}
+	
+	if (!report.data || !report.data.length) {
+		frappe.msgprint(__("Please run the report first"));
+		return;
+	}
+	
+	// Ensure meta is loaded (synchronous call)
+	if (!window._party_gl_statement_meta) {
+		loadStatementMeta(report);
+	}
+	
+	// Store original get_filter_values function
+	var original_get_filter_values = frappe.query_report.get_filter_values;
+	
+	// Override temporarily to return clean filter values (fixes toString() error on undefined)
+	frappe.query_report.get_filter_values = function() {
+		var vals = original_get_filter_values.call(frappe.query_report);
+		Object.keys(vals).forEach(function(key) {
+			if (vals[key] === undefined || vals[key] === null) {
+				vals[key] = "";
+			}
 		});
+		return vals;
+	};
+	
+	// Trigger PDF generation
+	var print_settings = {
+		orientation: "Portrait"
+	};
+	
+	try {
+		await frappe.query_report.pdf_report(print_settings);
+	} catch(e) {
+		console.error("PDF generation error:", e);
+		frappe.msgprint(__("Error generating PDF: ") + e.message);
+	} finally {
+		// Restore original function
+		frappe.query_report.get_filter_values = original_get_filter_values;
 	}
 }
 

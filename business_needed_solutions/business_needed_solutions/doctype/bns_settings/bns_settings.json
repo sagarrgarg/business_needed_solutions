@@ -4,68 +4,84 @@
  "creation": "2025-04-05 02:44:18.812451",
  "doctype": "DocType",
  "engine": "InnoDB",
- "field_order": [
-  "tab_break_general",
-  "general_section",
-  "discount_type",
-  "column_break_pan",
-  "enforce_pan_uniqueness",
-  "enforce_expense_account_for_non_stock_items",
+"field_order": [
+ "tab_break_general",
+ "general_section",
+ "discount_type",
+ "column_break_pan",
+ "enforce_pan_uniqueness",
+ "enforce_stock_update_or_reference",
+ "enforce_expense_account_for_non_stock_items",
+ 
+ "tab_break_grid",
+ "item_grid_section",
+ "enable_uom_restriction",
+ "enable_conversion_tags",
+ "enable_custom_update_items_po_so",
+ 
+ "tab_break_submission",
+ "submission_section",
+ "restrict_submission",
+ "submission_restriction_override_roles",
+ "enable_per_warehouse_negative_stock_disallow",
+ 
+ "tab_break_print",
+ "print_format_section",
+ "print_format",
+ "section_break_rates",
+ "rate_incl_tax",
+ "rate_excl_tax",
+ "column_break_rates",
+ "is_item_amount_tax_incl",
+ "secondary_rate_display",
+ "secondary_rate_field",
+ "section_break_display",
+ "show_item_code",
+ "bns_show_item_barcode",
 
-  "tab_break_gst_compliance",
-  "gst_compliance_section",
-  "block_purchase_invoice_same_gstin",
-  "column_break_gst",
-  "enable_internal_dn_ewaybill",
-
-  "tab_break_grid",
-  "item_grid_section",
-  "enable_uom_restriction",
-  "enable_conversion_tags",
-  "enable_custom_update_items_po_so",
-  "stock_entry_controls_section",
-  "enforce_stock_update_or_reference",
-  "enable_per_warehouse_negative_stock_disallow",
-
-  "tab_break_manufacturing",
-  "manufacturing_section",
-  "enforce_bom_for_manufacture",
-  "enable_bns_variance_qty",
-  "bns_default_variance_qty",
-
-  "tab_break_submission",
-  "submission_section",
-  "restrict_submission",
-  "submission_restriction_override_roles",
-
-  "tab_break_print",
-  "print_format_section",
-  "print_format",
-  "section_break_rates",
-  "rate_incl_tax",
-  "column_break_rates",
-  "rate_excl_tax",
-  "is_item_amount_tax_incl",
-  "section_break_display",
-  "show_item_code",
-  "bns_show_item_barcode",
-  "secondary_rate_display",
-  "secondary_rate_field"
+ "tab_break_accounts",
+ "reconciliation_section",
+ "enable_auto_fifo_reconciliation",
+ "include_future_payments_in_reconciliation",
+ "reconciliation_batch_size",
+ "column_break_reconciliation",
+ "last_reconciliation_run",
+ "last_reconciliation_status"
  ],
- "fields": [
-  {
-   "fieldname": "tab_break_general",
-   "fieldtype": "Tab Break",
-   "label": "General"
+"fields": [
+ {
+  "fieldname": "tab_break_general",
+  "fieldtype": "Tab Break",
+  "label": "General Settings"
+ },
+ {
+  "fieldname": "general_section",
+  "fieldtype": "Section Break",
+  "label": "General Controls"
   },
   {
-   "fieldname": "general_section",
-   "fieldtype": "Section Break",
-   "label": "Pricing & Data Validation"
+   "default": "1",
+   "description": "Enable UOM restriction in Stock Entry grid based on Item's allowed UOMs",
+   "fieldname": "enable_uom_restriction",
+   "fieldtype": "Check",
+   "label": "Enable UOM Restriction"
   },
+  {
+   "default": "1", 
+   "description": "Show conversion tags/badges in Stock Entry grid",
+   "fieldname": "enable_conversion_tags",
+   "fieldtype": "Check",
+   "label": "Enable Conversion Tags"
+  },
+ {
+  "default": "0",
+  "description": "When enabled, ERPNext's standard 'Update Items' button on Sales Order / Purchase Order will be replaced by BNS Update Items (supports Price List Rate + Discounts based pricing).",
+  "fieldname": "enable_custom_update_items_po_so",
+  "fieldtype": "Check",
+  "label": "Enable BNS Update Items for Sales/Purchase Orders"
+ },
   {
    "default": "Single",
-   "description": "Controls how discounts are calculated: Single applies one discount, Triple Compounded applies three discounts sequentially.",
    "fieldname": "discount_type",
    "fieldtype": "Select",
    "label": "Discount Type",
@@ -73,205 +89,150 @@
    "permlevel": 1
   },
   {
+   "fieldname": "general_section",
+   "fieldtype": "Section Break"
+  },
+  {
    "fieldname": "column_break_pan",
    "fieldtype": "Column Break"
   },
   {
    "default": "0",
-   "description": "Ensures PAN numbers are unique across all customers and suppliers to prevent duplicate entries.",
    "fieldname": "enforce_pan_uniqueness",
    "fieldtype": "Check",
-   "label": "Enforce PAN Uniqueness"
+   "label": "Enforce PAN Uniqueness",
+   "description": "Ensures PAN numbers are unique across all customers and suppliers to prevent duplicate entries and maintain data integrity."
   },
   {
    "default": "0",
-   "description": "Requires non-stock items (except fixed assets) to have an expense account configured.",
-   "fieldname": "enforce_expense_account_for_non_stock_items",
-   "fieldtype": "Check",
-   "label": "Enforce Expense Account for Non-Stock Items"
-  },
-  {
-   "fieldname": "tab_break_gst_compliance",
-   "fieldtype": "Tab Break",
-   "label": "GST & Compliance"
-  },
-  {
-   "fieldname": "gst_compliance_section",
-   "fieldtype": "Section Break",
-   "label": "GST Validation Controls"
-  },
-  {
-   "default": "0",
-   "description": "Block Purchase Invoice submission when Supplier GSTIN and Company GSTIN are the same.",
-   "fieldname": "block_purchase_invoice_same_gstin",
-   "fieldtype": "Check",
-   "label": "Block Purchase Invoice with Same GSTIN"
-  },
-  {
-   "fieldname": "column_break_gst",
-   "fieldtype": "Column Break"
-  },
-  {
-   "default": "0",
-   "description": "Auto-generate e-Waybill for Delivery Notes when customer is BNS internal and billing GSTIN equals company GSTIN (respects GST Settings thresholds).",
-   "fieldname": "enable_internal_dn_ewaybill",
-   "fieldtype": "Check",
-   "label": "Auto e-Waybill for Internal Customer DN"
-  },
-  {
-   "fieldname": "tab_break_grid",
-   "fieldtype": "Tab Break",
-   "label": "Stock & Inventory"
-  },
-  {
-   "fieldname": "item_grid_section",
-   "fieldtype": "Section Break",
-   "label": "Item Grid Controls"
-  },
-  {
-   "default": "1",
-   "description": "Restrict UOM selection in Stock Entry grid to Item's allowed UOMs only.",
-   "fieldname": "enable_uom_restriction",
-   "fieldtype": "Check",
-   "label": "Enable UOM Restriction"
-  },
-  {
-   "default": "1",
-   "description": "Show conversion tags/badges in Stock Entry grid for quick reference.",
-   "fieldname": "enable_conversion_tags",
-   "fieldtype": "Check",
-   "label": "Enable Conversion Tags"
-  },
-  {
-   "default": "0",
-   "description": "Replace ERPNext's 'Update Items' on Sales/Purchase Orders with BNS version (supports Price List Rate + Discounts).",
-   "fieldname": "enable_custom_update_items_po_so",
-   "fieldtype": "Check",
-   "label": "Enable BNS Update Items for Orders"
-  },
-  {
-   "fieldname": "stock_entry_controls_section",
-   "fieldtype": "Section Break",
-   "label": "Stock Validation"
-  },
-  {
-   "default": "0",
-   "description": "Requires stock items in invoices to either update stock directly or reference a delivery note/purchase receipt.",
    "fieldname": "enforce_stock_update_or_reference",
    "fieldtype": "Check",
-   "label": "Enforce Stock Update or Reference"
+   "label": "Enforce Stock Update or Reference",
+   "description": "Requires stock items in invoices to either update stock directly or reference a delivery note/purchase receipt for accurate inventory tracking."
   },
   {
-   "default": "0",
-   "description": "Allow warehouses to individually disallow negative stock even when global 'Allow Negative Stock' is enabled.",
-   "fieldname": "enable_per_warehouse_negative_stock_disallow",
-   "fieldtype": "Check",
-   "label": "Enable Per-Warehouse Negative Stock Control"
-  },
-  {
-   "fieldname": "tab_break_manufacturing",
-   "fieldtype": "Tab Break",
-   "label": "Manufacturing"
-  },
-  {
-   "fieldname": "manufacturing_section",
+   "fieldname": "section_break_submission_control",
    "fieldtype": "Section Break",
-   "label": "BOM & Stock Entry Controls"
+   "label": "Submission Control"
   },
   {
    "default": "0",
-   "description": "Require BOM for Manufacture Stock Entry and enforce that components match the BOM exactly.",
-   "fieldname": "enforce_bom_for_manufacture",
-   "fieldtype": "Check",
-   "label": "Enforce BOM for Manufacture"
-  },
-  {
-   "default": "0",
-   "description": "Allow ±% variance in component quantities instead of requiring exact BOM quantities during Stock Entry validation.",
-   "fieldname": "enable_bns_variance_qty",
-   "fieldtype": "Check",
-   "label": "Enable BOM Quantity Variance"
-  },
-  {
-   "default": "0",
-   "depends_on": "enable_bns_variance_qty",
-   "description": "Default allowed variance (±%). Individual BOM items can override this value.",
-   "fieldname": "bns_default_variance_qty",
-   "fieldtype": "Percent",
-   "label": "Default Variance (%)"
-  },
-  {
-   "fieldname": "tab_break_submission",
-   "fieldtype": "Tab Break",
-   "label": "Submission"
-  },
-  {
-   "fieldname": "submission_section",
-   "fieldtype": "Section Break",
-   "label": "Document Submission Controls"
-  },
-  {
-   "default": "0",
-   "description": "Restrict document submission across all categories (Stock, Transaction, Order) to specific roles.",
+   "description": "Restrict submission of documents across all categories (Stock, Transaction, Order)",
    "fieldname": "restrict_submission",
    "fieldtype": "Check",
    "label": "Restrict Document Submission"
   },
   {
    "depends_on": "restrict_submission",
-   "description": "Roles that can submit documents in addition to System Manager.",
+   "description": "Select roles that can submit documents in addition to System Manager",
    "fieldname": "submission_restriction_override_roles",
    "fieldtype": "Table MultiSelect",
-   "label": "Allowed Roles",
+   "label": "Override Submission Restriction",
    "options": "Has Role"
   },
   {
-   "fieldname": "tab_break_print",
-   "fieldtype": "Tab Break",
-   "label": "Print Format"
+   "default": "0",
+   "description": "Enable warehouse-level negative stock restriction. When enabled, warehouses can individually disallow negative stock even if 'Allow Negative Stock' is enabled in Stock Settings.",
+   "fieldname": "enable_per_warehouse_negative_stock_disallow",
+   "fieldtype": "Check",
+   "insert_after": "submission_restriction_override_roles",
+   "label": "Enable Per Warehouse Negative Stock Disallow"
   },
   {
-   "fieldname": "print_format_section",
-   "fieldtype": "Section Break",
-   "label": "Print Format Configuration"
+   "default": "0",
+   "fieldname": "enforce_expense_account_for_non_stock_items",
+   "fieldtype": "Check",
+   "label": "Enforce Expense Account for Non-Stock Items",
+   "description": "Requires non-stock items (except fixed assets) to have an expense account configured for proper accounting and tracking."
   },
   {
-   "fieldname": "print_format",
-   "fieldtype": "Table",
-   "label": "Print Formats",
-   "options": "BNS Settings Print Format"
-  },
-  {
-   "fieldname": "section_break_rates",
-   "fieldtype": "Section Break",
-   "label": "Rate Display Options"
+   "fieldname": "tab_break_grid",
+  "fieldtype": "Tab Break",
+  "label": "Item Grid Controls"
+ },
+ {
+  "fieldname": "item_grid_section",
+  "fieldtype": "Section Break",
+  "label": "Item Grid Settings"
+ },
+ {
+  "fieldname": "tab_break_submission",
+  "fieldtype": "Tab Break",
+  "label": "Document Submission"
+ },
+ {
+  "fieldname": "submission_section",
+  "fieldtype": "Section Break",
+  "label": "Submission Controls"
+ },
+ {
+  "fieldname": "tab_break_print",
+  "fieldtype": "Tab Break",
+  "label": "Print Settings"
+ },
+ {
+  "fieldname": "print_format_section",
+  "fieldtype": "Section Break",
+  "label": "Print Format Options"
+ },
+ {
+  "fieldname": "section_break_display",
+  "fieldtype": "Section Break",
+  "label": "Item Display Options"
   },
   {
    "default": "1",
    "fieldname": "rate_incl_tax",
    "fieldtype": "Check",
-   "label": "Show Rate (Incl Tax)"
+   "label": "Rate (Incl Tax)"
   },
   {
-   "fieldname": "column_break_rates",
+   "fieldname": "column_break_giiq",
    "fieldtype": "Column Break"
   },
   {
    "default": "0",
    "fieldname": "rate_excl_tax",
    "fieldtype": "Check",
-   "label": "Show Rate (Excl Tax)"
+   "label": "Rate (Excl Tax)"
+  },
+  {
+   "fieldname": "print_format",
+   "fieldtype": "Table",
+   "label": "Print Format",
+   "options": "BNS Settings Print Format"
+  },
+  {
+   "fieldname": "section_break_vlqx",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "section_break_qbpg",
+   "fieldtype": "Section Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "secondary_rate_display",
+   "fieldtype": "Check",
+   "label": "Secondary Rate Display"
+  },
+  {
+   "depends_on": "secondary_rate_display",
+   "fieldname": "secondary_rate_field",
+   "fieldtype": "Select",
+   "label": "Secondary Rate Field",
+   "mandatory_depends_on": "secondary_rate_display",
+   "options": "print_uom\nweight_uom"
+  },
+  {
+   "fieldname": "column_break_qfib",
+   "fieldtype": "Column Break"
   },
   {
    "default": "0",
    "fieldname": "is_item_amount_tax_incl",
    "fieldtype": "Check",
    "label": "Item Amount Incl Tax"
-  },
-  {
-   "fieldname": "section_break_display",
-   "fieldtype": "Section Break",
-   "label": "Item Display Options"
   },
   {
    "default": "0",
@@ -283,27 +244,62 @@
    "default": "0",
    "fieldname": "bns_show_item_barcode",
    "fieldtype": "Check",
-   "label": "Show Item Barcode"
+   "label": "Show Item Barcode (If Available)"
+  },
+  {
+   "fieldname": "tab_break_accounts",
+   "fieldtype": "Tab Break",
+   "label": "Accounts"
+  },
+  {
+   "fieldname": "reconciliation_section",
+   "fieldtype": "Section Break",
+   "label": "Auto FIFO Payment Reconciliation"
   },
   {
    "default": "0",
-   "fieldname": "secondary_rate_display",
+   "description": "Enable automatic FIFO-based payment reconciliation for all customers and suppliers. When enabled, a daily scheduled job will match unallocated payments to oldest outstanding invoices first.",
+   "fieldname": "enable_auto_fifo_reconciliation",
    "fieldtype": "Check",
-   "label": "Enable Secondary Rate"
+   "label": "Enable Auto FIFO Reconciliation"
   },
   {
-   "depends_on": "secondary_rate_display",
-   "fieldname": "secondary_rate_field",
-   "fieldtype": "Select",
-   "label": "Secondary Rate Field",
-   "mandatory_depends_on": "secondary_rate_display",
-   "options": "print_uom\nweight_uom"
+   "default": "1",
+   "depends_on": "enable_auto_fifo_reconciliation",
+   "description": "Include future-dated payments when reconciling. This helps produce more accurate ageing reports by considering payments that will be applied.",
+   "fieldname": "include_future_payments_in_reconciliation",
+   "fieldtype": "Check",
+   "label": "Include Future Payments"
+  },
+  {
+   "default": "100",
+   "depends_on": "enable_auto_fifo_reconciliation",
+   "description": "Maximum number of allocations (payment-invoice matches) to process per run. Set to 0 for unlimited. Lower values reduce system load but require more runs to complete.",
+   "fieldname": "reconciliation_batch_size",
+   "fieldtype": "Int",
+   "label": "Batch Size (Allocations per Run)"
+  },
+  {
+   "fieldname": "column_break_reconciliation",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_reconciliation_run",
+   "fieldtype": "Datetime",
+   "label": "Last Reconciliation Run",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_reconciliation_status",
+   "fieldtype": "Data",
+   "label": "Last Reconciliation Status",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-01-25 20:00:00.000000",
+ "modified": "2025-09-22 02:55:56.144200",
  "modified_by": "Administrator",
  "module": "Business Needed Solutions",
  "name": "BNS Settings",

@@ -1,41 +1,127 @@
+/* Party GL Statement - Monochrome Print Styles */
+
+@page {
+    margin: 12mm 10mm 15mm 10mm !important;
+    size: A4;
+}
+
 .print-format {
-    margin-top: 37mm;
-    margin-left: 2mm;
-    margin-right: 2mm;
+    margin: 0 !important;
+    padding: 0 !important;
 }
 
-.print-heading {
-    border-bottom: 1px solid #000;
-    margin-bottom: -5mm;
-    color: #000;
-    font-weight: bold;
-}
-
-h6 {
-    font-weight: bold;
-    margin-top: 0px;
-    margin-bottom: 0px;
-}
-
-.no-border td {
-    border: none;
-    padding: 2px 4px;
-}
-
+/* Header */
 #header-html {
     position: static;
     top: 0;
+    background: #fff;
 }
+
+.print-heading {
+    border-bottom: 2px solid #000;
+    margin-bottom: 15px;
+    padding-bottom: 12px;
+}
+
+/* Typography */
+h3, h4, h6 {
+    font-weight: bold;
+    margin-top: 0;
+    margin-bottom: 5px;
+    color: #000;
+}
+
+/* Tables */
+.table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 15px;
+}
+
+.table th {
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 8pt;
+    text-transform: uppercase;
+    font-weight: 600;
+    padding: 10px 8px;
+}
+
+.table td {
+    padding: 8px;
+    font-size: 9pt;
+    border: 1px solid #ddd;
+}
+
+.table tbody tr:nth-child(even) td {
+    background: #f7f7f7;
+}
+
+/* Row Highlights */
+.opening-row td {
+    background: #e8e8e8 !important;
+    font-weight: 600;
+}
+
+.total-row td {
+    background: #d9d9d9 !important;
+    font-weight: 700;
+    border-top: 2px solid #666;
+}
+
+.closing-row td {
+    background: #1a1a1a !important;
+    color: #fff !important;
+    font-weight: 700;
+}
+
+/* Cards */
+.card-box {
+    background: #f5f5f5;
+    border: 1px solid #ddd;
+    padding: 12px 15px;
+}
+
+.card-box.dark {
+    background: #1a1a1a;
+    color: #fff;
+}
+
+/* Footer */
+/* #footer-html {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    background: #fff;
+} */
 
 .page-footer-1 {
     content: counter(page);
-    border-top: 2px solid black;
+    border-top:2px solid black;
     margin-top: -35mm !important;
     margin-bottom: -5mm !important;
 }
 
-#footer-html {
-    position: fixed;
-    bottom: 0;
-    width: 100%;
+/* Utilities */
+.text-right { text-align: right !important; }
+.text-center { text-align: center !important; }
+.text-muted { color: #888 !important; }
+
+/* Print */
+@media print {
+    body, html {
+        margin: 0 !important;
+        padding: 0 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    .closing-row td,
+    .card-box.dark,
+    .statement-table th {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
 }

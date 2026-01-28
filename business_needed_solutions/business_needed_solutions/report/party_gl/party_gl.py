@@ -555,6 +555,19 @@ def get_account_type_map(company):
 def get_result_as_list(data, filters):
 	balance, _balance_in_account_currency = 0, 0
 	supplier_invoice_details = get_supplier_invoice_details()  # Fetch bill_no details
+	
+	# Collect all voucher_nos by type for batch queries
+	voucher_nos_by_type = collect_voucher_nos_by_type(data)
+	
+	# Batch fetch references for Payment Entry and Journal Entry
+	payment_references = get_payment_entry_references(voucher_nos_by_type.get("Payment Entry", []))
+	journal_references = get_journal_entry_references(voucher_nos_by_type.get("Journal Entry", []))
+	
+	# Batch fetch return status for Sales Invoice and Purchase Invoice
+	invoice_return_status = get_invoice_return_status(
+		voucher_nos_by_type.get("Sales Invoice", []),
+		voucher_nos_by_type.get("Purchase Invoice", [])
+	)
 
 	for d in data:
 		if not d.get("posting_date"):
@@ -572,25 +585,168 @@ def get_result_as_list(data, filters):
 		else:
 			d["balance"] = f"{frappe.format_value(abs(balance), {'fieldtype': 'Currency', 'options': filters.account_currency})} Cr"
 
-
-
-		d["bill_no"] = supplier_invoice_details.get(d.get("voucher_no"), "")  
+		# Get supplier bill details (bill_no and bill_date)
+		bill_info = supplier_invoice_details.get(d.get("voucher_no"), {})
+		if isinstance(bill_info, dict):
+			d["bill_no"] = bill_info.get("bill_no", "")
+			d["bill_date"] = bill_info.get("bill_date", "")
+		else:
+			d["bill_no"] = bill_info or ""
+			d["bill_date"] = ""
+		
+		# Get voucher info for reference lookups
+		voucher_no = d.get("voucher_no")
+		voucher_type = d.get("voucher_type")
+		
+		# Add ref_no for Payment Entry and Journal Entry
+		if voucher_type == "Payment Entry" and voucher_no in payment_references:
+			d["ref_no"] = payment_references[voucher_no]
+		elif voucher_type == "Journal Entry" and voucher_no in journal_references:
+			d["ref_no"] = journal_references[voucher_no]
+		else:
+			d["ref_no"] = ""
+		
+		# Override voucher_subtype for Sales Invoice / Purchase Invoice returns
+		if voucher_type == "Sales Invoice" and voucher_no in invoice_return_status:
+			if invoice_return_status[voucher_no].get("is_return"):
+				d["voucher_subtype"] = _("Credit Note")
+		elif voucher_type == "Purchase Invoice" and voucher_no in invoice_return_status:
+			if invoice_return_status[voucher_no].get("is_return"):
+				d["voucher_subtype"] = _("Debit Note")
 
 		d["account_currency"] = filters.account_currency
 
 	return data
 
 
+def collect_voucher_nos_by_type(data):
+	"""
+	Collect all voucher numbers grouped by voucher type for efficient batch queries.
+	Returns dict: {voucher_type: [list of voucher_nos]}
+	"""
+	voucher_nos_by_type = {}
+	for d in data:
+		voucher_type = d.get("voucher_type")
+		voucher_no = d.get("voucher_no")
+		if voucher_type and voucher_no:
+			if voucher_type not in voucher_nos_by_type:
+				voucher_nos_by_type[voucher_type] = set()
+			voucher_nos_by_type[voucher_type].add(voucher_no)
+	
+	# Convert sets to lists for SQL queries
+	return {k: list(v) for k, v in voucher_nos_by_type.items()}
+
+
 def get_supplier_invoice_details():
+	"""Fetch bill_no and bill_date from Purchase Invoice."""
 	inv_details = {}
 	for d in frappe.db.sql(
-		""" select name, bill_no from `tabPurchase Invoice`
+		""" select name, bill_no, bill_date from `tabPurchase Invoice`
 		where docstatus = 1 and bill_no is not null and bill_no != '' """,
 		as_dict=1,
 	):
-		inv_details[d.name] = d.bill_no
+		inv_details[d.name] = {
+			"bill_no": d.bill_no,
+			"bill_date": d.bill_date
+		}
 
 	return inv_details
+
+
+def get_payment_entry_references(voucher_nos=None):
+	"""
+	Fetch reference_no (Cheque/Reference No) for Payment Entries.
+	
+	Args:
+		voucher_nos: List of Payment Entry names to filter. If None, fetches all.
+	
+	Returns:
+		dict: {payment_entry_name: reference_no}
+	"""
+	ref_details = {}
+	
+	if voucher_nos is not None and not voucher_nos:
+		return ref_details  # No Payment Entries to look up
+	
+	conditions = "docstatus = 1 and reference_no is not null and reference_no != ''"
+	if voucher_nos:
+		conditions += " and name in %(voucher_nos)s"
+	
+	for d in frappe.db.sql(
+		f""" select name, reference_no from `tabPayment Entry`
+		where {conditions} """,
+		{"voucher_nos": voucher_nos} if voucher_nos else {},
+		as_dict=1,
+	):
+		ref_details[d.name] = d.reference_no
+
+	return ref_details
+
+
+def get_journal_entry_references(voucher_nos=None):
+	"""
+	Fetch cheque_no (Reference Number) for Journal Entries.
+	
+	Args:
+		voucher_nos: List of Journal Entry names to filter. If None, fetches all.
+	
+	Returns:
+		dict: {journal_entry_name: cheque_no}
+	"""
+	ref_details = {}
+	
+	if voucher_nos is not None and not voucher_nos:
+		return ref_details  # No Journal Entries to look up
+	
+	conditions = "docstatus = 1 and cheque_no is not null and cheque_no != ''"
+	if voucher_nos:
+		conditions += " and name in %(voucher_nos)s"
+	
+	for d in frappe.db.sql(
+		f""" select name, cheque_no from `tabJournal Entry`
+		where {conditions} """,
+		{"voucher_nos": voucher_nos} if voucher_nos else {},
+		as_dict=1,
+	):
+		ref_details[d.name] = d.cheque_no
+
+	return ref_details
+
+
+def get_invoice_return_status(sales_invoice_nos=None, purchase_invoice_nos=None):
+	"""
+	Fetch is_return status for Sales Invoices and Purchase Invoices.
+	
+	Args:
+		sales_invoice_nos: List of Sales Invoice names to check
+		purchase_invoice_nos: List of Purchase Invoice names to check
+	
+	Returns:
+		dict: {invoice_name: {"is_return": bool, "doctype": str}}
+	"""
+	return_status = {}
+	
+	# Fetch Sales Invoice return status
+	if sales_invoice_nos:
+		for d in frappe.db.sql(
+			""" select name, is_return from `tabSales Invoice`
+			where docstatus = 1 and name in %(voucher_nos)s """,
+			{"voucher_nos": sales_invoice_nos},
+			as_dict=1,
+		):
+			return_status[d.name] = {"is_return": d.is_return, "doctype": "Sales Invoice"}
+	
+	# Fetch Purchase Invoice return status
+	if purchase_invoice_nos:
+		for d in frappe.db.sql(
+			""" select name, is_return from `tabPurchase Invoice`
+			where docstatus = 1 and name in %(voucher_nos)s """,
+			{"voucher_nos": purchase_invoice_nos},
+			as_dict=1,
+		):
+			return_status[d.name] = {"is_return": d.is_return, "doctype": "Purchase Invoice"}
+	
+	return return_status
 
 
 def get_balance(row, balance, debit_field, credit_field):
@@ -613,33 +769,41 @@ def get_columns(filters):
 
     # Define columns to show only the required fields
     columns = [
-        {"label": _("Date"), "fieldname": "posting_date", "fieldtype": "Date", "width": 150},
+        {"label": _("Date"), "fieldname": "posting_date", "fieldtype": "Date", "width": 100},
+        {
+            "label": _("Voucher Type"),
+            "fieldname": "voucher_subtype",
+            "fieldtype": "Data",
+            "width": 120,
+        },
         {
             "label": _("Reference"),
             "fieldname": "voucher_no",
             "fieldtype": "Dynamic Link",
             "options": "voucher_type",
-            "width": 250,
+            "width": 180,
         },
-		{"label": _("Bill No"), "fieldname": "bill_no", "fieldtype": "Data", "width": 150},  # Added Bill No
-        {"label": _("Remarks"), "fieldname": "remarks", "fieldtype": "Data", "width": 300},
+        {"label": _("Ref No"), "fieldname": "ref_no", "fieldtype": "Data", "width": 120},  # Cheque/Reference No
+        {"label": _("Bill No"), "fieldname": "bill_no", "fieldtype": "Data", "width": 100},  # Supplier Bill No
+        {"label": _("Bill Date"), "fieldname": "bill_date", "fieldtype": "Date", "width": 90},  # Supplier Bill Date
+        {"label": _("Remarks"), "fieldname": "remarks", "fieldtype": "Data", "width": 250},
         {
             "label": _("Debit ({0})").format(currency),
             "fieldname": "debit",
             "fieldtype": "Float",
-            "width": 150,
+            "width": 130,
         },
         {
             "label": _("Credit ({0})").format(currency),
             "fieldname": "credit",
             "fieldtype": "Float",
-            "width": 150,
+            "width": 130,
         },
         {
             "label": _("Balance (Dr - Cr)"),
             "fieldname": "balance",
             "fieldtype": "Data",
-            "width": 200,
+            "width": 150,
         },
     ]
 
@@ -675,5 +839,321 @@ def get_complete_party_list(parties):
         for linked_party in linked_parties:
             complete_party_list.add(linked_party[0])
     return list(complete_party_list)
+
+
+@frappe.whitelist()
+def get_statement_meta(filters):
+    """
+    Get all metadata needed for the statement print format:
+    - Company info (name, logo, address)
+    - Party info (name, address)
+    - Ageing data
+    - Future payments
+    - Closing balance
+    """
+    from frappe.utils import flt, nowdate, today
+    
+    if isinstance(filters, str):
+        filters = frappe.parse_json(filters)
+    
+    filters = frappe._dict(filters)
+    
+    meta = frappe._dict({
+        "company": frappe._dict(),
+        "party": frappe._dict(),
+        "ageing": frappe._dict({
+            "range1": 0, "range2": 0, "range3": 0, "range4": 0, "range5": 0
+        }),
+        "future_payments": [],
+        "bank_details": frappe._dict(),
+    })
+    
+    company = filters.get("company")
+    party_list = filters.get("party")
+    if isinstance(party_list, str):
+        party_list = frappe.parse_json(party_list)
+    
+    party = party_list[0] if party_list and len(party_list) > 0 else None
+    to_date = filters.get("to_date") or today()
+    currency = filters.get("presentation_currency") or frappe.get_cached_value("Company", company, "default_currency")
+    
+    # 1. Company Info
+    if company:
+        company_doc = frappe.get_cached_doc("Company", company)
+        
+        # Extract PAN from GSTIN (characters 3-12, 0-indexed: 2:12)
+        gstin = company_doc.get("gstin") or ""
+        pan = gstin[2:12] if len(gstin) >= 12 else ""
+        
+        meta.company = frappe._dict({
+            "name": company_doc.company_name,
+            "logo": company_doc.get("logo_for_printing") or company_doc.get("company_logo") or "",
+            "pan": pan,
+            "gstin": gstin,
+            "date_of_incorporation": company_doc.get("date_of_incorporation") or "",
+            "previously_known_as": company_doc.get("bns_previously_known_as") or "",
+            "cin": company_doc.get("bns_company_cin") or "",
+            "msme_no": company_doc.get("bns_msme_no") or "",
+            "msme_type": company_doc.get("bns_msme_type") or ""
+        })
+    
+    # 2. Party Info
+    if party:
+        from frappe.contacts.doctype.address.address import get_default_address
+        
+        # Determine party type
+        is_customer = frappe.db.exists("Customer", party)
+        party_type = "Customer" if is_customer else "Supplier"
+        
+        meta.party.party_type = party_type
+        meta.party.name = party
+        
+        # Get party document
+        party_doc = frappe.get_doc(party_type, party)
+        meta.party.party_name = party_doc.get("customer_name") if is_customer else party_doc.get("supplier_name")
+        meta.party.tax_id = party_doc.get("tax_id") or ""
+        
+        # Get PAN from GSTIN (characters 3-12)
+        party_gstin = party_doc.get("gstin") or ""
+        meta.party.pan = party_gstin[2:12] if len(party_gstin) >= 12 else (party_doc.get("pan") or "")
+        meta.party.gstin = party_gstin
+        
+        # Get address - simplified to just City, State, Country, Pincode
+        address_name = None
+        
+        # Try primary address link first
+        address_field = "customer_primary_address" if is_customer else "supplier_primary_address"
+        address_name = party_doc.get(address_field)
+        
+        # Fallback to default address
+        if not address_name:
+            address_name = get_default_address(party_type, party)
+        
+        # Fallback to Dynamic Link
+        if not address_name:
+            address_links = frappe.get_all(
+                "Dynamic Link",
+                filters={
+                    "link_doctype": party_type,
+                    "link_name": party,
+                    "parenttype": "Address"
+                },
+                fields=["parent"],
+                limit=1
+            )
+            if address_links:
+                address_name = address_links[0].parent
+        
+        # Build simplified address: City, State, Country, Pincode
+        if address_name:
+            try:
+                addr_doc = frappe.get_doc("Address", address_name)
+                addr_parts = []
+                if addr_doc.city:
+                    addr_parts.append(addr_doc.city)
+                if addr_doc.state:
+                    addr_parts.append(addr_doc.state)
+                if addr_doc.country:
+                    addr_parts.append(addr_doc.country)
+                if addr_doc.pincode:
+                    addr_parts.append(str(addr_doc.pincode))
+                meta.party.address = ", ".join(addr_parts)
+            except Exception:
+                meta.party.address = ""
+        else:
+            meta.party.address = ""
+        
+        # 3. Ageing Data - Calculate from Payment Ledger Entry
+        meta.ageing = get_party_ageing(company, party, party_type, to_date, currency)
+        
+        # 4. Bank Details (prefer party-specific default bank account, else company default)
+        meta.bank_details = get_company_bank_details(company, party_type, party)
+    
+    return meta
+
+
+def get_party_ageing(company, party, party_type, report_date, currency):
+    """
+    Calculate ageing from Payment Ledger Entry.
+    Buckets: 0-30, 30-60, 60-90, 90-120, 120+
+    """
+    from frappe.utils import date_diff, getdate, flt
+    
+    ageing = frappe._dict({
+        "range1": 0,  # 0-30
+        "range2": 0,  # 30-60
+        "range3": 0,  # 60-90
+        "range4": 0,  # 90-120
+        "range5": 0,  # 120+
+    })
+    
+    report_date = getdate(report_date)
+    
+    try:
+        # Get outstanding entries from Payment Ledger Entry
+        ple = frappe.qb.DocType("Payment Ledger Entry")
+        
+        query = (
+            frappe.qb.from_(ple)
+            .select(
+                ple.posting_date,
+                ple.amount,
+                ple.amount_in_account_currency
+            )
+            .where(ple.company == company)
+            .where(ple.party_type == party_type)
+            .where(ple.party == party)
+            .where(ple.posting_date <= report_date)
+            .where(ple.delinked == 0)
+        )
+        
+        entries = query.run(as_dict=True)
+        
+        # Calculate outstanding per voucher and assign to buckets
+        voucher_outstanding = {}
+        for entry in entries:
+            key = (entry.get("voucher_type"), entry.get("voucher_no"), entry.posting_date)
+            if key not in voucher_outstanding:
+                voucher_outstanding[key] = {"posting_date": entry.posting_date, "amount": 0}
+            voucher_outstanding[key]["amount"] += flt(entry.amount)
+        
+        # Assign to ageing buckets based on posting date
+        for key, data in voucher_outstanding.items():
+            outstanding = data["amount"]
+            if outstanding == 0:
+                continue
+            
+            # For receivables, positive means outstanding; for payables, negative means outstanding
+            if party_type == "Supplier":
+                outstanding = -outstanding  # Payables are negative in PLE
+            
+            if outstanding <= 0:
+                continue
+                
+            days = date_diff(report_date, data["posting_date"])
+            
+            if days <= 30:
+                ageing.range1 += outstanding
+            elif days <= 60:
+                ageing.range2 += outstanding
+            elif days <= 90:
+                ageing.range3 += outstanding
+            elif days <= 120:
+                ageing.range4 += outstanding
+            else:
+                ageing.range5 += outstanding
+                
+    except Exception as e:
+        frappe.log_error(f"Ageing calculation error: {str(e)}")
+        # Fallback: Calculate from GL entries
+        ageing = calculate_ageing_from_gl(company, party, party_type, report_date)
+    
+    return ageing
+
+
+def calculate_ageing_from_gl(company, party, party_type, report_date):
+    """
+    Fallback: Calculate ageing directly from GL entries.
+    Groups outstanding amounts by posting date age.
+    """
+    from frappe.utils import date_diff, getdate, flt
+    
+    ageing = frappe._dict({
+        "range1": 0,  # 0-30
+        "range2": 0,  # 30-60
+        "range3": 0,  # 60-90
+        "range4": 0,  # 90-120
+        "range5": 0,  # 120+
+    })
+    
+    report_date = getdate(report_date)
+    
+    # Get all GL entries for this party
+    gl_entries = frappe.db.sql("""
+        SELECT posting_date, debit, credit, voucher_no, voucher_type
+        FROM `tabGL Entry`
+        WHERE company = %s
+        AND party = %s
+        AND party_type = %s
+        AND posting_date <= %s
+        AND is_cancelled = 0
+        ORDER BY posting_date
+    """, (company, party, party_type, report_date), as_dict=True)
+    
+    # Calculate net amount per voucher and assign to buckets
+    voucher_balances = {}
+    for gle in gl_entries:
+        key = (gle.voucher_type, gle.voucher_no)
+        if key not in voucher_balances:
+            voucher_balances[key] = {"posting_date": gle.posting_date, "balance": 0}
+        voucher_balances[key]["balance"] += flt(gle.debit) - flt(gle.credit)
+    
+    # Assign to ageing buckets
+    for key, data in voucher_balances.items():
+        balance = data["balance"]
+        if balance == 0:
+            continue
+            
+        days = date_diff(report_date, data["posting_date"])
+        
+        if days <= 30:
+            ageing.range1 += balance
+        elif days <= 60:
+            ageing.range2 += balance
+        elif days <= 90:
+            ageing.range3 += balance
+        elif days <= 120:
+            ageing.range4 += balance
+        else:
+            ageing.range5 += balance
+    
+    return ageing
+
+
+def get_future_payments(party, currency):
+    """Get future-dated payment entries for the party."""
+    from frappe.utils import today, flt
+    
+    payments = frappe.db.get_all(
+        "Payment Entry",
+        filters={
+            "party": party,
+            "reference_date": [">", today()],
+            "docstatus": 1
+        },
+        fields=["posting_date", "mode_of_payment", "reference_date", "paid_amount"],
+        limit=10,
+        order_by="reference_date asc"
+    )
+    
+    return payments
+
+
+def get_company_bank_details(company, party_type=None, party=None):
+    """
+    Get bank account details with preference:
+    1) Default Bank Account for this party (party_type + party) within the company
+    2) Fallback to company default bank account
+    """
+    filters = {"company": company, "is_default": 1}
+
+    bank = None
+    if party_type and party:
+        bank = frappe.db.get_value(
+            "Bank Account",
+            {**filters, "party_type": party_type, "party": party},
+            ["account_name", "bank", "bank_account_no", "branch_code", "iban"],
+            as_dict=True,
+        )
+
+    if not bank:
+        bank = frappe.db.get_value(
+            "Bank Account",
+            filters,
+            ["account_name", "bank", "bank_account_no", "branch_code", "iban"],
+            as_dict=True,
+        )
+
+    return bank or frappe._dict()
 
 

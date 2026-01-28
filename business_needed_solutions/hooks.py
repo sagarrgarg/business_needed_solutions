@@ -161,9 +161,9 @@ doctype_list_js = {
 # ---------------
 # Override standard doctype classes
 
-override_doctype_class = {
-    "Stock Entry": "business_needed_solutions.business_needed_solutions.overrides.stock_entry_component_qty_variance.BNSStockEntry"
-}
+# override_doctype_class = {
+# 	"ToDo": "custom_app.overrides.CustomToDo"
+# }
 
 # Document Events
 # ---------------
@@ -197,8 +197,7 @@ doc_events = {
         "validate": "business_needed_solutions.business_needed_solutions.utils.validate_bns_internal_delivery_note_return",
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
-            "business_needed_solutions.business_needed_solutions.utils.update_delivery_note_status_for_bns_internal",
-            "business_needed_solutions.business_needed_solutions.overrides.gst_compliance.maybe_generate_internal_dn_ewaybill"
+            "business_needed_solutions.business_needed_solutions.utils.update_delivery_note_status_for_bns_internal"
         ],
         "on_cancel": "business_needed_solutions.business_needed_solutions.utils.validate_delivery_note_cancellation"
     },
@@ -224,8 +223,7 @@ doc_events = {
     "Purchase Invoice": {
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
-            "business_needed_solutions.business_needed_solutions.utils.update_purchase_invoice_status_for_bns_internal",
-            "business_needed_solutions.business_needed_solutions.overrides.gst_compliance.validate_purchase_invoice_same_gstin"
+            "business_needed_solutions.business_needed_solutions.utils.update_purchase_invoice_status_for_bns_internal"
         ],
         "validate": "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference"
     },
