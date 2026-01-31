@@ -1,0 +1,28 @@
+{
+ "content": null,
+ "creation": "2026-01-31 10:00:00.000000",
+ "docstatus": 0,
+ "doctype": "Page",
+ "idx": 0,
+ "modified": "2026-01-31 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Business Needed Solutions",
+ "name": "bns-dashboard",
+ "owner": "Administrator",
+ "page_name": "bns-dashboard",
+ "roles": [
+  {
+   "role": "System Manager"
+  },
+  {
+   "role": "Accounts Manager"
+  },
+  {
+   "role": "Accounts User"
+  }
+ ],
+ "script": null,
+ "standard": "Yes",
+ "system_page": 0,
+ "title": "BNS Dashboard"
+}

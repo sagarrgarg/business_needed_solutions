@@ -1,0 +1,121 @@
+{
+ "charts": [],
+ "content": "[{\"id\":\"bns-dashboard-shortcut\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"BNS Dashboard\",\"col\":4}},{\"id\":\"bns-settings-shortcut\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"BNS Settings\",\"col\":4}}]",
+ "creation": "2026-01-31 10:00:00.000000",
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "tool",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "Business Needed Solutions",
+ "links": [
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Settings & Configuration",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "BNS Settings",
+   "link_count": 0,
+   "link_to": "BNS Settings",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Reports",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Internal Transfer Receive Mismatch",
+   "link_count": 0,
+   "link_to": "Internal Transfer Receive Mismatch",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Negative Stock Resolution Report",
+   "link_count": 0,
+   "link_to": "Negative Stock Resolution Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Bank GL",
+   "link_count": 0,
+   "link_to": "Bank GL",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Party GL",
+   "link_count": 0,
+   "link_to": "Party GL",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-01-31 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Business Needed Solutions",
+ "name": "Business Needed Solutions",
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "restrict_to_domain": "",
+ "roles": [],
+ "sequence_id": 25,
+ "shortcuts": [
+  {
+   "color": "Blue",
+   "doc_view": "",
+   "label": "BNS Dashboard",
+   "link_to": "bns-dashboard",
+   "restrict_to_domain": "",
+   "stats_filter": "",
+   "type": "Page"
+  },
+  {
+   "color": "Grey",
+   "doc_view": "",
+   "label": "BNS Settings",
+   "link_to": "BNS Settings",
+   "restrict_to_domain": "",
+   "stats_filter": "",
+   "type": "DocType"
+  }
+ ],
+ "title": "Business Needed Solutions"
+}
