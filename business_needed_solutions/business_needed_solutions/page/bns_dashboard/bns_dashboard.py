@@ -417,8 +417,235 @@ def get_dashboard_summary(company=None):
 			AND pii.expense_account != id.expense_account
 	""", {"company": company})[0][0] or 0
 	
+	# Count of unlinked customer/supplier by PAN
+	unlinked_pan_count = get_unlinked_pan_count()
+	
+	# Count of internal transfer mismatches
+	transfer_mismatch_count = get_internal_transfer_mismatch_count(company)
+	
 	return {
 		"items_missing_expense_account": items_missing_count,
 		"pi_items_fixable": pi_fixable_count,
+		"unlinked_pan_count": unlinked_pan_count,
+		"transfer_mismatch_count": transfer_mismatch_count,
 		"company": company
 	}
+
+
+def get_unlinked_pan_count():
+	"""Get count of customer/supplier pairs with same PAN but no Party Link."""
+	data = get_unlinked_customer_supplier_by_pan()
+	return len(data.get("records", []))
+
+
+@frappe.whitelist()
+def get_unlinked_customer_supplier_by_pan():
+	"""
+	Get customers and suppliers with matching PAN but no Party Link.
+	
+	Returns:
+		dict with count and records list
+	"""
+	# Fetch Active Customers with PAN
+	customers = frappe.db.get_list(
+		"Customer",
+		filters=[["pan", "!=", ""], ["disabled", "=", 0]],
+		fields=["name", "pan", "customer_name"]
+	)
+	
+	# Fetch Active Suppliers with PAN
+	suppliers = frappe.db.get_list(
+		"Supplier",
+		filters=[["pan", "!=", ""], ["disabled", "=", 0]],
+		fields=["name", "pan", "supplier_name"]
+	)
+	
+	# Create a Supplier lookup dictionary by PAN
+	supplier_dict = {}
+	for s in suppliers:
+		if s["pan"]:
+			supplier_dict[s["pan"]] = {
+				"name": s["name"],
+				"supplier_name": s["supplier_name"]
+			}
+	
+	records = []
+	
+	for customer in customers:
+		pan = customer.get("pan")
+		if not pan or pan not in supplier_dict:
+			continue
+		
+		supplier_info = supplier_dict[pan]
+		supplier_name = supplier_info["name"]
+		
+		# Check if Party Link exists in either direction
+		party_link_exists = frappe.db.exists(
+			"Party Link",
+			{
+				"primary_party": customer["name"],
+				"secondary_party": supplier_name
+			}
+		) or frappe.db.exists(
+			"Party Link",
+			{
+				"primary_party": supplier_name,
+				"secondary_party": customer["name"]
+			}
+		)
+		
+		if not party_link_exists:
+			records.append({
+				"customer": customer["name"],
+				"customer_name": customer.get("customer_name") or customer["name"],
+				"supplier": supplier_name,
+				"supplier_name": supplier_info.get("supplier_name") or supplier_name,
+				"pan": pan
+			})
+	
+	return {
+		"count": len(records),
+		"records": records
+	}
+
+
+@frappe.whitelist()
+def create_party_link(primary_party, secondary_party, primary_role, secondary_role):
+	"""
+	Create a Party Link between customer and supplier.
+	
+	Args:
+		primary_party: Primary party name
+		secondary_party: Secondary party name
+		primary_role: Primary party type (Customer/Supplier)
+		secondary_role: Secondary party type (Customer/Supplier)
+		
+	Returns:
+		dict with success status and party link name
+	"""
+	# Validate inputs
+	if not primary_party or not secondary_party:
+		frappe.throw(_("Both parties are required"))
+	
+	if primary_role not in ("Customer", "Supplier") or secondary_role not in ("Customer", "Supplier"):
+		frappe.throw(_("Invalid party role"))
+	
+	# Check if link already exists
+	existing = frappe.db.exists(
+		"Party Link",
+		{
+			"primary_party": primary_party,
+			"secondary_party": secondary_party
+		}
+	) or frappe.db.exists(
+		"Party Link",
+		{
+			"primary_party": secondary_party,
+			"secondary_party": primary_party
+		}
+	)
+	
+	if existing:
+		return {
+			"success": False,
+			"message": _("Party Link already exists")
+		}
+	
+	# Create the Party Link
+	party_link = frappe.get_doc({
+		"doctype": "Party Link",
+		"primary_role": primary_role,
+		"primary_party": primary_party,
+		"secondary_role": secondary_role,
+		"secondary_party": secondary_party
+	})
+	party_link.insert(ignore_permissions=True)
+	
+	return {
+		"success": True,
+		"message": _("Party Link created"),
+		"party_link": party_link.name
+	}
+
+
+@frappe.whitelist()
+def get_internal_transfer_mismatches(company=None, from_date=None, to_date=None):
+	"""
+	Get internal transfer mismatches (DN to PR, SI to PI).
+	
+	Reuses logic from Internal Transfer Receive Mismatch report.
+	
+	Args:
+		company: Optional company filter
+		from_date: Optional start date filter
+		to_date: Optional end date filter
+		
+	Returns:
+		dict with count and records list
+	"""
+	# Import the report module to reuse its logic
+	from business_needed_solutions.business_needed_solutions.report.internal_transfer_receive_mismatch import (
+		internal_transfer_receive_mismatch as itrm_report
+	)
+	
+	if not company:
+		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
+	
+	# Build filters for the report
+	filters = frappe._dict({
+		"company": company,
+		"from_date": from_date,
+		"to_date": to_date
+	})
+	
+	# Get data from the report
+	try:
+		report_data = itrm_report.get_data(filters) or []
+	except Exception as e:
+		frappe.log_error(f"Error getting internal transfer mismatches: {e}")
+		report_data = []
+	
+	# Transform report data to dashboard format
+	records = []
+	for row in report_data:
+		mismatch_type = "Mismatch"
+		mismatch_reason = row.get("mismatch_reason") or ""
+		
+		# Determine type based on missing_document field
+		missing_doc = row.get("missing_document") or ""
+		if "No PR" in mismatch_reason or missing_doc == "Purchase Receipt":
+			mismatch_type = "Missing PR"
+		elif "No PI" in mismatch_reason or missing_doc == "Purchase Invoice":
+			mismatch_type = "Missing PI"
+		elif "Mismatch" in missing_doc:
+			mismatch_type = "Mismatch"
+		
+		# Get linked document
+		linked_doc = row.get("purchase_receipt") or row.get("purchase_invoice")
+		
+		records.append({
+			"posting_date": row.get("posting_date"),
+			"document_type": row.get("document_type"),
+			"document_name": row.get("document_name"),
+			"grand_total": flt(row.get("grand_total")),
+			"customer": "",  # Report doesn't include customer directly
+			"mismatch_type": mismatch_type,
+			"mismatch_reason": mismatch_reason,
+			"linked_document": linked_doc
+		})
+	
+	# Limit to 100 for dashboard
+	return {
+		"count": len(records),
+		"records": records[:100],
+		"company": company
+	}
+
+
+def get_internal_transfer_mismatch_count(company=None):
+	"""Get count of internal transfer mismatches for dashboard summary."""
+	if not company:
+		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
+	
+	data = get_internal_transfer_mismatches(company)
+	return data.get("count", 0)
