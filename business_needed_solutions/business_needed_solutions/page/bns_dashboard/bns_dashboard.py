@@ -208,7 +208,7 @@ def bulk_fix_pi_expense_accounts(items):
 	Bulk fix expense accounts in Purchase Invoice items.
 	
 	Only fixes items where the Item has a default expense account set.
-	Uses db_set to update the expense_account field directly.
+	Uses proper doc API to update expense_account and repost GL entries.
 	
 	Args:
 		items: List of dicts with pi_item_name and correct_expense_account
@@ -223,61 +223,72 @@ def bulk_fix_pi_expense_accounts(items):
 	success_count = 0
 	errors = []
 	
+	# Group items by Purchase Invoice to minimize doc loads
+	pi_updates = {}
 	for item in items:
+		pi_item_name = item.get("pi_item_name")
+		correct_account = item.get("correct_expense_account")
+		
+		if not pi_item_name or not correct_account:
+			errors.append({
+				"pi_item_name": pi_item_name,
+				"error": _("Missing pi_item_name or correct_expense_account")
+			})
+			continue
+		
+		# Get the PI item parent
+		pi_name = frappe.db.get_value("Purchase Invoice Item", pi_item_name, "parent")
+		if not pi_name:
+			errors.append({
+				"pi_item_name": pi_item_name,
+				"error": _("Purchase Invoice Item not found")
+			})
+			continue
+		
+		if pi_name not in pi_updates:
+			pi_updates[pi_name] = []
+		pi_updates[pi_name].append({
+			"pi_item_name": pi_item_name,
+			"correct_account": correct_account
+		})
+	
+	# Process each Purchase Invoice
+	for pi_name, item_updates in pi_updates.items():
 		try:
-			pi_item_name = item.get("pi_item_name")
-			correct_account = item.get("correct_expense_account")
+			# Load the Purchase Invoice
+			pi_doc = frappe.get_doc("Purchase Invoice", pi_name)
 			
-			if not pi_item_name or not correct_account:
-				errors.append({
-					"pi_item_name": pi_item_name,
-					"error": _("Missing pi_item_name or correct_expense_account")
-				})
+			if pi_doc.docstatus != 1:
+				for item_update in item_updates:
+					errors.append({
+						"pi_item_name": item_update["pi_item_name"],
+						"error": _("Purchase Invoice {0} is not submitted").format(pi_name)
+					})
 				continue
 			
-			# Get the PI item to verify it exists
-			pi_item = frappe.db.get_value(
-				"Purchase Invoice Item", 
-				pi_item_name, 
-				["parent", "expense_account", "item_code"],
-				as_dict=True
-			)
+			# Update expense accounts on matching items using db_set
+			items_updated = 0
+			for item_update in item_updates:
+				for row in pi_doc.items:
+					if row.name == item_update["pi_item_name"]:
+						# Update in memory for repost
+						row.expense_account = item_update["correct_account"]
+						# Update in database
+						row.db_set("expense_account", item_update["correct_account"], update_modified=False)
+						items_updated += 1
+						break
 			
-			if not pi_item:
-				errors.append({
-					"pi_item_name": pi_item_name,
-					"error": _("Purchase Invoice Item not found")
-				})
-				continue
-			
-			# Get PI docstatus
-			pi_docstatus = frappe.db.get_value("Purchase Invoice", pi_item.parent, "docstatus")
-			
-			if pi_docstatus != 1:
-				errors.append({
-					"pi_item_name": pi_item_name,
-					"error": _("Purchase Invoice is not submitted")
-				})
-				continue
-			
-			# Update the expense account using db_set
-			frappe.db.set_value(
-				"Purchase Invoice Item",
-				pi_item_name,
-				"expense_account",
-				correct_account,
-				update_modified=False
-			)
-			
-			success_count += 1
+			if items_updated > 0:
+				# Repost accounting entries to update GL
+				pi_doc.repost_accounting_entries()
+				success_count += items_updated
 			
 		except Exception as e:
-			errors.append({
-				"pi_item_name": item.get("pi_item_name"),
-				"error": cstr(e)
-			})
-	
-	frappe.db.commit()
+			for item_update in item_updates:
+				errors.append({
+					"pi_item_name": item_update["pi_item_name"],
+					"error": cstr(e)
+				})
 	
 	return {
 		"success_count": success_count,

@@ -393,7 +393,11 @@ class BNSDashboard {
 
 		items.forEach(function (item) {
 			html += '<tr data-item="' + item.item_code + '">';
-			html += '<td><a href="/app/item/' + item.item_code + '" target="_blank" title="' + (item.item_name || '') + '">' + item.item_code + '</a></td>';
+			html += '<td><a href="/app/item/' + item.item_code + '" target="_blank">' + item.item_code + '</a>';
+			if (item.item_name) {
+				html += '<br><small class="text-muted">' + item.item_name + '</small>';
+			}
+			html += '</td>';
 			html += '<td><select class="form-control expense-account-select" data-item="' + item.item_code + '">';
 			html += accountOptions + '</select></td>';
 			html += '<td><button class="btn btn-primary btn-xs btn-set-expense" data-item="' + item.item_code + '">' + __("Set") + '</button></td>';
@@ -626,9 +630,12 @@ class BNSDashboard {
 		html += '</tr></thead><tbody>';
 
 		items.forEach(function (item) {
-			const hasAccount = item.expense_account && item.expense_account.trim() !== '';
 			html += '<tr data-item="' + item.item_code + '">';
-			html += '<td><a href="/app/item/' + item.item_code + '" target="_blank" title="' + (item.item_name || '') + '">' + item.item_code + '</a></td>';
+			html += '<td><a href="/app/item/' + item.item_code + '" target="_blank">' + item.item_code + '</a>';
+			if (item.item_name) {
+				html += '<br><small class="text-muted">' + item.item_name + '</small>';
+			}
+			html += '</td>';
 			html += '<td>';
 			html += '<select class="form-control expense-account-select-all" data-item="' + item.item_code + '">';
 			html += '<option value="">' + __("Select...") + '</option>';
