@@ -5,6 +5,7 @@ This module provides GST compliance validations and e-Waybill generation
 for BNS internal transfers:
 1. Block Purchase Invoice when Supplier GSTIN = Company GSTIN
 2. Auto-generate e-Waybill for internal customer Delivery Notes with same GSTIN
+3. Mandate Vehicle No on Delivery Notes for internal / BNS-internal customers
 """
 
 import frappe
@@ -12,8 +13,13 @@ from frappe import _
 from typing import Optional
 import logging
 
+from india_compliance.gst_india.utils import is_api_enabled
+
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Default sub-supply type for internal stock transfers (NIC code 5 = "For Own Use")
+INTERNAL_TRANSFER_SUB_SUPPLY_TYPE = 5
 
 
 class GSTComplianceError(Exception):
@@ -86,6 +92,40 @@ def _is_same_gstin_validation_enabled() -> bool:
         return False
 
 
+def validate_internal_dn_vehicle_no(doc, method: Optional[str] = None) -> None:
+    """
+    Mandate Vehicle No before submission for Delivery Notes where the
+    customer is an internal customer (ERPNext) or a BNS internal customer.
+
+    Applies only when docstatus is transitioning to 1 (submit) and
+    the DN is not a return.
+
+    Args:
+        doc: The Delivery Note document being validated
+        method (Optional[str]): The method being called
+
+    Raises:
+        frappe.ValidationError: If Vehicle No is missing
+    """
+    # Only enforce on submit
+    if doc.docstatus != 1:
+        return
+
+    # Skip returns — they don't need transport details
+    if doc.get("is_return"):
+        return
+
+    is_internal = doc.get("is_internal_customer") or _is_bns_internal_customer(doc)
+    if not is_internal:
+        return
+
+    if not (doc.get("vehicle_no") or "").strip():
+        frappe.throw(
+            _("Vehicle No is mandatory before submitting a Delivery Note for an internal customer."),
+            title=_("Missing Vehicle No"),
+        )
+
+
 def maybe_generate_internal_dn_ewaybill(doc, method: Optional[str] = None) -> None:
     """
     Auto-generate e-Waybill for internal customer Delivery Notes when:
@@ -94,8 +134,14 @@ def maybe_generate_internal_dn_ewaybill(doc, method: Optional[str] = None) -> No
     3. Billing GSTIN equals Company GSTIN (same GSTIN internal transfer)
     4. Invoice value exceeds GST Settings e-Waybill threshold
     5. Goods are supplied (not services)
-    6. Transporter/vehicle requirements are met
-    
+    6. Required addresses and transport details are present
+    7. India Compliance API is enabled
+
+    Generation runs synchronously so the user gets immediate feedback.
+    The doc is stamped with _sub_supply_type = 5 ("For Own Use") before
+    calling IC's internal generator, which is the correct NIC sub-supply
+    code for same-GSTIN stock transfers.
+
     Args:
         doc: The Delivery Note document being submitted
         method (Optional[str]): The method being called
@@ -105,89 +151,134 @@ def maybe_generate_internal_dn_ewaybill(doc, method: Optional[str] = None) -> No
         if not _is_internal_dn_ewaybill_enabled():
             logger.debug("Internal DN e-Waybill feature is disabled in BNS Settings")
             return
-        
+
         # Guard: Only process on submit (docstatus == 1)
         if doc.docstatus != 1:
             return
-        
+
+        # Guard: Skip returns
+        if doc.get("is_return"):
+            return
+
         # Guard: Check if already has e-Waybill
         if doc.get("ewaybill"):
             logger.debug(f"Delivery Note {doc.name} already has e-Waybill: {doc.ewaybill}")
             return
-        
+
         # Guard: Check if customer is BNS internal
-        is_bns_internal = _is_bns_internal_customer(doc)
-        if not is_bns_internal:
+        if not _is_bns_internal_customer(doc):
             logger.debug(f"Customer {doc.customer} is not a BNS internal customer")
             return
-        
+
         # Guard: Check if GSTIN is same (internal transfer under same GSTIN)
-        company_gstin = doc.get("company_gstin")
-        billing_address_gstin = doc.get("billing_address_gstin")
-        
-        if not company_gstin or not billing_address_gstin:
-            logger.debug(f"Missing GSTIN - company: {company_gstin}, billing: {billing_address_gstin}")
+        company_gstin = (doc.get("company_gstin") or "").strip().upper()
+        billing_gstin = (doc.get("billing_address_gstin") or "").strip().upper()
+
+        if not company_gstin or not billing_gstin:
+            logger.debug(f"Missing GSTIN - company: {company_gstin}, billing: {billing_gstin}")
             return
-        
-        if company_gstin.strip().upper() != billing_address_gstin.strip().upper():
-            logger.debug(f"GSTINs are different - not a same-GSTIN internal transfer")
+
+        if company_gstin != billing_gstin:
+            logger.debug("GSTINs differ — not a same-GSTIN internal transfer")
             return
-        
+
         # Guard: Check GST Settings requirements
         gst_settings = frappe.get_cached_doc("GST Settings")
-        
+
         if not gst_settings.enable_e_waybill:
             logger.debug("e-Waybill is disabled in GST Settings")
             return
-        
+
         if not gst_settings.enable_e_waybill_from_dn:
             logger.debug("e-Waybill from Delivery Note is disabled in GST Settings")
             return
-        
+
+        # Guard: API must be enabled (otherwise IC throws inside BaseAPI.__init__)
+        if not is_api_enabled(gst_settings):
+            logger.debug("India Compliance API is not enabled — skipping e-Waybill")
+            return
+
         # Guard: Check threshold
         e_waybill_threshold = gst_settings.e_waybill_threshold or 0
         if abs(doc.base_grand_total) < e_waybill_threshold:
-            logger.debug(f"Invoice value {doc.base_grand_total} is below threshold {e_waybill_threshold}")
+            logger.debug(
+                f"Invoice value {doc.base_grand_total} below threshold {e_waybill_threshold}"
+            )
             return
-        
+
         # Guard: Check if goods are supplied (not just services)
         if not _are_goods_supplied(doc):
-            logger.debug("No goods supplied - only services")
+            logger.debug("No goods supplied — only services")
             return
-        
-        # Guard: Validate transporter/vehicle requirements
+
+        # Guard: Required address fields (IC will throw MandatoryError otherwise)
+        if not doc.get("company_address"):
+            frappe.msgprint(
+                _("e-Waybill not auto-generated: Company Address is missing."),
+                title=_("e-Waybill Requirements Not Met"),
+                indicator="orange",
+            )
+            return
+
+        if not doc.get("customer_address"):
+            frappe.msgprint(
+                _("e-Waybill not auto-generated: Customer Address is missing."),
+                title=_("e-Waybill Requirements Not Met"),
+                indicator="orange",
+            )
+            return
+
+        # Guard: Validate transporter / vehicle requirements
         transport_error = _validate_transport_details(doc)
         if transport_error:
             logger.info(f"Transport validation failed for {doc.name}: {transport_error}")
             frappe.msgprint(
                 _("e-Waybill not auto-generated: {0}").format(transport_error),
                 title=_("e-Waybill Requirements Not Met"),
-                indicator="orange"
+                indicator="orange",
             )
             return
-        
-        # All checks passed - enqueue e-Waybill generation
-        logger.info(f"Enqueuing e-Waybill generation for internal DN {doc.name}")
-        frappe.enqueue(
-            "india_compliance.gst_india.utils.e_waybill.generate_e_waybill",
-            enqueue_after_commit=True,
-            queue="short",
-            doctype="Delivery Note",
-            docname=doc.name,
-        )
-        
-        frappe.msgprint(
-            _("e-Waybill generation has been queued for this internal transfer."),
-            title=_("e-Waybill Queued"),
-            indicator="blue"
-        )
-        
+
+        # Default mode_of_transport to "Road" when vehicle_no is filled
+        # but mode was left blank (common data-entry oversight).
+        if doc.get("vehicle_no") and not doc.get("mode_of_transport"):
+            doc.db_set("mode_of_transport", "Road", update_modified=False)
+            doc.mode_of_transport = "Road"
+
+        # Stamp the sub-supply type India Compliance expects for Delivery
+        # Notes (normally set via the e-Waybill dialog). Without this the
+        # API payload sends an empty sub_supply_type and NIC rejects it.
+        doc._sub_supply_type = INTERNAL_TRANSFER_SUB_SUPPLY_TYPE
+
+        # Call IC's internal generator synchronously so errors surface to
+        # the user immediately instead of failing silently in a background job.
+        from india_compliance.gst_india.utils.e_waybill import _generate_e_waybill
+
+        logger.info(f"Generating e-Waybill for internal DN {doc.name}")
+        _generate_e_waybill(doc, throw=False)
+
+        if doc.get("ewaybill"):
+            frappe.msgprint(
+                _("e-Waybill {0} generated for this internal transfer.").format(
+                    frappe.bold(doc.ewaybill)
+                ),
+                title=_("e-Waybill Generated"),
+                indicator="green",
+            )
+
     except Exception as e:
         logger.error(f"Error in internal DN e-Waybill generation: {str(e)}")
-        # Don't raise - this is a non-critical enhancement
         frappe.log_error(
             title=_("e-Waybill Auto-Generation Error"),
-            message=f"Failed to auto-generate e-Waybill for Delivery Note {doc.name}: {str(e)}"
+            message=f"Failed to auto-generate e-Waybill for Delivery Note {doc.name}: {str(e)}",
+        )
+        # Show the user a warning; don't block submission.
+        frappe.msgprint(
+            _("e-Waybill auto-generation failed: {0}. You can generate it manually.").format(
+                str(e)
+            ),
+            title=_("e-Waybill Auto-Generation Failed"),
+            indicator="orange",
         )
 
 

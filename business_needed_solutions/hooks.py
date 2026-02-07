@@ -197,7 +197,9 @@ doc_events = {
         "validate": "business_needed_solutions.business_needed_solutions.utils.validate_bns_internal_delivery_note_return",
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
-            "business_needed_solutions.business_needed_solutions.utils.update_delivery_note_status_for_bns_internal"
+            "business_needed_solutions.business_needed_solutions.overrides.gst_compliance.validate_internal_dn_vehicle_no",
+            "business_needed_solutions.business_needed_solutions.utils.update_delivery_note_status_for_bns_internal",
+            "business_needed_solutions.business_needed_solutions.overrides.gst_compliance.maybe_generate_internal_dn_ewaybill"
         ],
         "on_cancel": "business_needed_solutions.business_needed_solutions.utils.validate_delivery_note_cancellation"
     },
