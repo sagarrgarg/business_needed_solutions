@@ -394,10 +394,15 @@ def _get_delivery_note_mapping() -> Dict[str, Any]:
                 "target_warehouse": "from_warehouse",
                 "serial_no": "serial_no",
                 "batch_no": "batch_no",
-                "purchase_order": "purchase_order",
-                "purchase_order_item": "purchase_order_item",
             },
-            "field_no_map": ["warehouse", "rejected_warehouse", "expense_account", "cost_center", "project", "location"],
+            # Deliberately exclude purchase_order / purchase_order_item:
+            # The DN items may reference a PO whose supplier differs from
+            # the BNS internal supplier on the new PR.  Carrying them over
+            # triggers ERPNext's validate_with_previous_doc() which
+            # compares PR.supplier against PO.supplier and throws
+            # "Incorrect value: Supplier must be equal to …".
+            "field_no_map": ["warehouse", "rejected_warehouse", "expense_account", "cost_center", "project", "location",
+                             "purchase_order", "purchase_order_item"],
             "condition": lambda item: flt(item.qty) + flt(item.returned_qty or 0) - flt(item.received_qty or 0) > 0,
             "postprocess": _update_item,
         },
@@ -473,12 +478,19 @@ def _update_details(source_doc, target_doc, source_parent) -> None:
         target_doc.buying_price_list = source_doc.selling_price_list
         target_doc.is_internal_supplier = 1
         target_doc.bns_inter_company_reference = source_doc.name
+        # Also set ERPNext's standard inter_company_reference so that
+        # validate_inter_company_reference() does not throw
+        # "Internal Sale or Delivery Reference missing".
+        target_doc.inter_company_reference = source_doc.name
         
         # Set supplier_delivery_note = DN name (TRANSFER UNDER SAME GSTIN)
         target_doc.supplier_delivery_note = source_doc.name
         
         # Set is_bns_internal_supplier = 1 (TRANSFER UNDER SAME GSTIN)
         target_doc.is_bns_internal_supplier = 1
+        
+        # Set represents_company so ERPNext's is_internal_transfer() works
+        target_doc.represents_company = source_doc.company
         
         # Handle addresses
         _update_addresses(target_doc, source_doc)
@@ -497,12 +509,19 @@ def _update_details(source_doc, target_doc, source_parent) -> None:
         target_doc.buying_price_list = source_doc.selling_price_list
         target_doc.is_internal_supplier = 1
         target_doc.bns_inter_company_reference = source_doc.name
+        # Also set ERPNext's standard inter_company_reference so that
+        # validate_inter_company_reference() does not throw
+        # "Internal Sale or Delivery Reference missing".
+        target_doc.inter_company_reference = source_doc.name
         
         # Set supplier_delivery_note = DN name (TRANSFER UNDER SAME GSTIN)
         target_doc.supplier_delivery_note = source_doc.name
         
         # Set is_bns_internal_supplier = 1 (TRANSFER UNDER SAME GSTIN)
         target_doc.is_bns_internal_supplier = 1
+        
+        # Set represents_company so ERPNext's is_internal_transfer() works
+        target_doc.represents_company = source_doc.company
         
         # Update delivery note with reference
         _update_delivery_note_reference(source_doc.name, target_doc.name)
@@ -554,13 +573,41 @@ def _update_delivery_note_reference(dn_name: str, pr_name: str) -> None:
 
 
 def _update_addresses(target_doc, source_doc) -> None:
-    """Update addresses for internal transfer."""
+    """Update addresses for internal transfer.
+
+    For BNS internal transfers the DN's company_address is the *logical*
+    supplier address on the receiving PR, but ERPNext validates that the
+    ``supplier_address`` has a Dynamic Link to the Supplier.  To avoid
+    "Billing Address does not belong to the Supplier" errors we resolve
+    the supplier_address to an address that is actually linked to the
+    Supplier.  If the DN's company_address is already linked to the
+    Supplier (common when the Supplier represents the same company), we
+    use it directly.  Otherwise we fall back to the Supplier's default
+    address.  If no linked address exists at all, we skip setting
+    supplier_address so the user can fill it manually without being
+    blocked.
+    """
     # For Purchase Receipt, swap shipping/dispatch addresses (inverse)
     if target_doc.doctype == "Purchase Receipt":
-        # Company address becomes supplier address
-        update_address(target_doc, "supplier_address", "address_display", source_doc.company_address)
-        # Customer address becomes billing address
-        update_address(target_doc, "billing_address", "billing_address_display", source_doc.customer_address)
+        # Resolve supplier_address: prefer source company_address if it
+        # belongs to the supplier, otherwise fall back to supplier default.
+        supplier = target_doc.supplier
+        supplier_address = _resolve_supplier_address(
+            supplier, source_doc.company_address
+        )
+        if supplier_address:
+            update_address(target_doc, "supplier_address", "address_display", supplier_address)
+        else:
+            # Clear supplier_address so validation won't choke on a
+            # mismatched address; the user can set it manually.
+            target_doc.supplier_address = None
+            target_doc.address_display = None
+
+        # Customer address becomes billing address (company-linked, no
+        # party validation on billing_address for Purchase Receipt).
+        if source_doc.customer_address:
+            update_address(target_doc, "billing_address", "billing_address_display", source_doc.customer_address)
+
         # Shipping address = Dispatch address from source (inverse)
         if source_doc.dispatch_address_name:
             update_address(target_doc, "shipping_address", "shipping_address_display", source_doc.dispatch_address_name)
@@ -591,6 +638,48 @@ def _update_addresses(target_doc, source_doc) -> None:
         target_doc.dispatch_address_display = None
         target_doc.dispatch_address_template = None
         target_doc.shipping_address_template = None
+
+
+def _resolve_supplier_address(supplier: str, preferred_address: Optional[str] = None) -> Optional[str]:
+    """Return an address linked to *supplier* via Dynamic Link.
+
+    1. If *preferred_address* is already linked to the supplier, return it.
+    2. Otherwise return the supplier's default / first linked address.
+    3. If no linked address exists, return ``None``.
+    """
+    if not supplier:
+        return preferred_address
+
+    # Addresses linked to this Supplier via Dynamic Link
+    linked_addresses = frappe.get_all(
+        "Dynamic Link",
+        filters={
+            "link_doctype": "Supplier",
+            "link_name": supplier,
+            "parenttype": "Address",
+        },
+        pluck="parent",
+    )
+
+    if not linked_addresses:
+        logger.debug(f"No addresses linked to Supplier {supplier}")
+        return None
+
+    # Prefer the address we already have if it's linked
+    if preferred_address and preferred_address in linked_addresses:
+        return preferred_address
+
+    # Fall back to the supplier's default address or first available
+    default_address = frappe.db.get_value(
+        "Dynamic Link",
+        {
+            "link_doctype": "Supplier",
+            "link_name": supplier,
+            "parenttype": "Address",
+        },
+        "parent",
+    )
+    return default_address or linked_addresses[0]
 
 
 def _update_taxes(target_doc) -> None:
@@ -626,8 +715,13 @@ def _update_item(source, target, source_parent) -> None:
         target.base_net_rate = flt(source.base_net_rate)
     
     target.received_qty = 0
-    target.purchase_order = source.purchase_order
-    target.purchase_order_item = source.purchase_order_item
+
+    # Do NOT carry purchase_order / purchase_order_item from the DN.
+    # The DN's PO belongs to a different supplier; copying it causes
+    # ERPNext's validate_with_previous_doc() to throw
+    # "Incorrect value: Supplier must be equal to …".
+    target.purchase_order = None
+    target.purchase_order_item = None
     
     # Clear accounting fields to let system auto-populate
     _clear_item_level_fields(target)

@@ -94,18 +94,25 @@ def _is_same_gstin_validation_enabled() -> bool:
 
 def validate_internal_dn_vehicle_no(doc, method: Optional[str] = None) -> None:
     """
-    Mandate Vehicle No before submission for Delivery Notes where the
-    customer is an internal customer (ERPNext) or a BNS internal customer.
+    Mandate Vehicle No or GST Transporter ID before submission for internal
+    customer Delivery Notes only when:
+    1. The transfer is intra-state (same GSTIN) — because inter-state
+       (different GSTIN) transfers go through Sales Invoice flow anyway.
+    2. The invoice value meets or exceeds the GST Settings e-Waybill threshold.
 
-    Applies only when docstatus is transitioning to 1 (submit) and
-    the DN is not a return.
+    Per GST e-Way Bill rules, either vehicle_no OR gst_transporter_id is
+    sufficient to satisfy the transport detail requirement.
+
+    Intra-state is determined by comparing the **full** company_gstin and
+    billing_address_gstin (not just the first 2 state-code digits).
 
     Args:
         doc: The Delivery Note document being validated
         method (Optional[str]): The method being called
 
     Raises:
-        frappe.ValidationError: If Vehicle No is missing
+        frappe.ValidationError: If neither Vehicle No nor GST Transporter ID
+            is provided for an intra-state transfer above threshold
     """
     # Only enforce on submit
     if doc.docstatus != 1:
@@ -119,11 +126,41 @@ def validate_internal_dn_vehicle_no(doc, method: Optional[str] = None) -> None:
     if not is_internal:
         return
 
-    if not (doc.get("vehicle_no") or "").strip():
-        frappe.throw(
-            _("Vehicle No is mandatory before submitting a Delivery Note for an internal customer."),
-            title=_("Missing Vehicle No"),
+    # Skip if vehicle number OR transporter ID is already provided
+    has_vehicle = bool((doc.get("vehicle_no") or "").strip())
+    has_transporter = bool((doc.get("gst_transporter_id") or "").strip())
+    if has_vehicle or has_transporter:
+        return
+
+    # Only enforce for intra-state (same full GSTIN) transfers.
+    # Inter-state (different GSTIN) transfers use the Sales Invoice flow,
+    # so vehicle details are not required on the DN.
+    if _is_inter_state_transfer(doc):
+        logger.debug(
+            f"DN {doc.name}: Inter-state internal transfer — vehicle/transporter "
+            f"not mandatory on DN (handled via Sales Invoice)"
         )
+        return
+
+    # Check against the e-Waybill threshold from GST Settings
+    e_waybill_threshold = _get_ewaybill_threshold()
+    if abs(doc.base_grand_total) < e_waybill_threshold:
+        logger.debug(
+            f"DN {doc.name}: Value {doc.base_grand_total} below e-Waybill threshold "
+            f"{e_waybill_threshold} — vehicle/transporter not mandatory"
+        )
+        return
+
+    frappe.throw(
+        _(
+            "Either Vehicle No or GST Transporter ID is mandatory for intra-state "
+            "internal Delivery Notes with value of {0} or above. (Current value: {1})"
+        ).format(
+            frappe.format_value(e_waybill_threshold, {"fieldtype": "Currency"}),
+            frappe.format_value(abs(doc.base_grand_total), {"fieldtype": "Currency"}),
+        ),
+        title=_("Missing Transport Details"),
+    )
 
 
 def maybe_generate_internal_dn_ewaybill(doc, method: Optional[str] = None) -> None:
@@ -371,3 +408,51 @@ def _validate_transport_details(doc) -> Optional[str]:
         return _("L/R No. is required to generate e-Waybill for supply via Rail or Air")
     
     return None
+
+
+def _is_inter_state_transfer(doc) -> bool:
+    """
+    Determine whether the Delivery Note is an inter-state (different GSTIN)
+    transfer by comparing the full company_gstin and billing_address_gstin.
+
+    For BNS internal transfers "intra-state" means **same GSTIN** — the
+    exact same GST registration on both sides.  When GSTINs differ the
+    transfer is inter-state and must go through the Sales Invoice flow,
+    so vehicle details are not required on the DN.
+
+    Args:
+        doc: The Delivery Note document
+
+    Returns:
+        bool: True if different GSTIN (inter-state), False if same GSTIN
+              (intra-state) or if either GSTIN is missing
+    """
+    company_gstin = (doc.get("company_gstin") or "").strip().upper()
+    billing_gstin = (doc.get("billing_address_gstin") or "").strip().upper()
+
+    if not company_gstin or not billing_gstin:
+        # Cannot determine — treat as intra-state (safer default: enforce
+        # vehicle requirement so the user is prompted to fill in details).
+        logger.debug(
+            f"DN {doc.name}: Cannot determine GSTIN — company_gstin={company_gstin!r}, "
+            f"billing_gstin={billing_gstin!r}. Treating as same GSTIN (intra-state)."
+        )
+        return False
+
+    return company_gstin != billing_gstin
+
+
+def _get_ewaybill_threshold() -> float:
+    """
+    Fetch the e-Waybill threshold amount from GST Settings.
+
+    Returns:
+        float: The threshold amount; 0 if not configured or on error
+    """
+    try:
+        return float(
+            frappe.db.get_single_value("GST Settings", "e_waybill_threshold") or 0
+        )
+    except Exception as e:
+        logger.error(f"Error fetching e-Waybill threshold: {e}")
+        return 0
