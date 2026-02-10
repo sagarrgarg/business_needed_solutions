@@ -1,4 +1,46 @@
+(function() {
+    var _fetch_link_title = frappe.utils.fetch_link_title;
+    frappe.utils.fetch_link_title = function(doctype, name) {
+        if (doctype === 'Sales Invoice' && name && cur_frm && cur_frm.doctype === 'Purchase Invoice') {
+            return _fetch_link_title.apply(this, arguments).catch(function() {
+                frappe.utils.add_link_title(doctype, name, name);
+                return name;
+            });
+        }
+        if (doctype === 'Sales Invoice Item' && name && cur_frm && cur_frm.doctype === 'Purchase Invoice') {
+            return _fetch_link_title.apply(this, arguments).catch(function() {
+                frappe.utils.add_link_title(doctype, name, name);
+                return name;
+            });
+        }
+        return _fetch_link_title.apply(this, arguments);
+    };
+})();
+
 frappe.ui.form.on('Purchase Invoice', {
+    onload: function(frm) {
+        // Prevent "Sales Invoice X not found" when opening a PI whose linked SI was deleted.
+        // Pre-populate link title cache SYNCHRONOUSLY so Link controls never request missing docs.
+        if (!frappe._link_titles) frappe._link_titles = {};
+
+        var siRefs = [
+            frm.doc.bns_inter_company_reference,
+            frm.doc.inter_company_invoice_reference
+        ].filter(Boolean);
+        siRefs.forEach(function(siName) {
+            frappe._link_titles['Sales Invoice::' + siName] = siName;
+        });
+
+        // Pre-populate Sales Invoice Item link titles for grid (avoids 404 for deleted SI items)
+        if (frm.doc.items && Array.isArray(frm.doc.items)) {
+            frm.doc.items.forEach(function(row) {
+                var siItem = row.sales_invoice_item;
+                if (siItem) {
+                    frappe._link_titles['Sales Invoice Item::' + siItem] = siItem;
+                }
+            });
+        }
+    },
     refresh: function(frm) {
         // Show button to convert to BNS Internal if supplier is BNS internal but PI is not marked
         // OR if PI is marked but status is not "BNS Internally Transferred"
@@ -142,7 +184,7 @@ frappe.ui.form.on('Purchase Invoice', {
                 // Show Unlink button if already linked
                 frm.add_custom_button(__('Unlink Sales Invoice'), function() {
                     frappe.confirm(
-                        __('Are you sure you want to unlink this Purchase Invoice from Sales Invoice {0}?', frm.doc.bns_inter_company_reference),
+                        __('Are you sure you want to unlink this Purchase Invoice from Sales Invoice {0}?', [frm.doc.bns_inter_company_reference]),
                         function() {
                             frappe.call({
                                 method: 'business_needed_solutions.business_needed_solutions.utils.unlink_si_pi',
