@@ -491,6 +491,9 @@ def _update_details(source_doc, target_doc, source_parent) -> None:
         
         # Set represents_company so ERPNext's is_internal_transfer() works
         target_doc.represents_company = source_doc.company
+
+        if getattr(source_doc, "custom_destination", None):
+            target_doc.custom_destination = source_doc.custom_destination
         
         # Handle addresses
         _update_addresses(target_doc, source_doc)
@@ -522,6 +525,9 @@ def _update_details(source_doc, target_doc, source_parent) -> None:
         
         # Set represents_company so ERPNext's is_internal_transfer() works
         target_doc.represents_company = source_doc.company
+
+        if getattr(source_doc, "custom_destination", None):
+            target_doc.custom_destination = source_doc.custom_destination
         
         # Update delivery note with reference
         _update_delivery_note_reference(source_doc.name, target_doc.name)
@@ -1110,6 +1116,9 @@ def _update_details_pi(source_doc, target_doc, source_parent) -> None:
         
         # Set supplier_invoice_number (bill_no) = SI name (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.bill_no = source_doc.name
+
+        if getattr(source_doc, "custom_destination", None):
+            target_doc.custom_destination = source_doc.custom_destination
         
         # Handle addresses
         _update_addresses_pi(target_doc, source_doc)
@@ -1132,6 +1141,9 @@ def _update_details_pi(source_doc, target_doc, source_parent) -> None:
         
         # Set is_bns_internal_supplier = 1 (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.is_bns_internal_supplier = 1
+
+        if getattr(source_doc, "custom_destination", None):
+            target_doc.custom_destination = source_doc.custom_destination
         
         # Set supplier_invoice_number (bill_no) = SI name (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.bill_no = source_doc.name
@@ -1451,6 +1463,9 @@ def _update_details_pr_from_si(source_doc, target_doc, source_parent) -> None:
         
         # Set supplier_delivery_note = SI name (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.supplier_delivery_note = source_doc.name
+
+        if getattr(source_doc, "custom_destination", None):
+            target_doc.custom_destination = source_doc.custom_destination
         
         # Set is_bns_internal_customer = 0 (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.is_bns_internal_customer = 0
@@ -1468,6 +1483,9 @@ def _update_details_pr_from_si(source_doc, target_doc, source_parent) -> None:
         
         # Set supplier_delivery_note = SI name (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.supplier_delivery_note = source_doc.name
+
+        if getattr(source_doc, "custom_destination", None):
+            target_doc.custom_destination = source_doc.custom_destination
         
         # Set is_bns_internal_customer = 0 (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.is_bns_internal_customer = 0
@@ -1865,26 +1883,26 @@ def validate_si_pi_items_match(sales_invoice: str, purchase_invoice: str, check_
                 })
             else:
                 pi_data = pi_items[item_code]
-                # Check stock_qty first, then qty
+                # Check stock_qty first, then qty (no tolerance: rounded comparison)
                 if si_data["stock_qty"] > 0:
-                    if abs(si_data["stock_qty"] - pi_data["stock_qty"]) > 0.001:
+                    if round(flt(si_data["stock_qty"]), 6) != round(flt(pi_data["stock_qty"]), 6):
                         qty_mismatches.append({
                             "item_code": item_code,
                             "si_qty": si_data["stock_qty"],
                             "pi_qty": pi_data["stock_qty"]
                         })
-                elif abs(si_data["qty"] - pi_data["qty"]) > 0.001:
+                elif round(flt(si_data["qty"]), 6) != round(flt(pi_data["qty"]), 6):
                     qty_mismatches.append({
                         "item_code": item_code,
                         "si_qty": si_data["qty"],
                         "pi_qty": pi_data["qty"]
                     })
                 
-                # Check taxable value mismatch if check_all is True
+                # Check taxable value mismatch if check_all is True (no tolerance)
                 if check_all:
                     si_taxable_value = si_data["base_net_amount"] if si_data["base_net_amount"] > 0 else si_data["net_amount"]
                     pi_taxable_value = pi_data["base_net_amount"] if pi_data["base_net_amount"] > 0 else pi_data["net_amount"]
-                    if abs(si_taxable_value - pi_taxable_value) > 0.01:
+                    if round(flt(si_taxable_value), 2) != round(flt(pi_taxable_value), 2):
                         taxable_value_mismatches.append({
                             "item_code": item_code,
                             "si_taxable_value": si_taxable_value,
@@ -1907,24 +1925,22 @@ def validate_si_pi_items_match(sales_invoice: str, purchase_invoice: str, check_
         if check_all:
             si_grand_total = flt(si.grand_total or 0)
             pi_grand_total = flt(pi.grand_total or 0)
-            if abs(si_grand_total - pi_grand_total) > 0.01:
+            if round(si_grand_total, 2) != round(pi_grand_total, 2):
                 grand_total_mismatch = {
                     "si_total": si_grand_total,
                     "pi_total": pi_grand_total,
                     "diff": si_grand_total - pi_grand_total
                 }
             
-            # Compare total taxes and charges in company currency
+            # Compare total taxes and charges in company currency (no tolerance)
             si_base_taxes = flt(si.base_total_taxes_and_charges or 0)
             if si_base_taxes == 0:
-                # Fallback to total_taxes_and_charges if base not available
                 si_base_taxes = flt(si.total_taxes_and_charges or 0)
             pi_base_taxes = flt(pi.base_total_taxes_and_charges or 0)
             if pi_base_taxes == 0:
-                # Fallback to total_taxes_and_charges if base not available
                 pi_base_taxes = flt(pi.total_taxes_and_charges or 0)
             
-            if abs(si_base_taxes - pi_base_taxes) > 0.01:
+            if round(si_base_taxes, 2) != round(pi_base_taxes, 2):
                 tax_mismatch = {
                     "si_tax": si_base_taxes,
                     "pi_tax": pi_base_taxes,
@@ -1961,6 +1977,64 @@ def validate_si_pi_items_match(sales_invoice: str, purchase_invoice: str, check_
     except Exception as e:
         logger.error(f"Error validating SI-PI items match: {str(e)}")
         frappe.throw(_("Error validating items: {0}").format(str(e)))
+
+
+def _match_and_set_item_references(si, pi) -> int:
+    """
+    Match SI items to PI items by item_code + qty and set sales_invoice_item on PI items.
+    Uses exact qty match first, then first-available partial match.
+    Returns the number of PI items updated.
+    """
+    si_item_map = defaultdict(list)
+    for si_item in si.items:
+        si_item_map[si_item.item_code].append({
+            "name": si_item.name,
+            "qty": flt(si_item.qty or 0),
+            "stock_qty": flt(si_item.stock_qty or si_item.qty or 0),
+            "remaining_qty": flt(si_item.qty or 0),
+            "remaining_stock_qty": flt(si_item.stock_qty or si_item.qty or 0),
+        })
+
+    count = 0
+    for pi_item in pi.items:
+        item_code = pi_item.item_code
+        pi_qty = flt(pi_item.qty or 0)
+        pi_stock_qty = flt(pi_item.stock_qty or pi_qty)
+
+        if item_code not in si_item_map or not si_item_map[item_code]:
+            continue
+
+        matched = False
+        for si_item_data in si_item_map[item_code]:
+            if si_item_data["remaining_qty"] <= 0:
+                continue
+            if pi_stock_qty > 0 and si_item_data["remaining_stock_qty"] > 0:
+                if round(pi_stock_qty, 6) == round(si_item_data["remaining_stock_qty"], 6):
+                    pi_item.db_set("sales_invoice_item", si_item_data["name"], update_modified=False)
+                    si_item_data["remaining_qty"] = 0
+                    si_item_data["remaining_stock_qty"] = 0
+                    matched = True
+                    count += 1
+                    break
+            elif round(pi_qty, 6) == round(si_item_data["remaining_qty"], 6):
+                pi_item.db_set("sales_invoice_item", si_item_data["name"], update_modified=False)
+                si_item_data["remaining_qty"] = 0
+                si_item_data["remaining_stock_qty"] = 0
+                matched = True
+                count += 1
+                break
+
+        if not matched:
+            for si_item_data in si_item_map[item_code]:
+                if si_item_data["remaining_qty"] > 0:
+                    pi_item.db_set("sales_invoice_item", si_item_data["name"], update_modified=False)
+                    if pi_stock_qty > 0 and si_item_data["remaining_stock_qty"] > 0:
+                        si_item_data["remaining_stock_qty"] -= pi_stock_qty
+                    else:
+                        si_item_data["remaining_qty"] -= pi_qty
+                    count += 1
+                    break
+    return count
 
 
 @frappe.whitelist()
@@ -2085,101 +2159,30 @@ def convert_sales_invoice_to_bns_internal(sales_invoice: str, purchase_invoice: 
                     )
                 )
             
-            # Match SI items to PI items and update item-wise references
-            # Create mapping: item_code -> list of (si_item, remaining_qty)
-            si_item_map = {}
-            for si_item in si.items:
-                item_code = si_item.item_code
-                if item_code not in si_item_map:
-                    si_item_map[item_code] = []
-                si_item_map[item_code].append({
-                    "name": si_item.name,
-                    "qty": si_item.qty or 0,
-                    "stock_qty": si_item.stock_qty or (si_item.qty or 0),
-                    "remaining_qty": si_item.qty or 0,
-                    "remaining_stock_qty": si_item.stock_qty or (si_item.qty or 0)
-                })
-            
-            # Match PI items to SI items and update sales_invoice_item field
-            pi_items_to_update = []
-            for pi_item in pi.items:
-                item_code = pi_item.item_code
-                pi_qty = pi_item.qty or 0
-                pi_stock_qty = pi_item.stock_qty or pi_qty
-                
-                if item_code in si_item_map and si_item_map[item_code]:
-                    # Find matching SI item(s) for this PI item
-                    matched = False
-                    for si_item_data in si_item_map[item_code]:
-                        if si_item_data["remaining_qty"] <= 0:
-                            continue
-                        
-                        # Check if quantities match (prefer stock_qty if available)
-                        if pi_stock_qty > 0 and si_item_data["remaining_stock_qty"] > 0:
-                            if abs(pi_stock_qty - si_item_data["remaining_stock_qty"]) < 0.001:
-                                # Perfect match
-                                pi_items_to_update.append({
-                                    "name": pi_item.name,
-                                    "sales_invoice_item": si_item_data["name"]
-                                })
-                                si_item_data["remaining_qty"] = 0
-                                si_item_data["remaining_stock_qty"] = 0
-                                matched = True
-                                break
-                        elif abs(pi_qty - si_item_data["remaining_qty"]) < 0.001:
-                            # Match by qty
-                            pi_items_to_update.append({
-                                "name": pi_item.name,
-                                "sales_invoice_item": si_item_data["name"]
-                            })
-                            si_item_data["remaining_qty"] = 0
-                            si_item_data["remaining_stock_qty"] = 0
-                            matched = True
-                            break
-                    
-                    # If no exact match found, match with first available SI item (partial match)
-                    if not matched:
-                        for si_item_data in si_item_map[item_code]:
-                            if si_item_data["remaining_qty"] > 0:
-                                pi_items_to_update.append({
-                                    "name": pi_item.name,
-                                    "sales_invoice_item": si_item_data["name"]
-                                })
-                                # Reduce remaining quantity
-                                if pi_stock_qty > 0 and si_item_data["remaining_stock_qty"] > 0:
-                                    si_item_data["remaining_stock_qty"] -= pi_stock_qty
-                                else:
-                                    si_item_data["remaining_qty"] -= pi_qty
-                                matched = True
-                                break
-            
+            # Match SI items to PI items and set sales_invoice_item on PI items
+            n_updated = _match_and_set_item_references(si, pi)
+
             # Update Purchase Invoice document-level fields first
             frappe.db.set_value("Purchase Invoice", pi.name, {
                 "is_bns_internal_supplier": 1,
                 "bns_inter_company_reference": si.name,
                 "status": "BNS Internally Transferred"
             }, update_modified=False)
-            
-            # Update item-wise sales_invoice_item references
-            for item_update in pi_items_to_update:
-                frappe.db.set_value("Purchase Invoice Item", item_update["name"], {
-                    "sales_invoice_item": item_update["sales_invoice_item"]
-                }, update_modified=False)
-            
+
             # Reload PI to get updated values
             pi.reload()
-            
+
             # Then update Sales Invoice
             si.db_set("bns_inter_company_reference", pi.name, update_modified=False)
-            
+
             # Clear cache for both documents
             frappe.clear_cache(doctype="Purchase Invoice")
             frappe.clear_cache(doctype="Sales Invoice")
-            
+
             result["purchase_invoice"] = pi.name
             result["message"] = _("Sales Invoice and Purchase Invoice linked successfully")
-            
-            logger.info(f"Linked Sales Invoice {si.name} with Purchase Invoice {pi.name}, updated {len(pi_items_to_update)} item references")
+
+            logger.info(f"Linked Sales Invoice {si.name} with Purchase Invoice {pi.name}, updated {n_updated} item references")
         
         frappe.clear_cache(doctype="Sales Invoice")
         
@@ -2313,97 +2316,26 @@ def convert_purchase_invoice_to_bns_internal(purchase_invoice: str, sales_invoic
                     )
                 )
             
-            # Match SI items to PI items and update item-wise references
-            # Create mapping: item_code -> list of (si_item, remaining_qty)
-            si_item_map = {}
-            for si_item in si.items:
-                item_code = si_item.item_code
-                if item_code not in si_item_map:
-                    si_item_map[item_code] = []
-                si_item_map[item_code].append({
-                    "name": si_item.name,
-                    "qty": si_item.qty or 0,
-                    "stock_qty": si_item.stock_qty or (si_item.qty or 0),
-                    "remaining_qty": si_item.qty or 0,
-                    "remaining_stock_qty": si_item.stock_qty or (si_item.qty or 0)
-                })
-            
-            # Match PI items to SI items and update sales_invoice_item field
-            pi_items_to_update = []
-            for pi_item in pi.items:
-                item_code = pi_item.item_code
-                pi_qty = pi_item.qty or 0
-                pi_stock_qty = pi_item.stock_qty or pi_qty
-                
-                if item_code in si_item_map and si_item_map[item_code]:
-                    # Find matching SI item(s) for this PI item
-                    matched = False
-                    for si_item_data in si_item_map[item_code]:
-                        if si_item_data["remaining_qty"] <= 0:
-                            continue
-                        
-                        # Check if quantities match (prefer stock_qty if available)
-                        if pi_stock_qty > 0 and si_item_data["remaining_stock_qty"] > 0:
-                            if abs(pi_stock_qty - si_item_data["remaining_stock_qty"]) < 0.001:
-                                # Perfect match
-                                pi_items_to_update.append({
-                                    "name": pi_item.name,
-                                    "sales_invoice_item": si_item_data["name"]
-                                })
-                                si_item_data["remaining_qty"] = 0
-                                si_item_data["remaining_stock_qty"] = 0
-                                matched = True
-                                break
-                        elif abs(pi_qty - si_item_data["remaining_qty"]) < 0.001:
-                            # Match by qty
-                            pi_items_to_update.append({
-                                "name": pi_item.name,
-                                "sales_invoice_item": si_item_data["name"]
-                            })
-                            si_item_data["remaining_qty"] = 0
-                            si_item_data["remaining_stock_qty"] = 0
-                            matched = True
-                            break
-                    
-                    # If no exact match found, match with first available SI item (partial match)
-                    if not matched:
-                        for si_item_data in si_item_map[item_code]:
-                            if si_item_data["remaining_qty"] > 0:
-                                pi_items_to_update.append({
-                                    "name": pi_item.name,
-                                    "sales_invoice_item": si_item_data["name"]
-                                })
-                                # Reduce remaining quantity
-                                if pi_stock_qty > 0 and si_item_data["remaining_stock_qty"] > 0:
-                                    si_item_data["remaining_stock_qty"] -= pi_stock_qty
-                                else:
-                                    si_item_data["remaining_qty"] -= pi_qty
-                                matched = True
-                                break
-            
+            # Match SI items to PI items and set sales_invoice_item on PI items
+            n_updated = _match_and_set_item_references(si, pi)
+
             # Update Purchase Invoice document-level fields first
             frappe.db.set_value("Purchase Invoice", pi.name, {
                 "is_bns_internal_supplier": 1,
                 "bns_inter_company_reference": si.name,
                 "status": "BNS Internally Transferred"
             }, update_modified=False)
-            
-            # Update item-wise sales_invoice_item references
-            for item_update in pi_items_to_update:
-                frappe.db.set_value("Purchase Invoice Item", item_update["name"], {
-                    "sales_invoice_item": item_update["sales_invoice_item"]
-                }, update_modified=False)
-            
+
             # Reload PI to get updated values
             pi.reload()
-            
+
             # Then update Sales Invoice
             si.db_set("bns_inter_company_reference", pi.name, update_modified=False)
             if si.status != "BNS Internally Transferred":
                 si.db_set("status", "BNS Internally Transferred", update_modified=False)
             if not si.get("is_bns_internal_customer"):
                 si.db_set("is_bns_internal_customer", 1, update_modified=False)
-            
+
             # Clear cache for both documents
             frappe.clear_cache(doctype="Purchase Invoice")
             frappe.clear_cache(doctype="Sales Invoice")
@@ -2411,7 +2343,7 @@ def convert_purchase_invoice_to_bns_internal(purchase_invoice: str, sales_invoic
             result["sales_invoice"] = si.name
             result["message"] = _("Purchase Invoice and Sales Invoice linked successfully")
             
-            logger.info(f"Linked Purchase Invoice {pi.name} with Sales Invoice {si.name}, updated {len(pi_items_to_update)} item references")
+            logger.info(f"Linked Purchase Invoice {pi.name} with Sales Invoice {si.name}, updated {n_updated} item references")
         
         frappe.clear_cache(doctype="Purchase Invoice")
         
@@ -3163,24 +3095,34 @@ def unlink_dn_pr(delivery_note: str = None, purchase_receipt: str = None) -> Dic
                     "message": _("Cleared reference from Purchase Receipt")
                 }
         
-        # Validate both documents exist
-        dn = frappe.get_doc("Delivery Note", delivery_note)
-        pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
+        # Clear each side independently — the contra document may have been
+        # cancelled or deleted, so we must not crash when it is missing.
+        dn_cleared = False
+        pr_cleared = False
         
-        # Remove bidirectional references - clear both sides regardless of current state
-        # This allows unlinking even if one side doesn't have the reference
-        if dn.get("bns_inter_company_reference"):
-            dn.db_set("bns_inter_company_reference", "", update_modified=False)
+        if delivery_note:
+            if frappe.db.exists("Delivery Note", delivery_note):
+                dn = frappe.get_doc("Delivery Note", delivery_note)
+                if dn.get("bns_inter_company_reference"):
+                    dn.db_set("bns_inter_company_reference", "", update_modified=False)
+                dn_cleared = True
+            else:
+                logger.warning(f"Delivery Note {delivery_note} does not exist — skipping its side of unlink")
         
-        if pr.get("bns_inter_company_reference"):
-            pr.db_set("bns_inter_company_reference", "", update_modified=False)
+        if purchase_receipt:
+            if frappe.db.exists("Purchase Receipt", purchase_receipt):
+                pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
+                if pr.get("bns_inter_company_reference"):
+                    pr.db_set("bns_inter_company_reference", "", update_modified=False)
+                pr_cleared = True
+            else:
+                logger.warning(f"Purchase Receipt {purchase_receipt} does not exist — skipping its side of unlink")
         
-        # Note: We don't change status or flags as they might be set for other reasons
-        # Only remove the inter-company reference
-        
-        # Clear cache
-        frappe.clear_cache(doctype="Delivery Note")
-        frappe.clear_cache(doctype="Purchase Receipt")
+        # Clear cache for whichever sides were touched
+        if dn_cleared:
+            frappe.clear_cache(doctype="Delivery Note")
+        if pr_cleared:
+            frappe.clear_cache(doctype="Purchase Receipt")
         
         logger.info(f"Unlinked Delivery Note {delivery_note} from Purchase Receipt {purchase_receipt}")
         
@@ -3278,15 +3220,9 @@ def link_si_pi(sales_invoice: str, purchase_invoice: str) -> Dict:
         si.db_set("bns_inter_company_reference", pi.name, update_modified=False)
         pi.db_set("bns_inter_company_reference", si.name, update_modified=False)
         
-        # Set item-wise references for PI items
-        si_items = si.items
-        pi_items = pi.items
-        
-        if len(si_items) == len(pi_items):
-            for si_item, pi_item in zip(si_items, pi_items):
-                if si_item.item_code == pi_item.item_code:
-                    pi_item.db_set("sales_invoice_item", si_item.name, update_modified=False)
-        
+        # Set item-wise references for PI items (match by item_code + qty)
+        _match_and_set_item_references(si, pi)
+
         # Update status and flags if not already set
         if not si.get("is_bns_internal_customer"):
             si.db_set("is_bns_internal_customer", 1, update_modified=False)
@@ -3361,29 +3297,38 @@ def unlink_si_pi(sales_invoice: str = None, purchase_invoice: str = None) -> Dic
                     "message": _("Cleared reference from Purchase Invoice")
                 }
         
-        # Validate both documents exist
-        si = frappe.get_doc("Sales Invoice", sales_invoice)
-        pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
+        # Clear each side independently — the contra document may have been
+        # cancelled or deleted, so we must not crash when it is missing.
+        si_cleared = False
+        pi_cleared = False
         
-        # Remove bidirectional references - clear both sides regardless of current state
-        if si.get("bns_inter_company_reference"):
-            si.db_set("bns_inter_company_reference", "", update_modified=False)
+        if sales_invoice:
+            if frappe.db.exists("Sales Invoice", sales_invoice):
+                si = frappe.get_doc("Sales Invoice", sales_invoice)
+                if si.get("bns_inter_company_reference"):
+                    si.db_set("bns_inter_company_reference", "", update_modified=False)
+                si_cleared = True
+            else:
+                logger.warning(f"Sales Invoice {sales_invoice} does not exist — skipping its side of unlink")
         
-        if pi.get("bns_inter_company_reference"):
-            pi.db_set("bns_inter_company_reference", "", update_modified=False)
+        if purchase_invoice:
+            if frappe.db.exists("Purchase Invoice", purchase_invoice):
+                pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
+                if pi.get("bns_inter_company_reference"):
+                    pi.db_set("bns_inter_company_reference", "", update_modified=False)
+                # Clear item-wise references
+                for pi_item in pi.items:
+                    if pi_item.get("sales_invoice_item"):
+                        pi_item.db_set("sales_invoice_item", "", update_modified=False)
+                pi_cleared = True
+            else:
+                logger.warning(f"Purchase Invoice {purchase_invoice} does not exist — skipping its side of unlink")
         
-        # Clear item-wise references
-        pi_items = pi.items
-        for pi_item in pi_items:
-            if pi_item.get("sales_invoice_item"):
-                pi_item.db_set("sales_invoice_item", "", update_modified=False)
-        
-        # Note: We don't change status or flags as they might be set for other reasons
-        # Only remove the inter-company reference
-        
-        # Clear cache
-        frappe.clear_cache(doctype="Sales Invoice")
-        frappe.clear_cache(doctype="Purchase Invoice")
+        # Clear cache for whichever sides were touched
+        if si_cleared:
+            frappe.clear_cache(doctype="Sales Invoice")
+        if pi_cleared:
+            frappe.clear_cache(doctype="Purchase Invoice")
         
         logger.info(f"Unlinked Sales Invoice {sales_invoice} from Purchase Invoice {purchase_invoice}")
         
@@ -3660,3 +3605,134 @@ def bulk_convert_to_bns_internal(from_date: str, force: int = 0) -> Dict:
     except Exception as e:
         logger.error(f"Error in bulk conversion: {str(e)}")
         frappe.throw(_("Error in bulk conversion: {0}").format(str(e)))
+
+
+def _match_and_set_dn_pr_item_references(dn, pr) -> int:
+    """
+    Match DN items to PR items by item_code + qty and set delivery_note_item on PR items.
+    Returns the number of PR items updated.
+    """
+    dn_item_map = defaultdict(list)
+    for dn_item in dn.items:
+        dn_item_map[dn_item.item_code].append({
+            "name": dn_item.name,
+            "qty": flt(dn_item.qty or 0),
+            "stock_qty": flt(dn_item.stock_qty or dn_item.qty or 0),
+            "remaining_qty": flt(dn_item.qty or 0),
+            "remaining_stock_qty": flt(dn_item.stock_qty or dn_item.qty or 0),
+        })
+
+    count = 0
+    for pr_item in pr.items:
+        item_code = pr_item.item_code
+        pr_qty = flt(pr_item.qty or 0)
+        pr_stock_qty = flt(pr_item.stock_qty or pr_qty)
+
+        if item_code not in dn_item_map or not dn_item_map[item_code]:
+            continue
+
+        matched = False
+        for dn_item_data in dn_item_map[item_code]:
+            if dn_item_data["remaining_qty"] <= 0:
+                continue
+            if pr_stock_qty > 0 and dn_item_data["remaining_stock_qty"] > 0:
+                if abs(pr_stock_qty - dn_item_data["remaining_stock_qty"]) < 0.001:
+                    pr_item.db_set("delivery_note_item", dn_item_data["name"], update_modified=False)
+                    dn_item_data["remaining_qty"] = 0
+                    dn_item_data["remaining_stock_qty"] = 0
+                    matched = True
+                    count += 1
+                    break
+            elif abs(pr_qty - dn_item_data["remaining_qty"]) < 0.001:
+                pr_item.db_set("delivery_note_item", dn_item_data["name"], update_modified=False)
+                dn_item_data["remaining_qty"] = 0
+                dn_item_data["remaining_stock_qty"] = 0
+                matched = True
+                count += 1
+                break
+
+        if not matched:
+            for dn_item_data in dn_item_map[item_code]:
+                if dn_item_data["remaining_qty"] > 0:
+                    pr_item.db_set("delivery_note_item", dn_item_data["name"], update_modified=False)
+                    if pr_stock_qty > 0 and dn_item_data["remaining_stock_qty"] > 0:
+                        dn_item_data["remaining_stock_qty"] -= pr_stock_qty
+                    else:
+                        dn_item_data["remaining_qty"] -= pr_qty
+                    count += 1
+                    break
+    return count
+
+
+@frappe.whitelist()
+def backfill_item_references(from_date: str) -> Dict:
+    """
+    Backfill sales_invoice_item on Purchase Invoice items and delivery_note_item on
+    Purchase Receipt items for BNS internal transfers from a given date.
+    Callable via bench console or one-time from BNS Settings.
+    Returns a summary with counts of documents and items fixed.
+    """
+    from_date = frappe.utils.getdate(from_date)
+    pi_docs_fixed = 0
+    pi_items_fixed = 0
+    pr_docs_fixed = 0
+    pr_items_fixed = 0
+
+    # SI-PI: PIs with is_bns_internal_supplier=1, posting_date >= from_date
+    pi_list = frappe.get_all(
+        "Purchase Invoice",
+        filters={
+            "is_bns_internal_supplier": 1,
+            "docstatus": 1,
+            "posting_date": [">=", from_date],
+        },
+        pluck="name",
+    )
+    for pi_name in pi_list:
+        pi = frappe.get_doc("Purchase Invoice", pi_name)
+        si_name = pi.get("bns_inter_company_reference") or pi.get("inter_company_invoice_reference")
+        if not si_name or not frappe.db.exists("Sales Invoice", si_name):
+            continue
+        has_empty = any(not (pi_item.get("sales_invoice_item") or "").strip() for pi_item in pi.items)
+        if not has_empty:
+            continue
+        si = frappe.get_doc("Sales Invoice", si_name)
+        n = _match_and_set_item_references(si, pi)
+        if n > 0:
+            pi_docs_fixed += 1
+            pi_items_fixed += n
+
+    # DN-PR: PRs with is_bns_internal_supplier=1, posting_date >= from_date
+    pr_list = frappe.get_all(
+        "Purchase Receipt",
+        filters={
+            "is_bns_internal_supplier": 1,
+            "docstatus": 1,
+            "posting_date": [">=", from_date],
+        },
+        pluck="name",
+    )
+    for pr_name in pr_list:
+        pr = frappe.get_doc("Purchase Receipt", pr_name)
+        dn_name = pr.get("bns_inter_company_reference") or pr.get("supplier_delivery_note")
+        if not dn_name or not frappe.db.exists("Delivery Note", dn_name):
+            continue
+        has_empty = any(not (pr_item.get("delivery_note_item") or "").strip() for pr_item in pr.items)
+        if not has_empty:
+            continue
+        dn = frappe.get_doc("Delivery Note", dn_name)
+        n = _match_and_set_dn_pr_item_references(dn, pr)
+        if n > 0:
+            pr_docs_fixed += 1
+            pr_items_fixed += n
+
+    return {
+        "success": True,
+        "purchase_invoice_docs_fixed": pi_docs_fixed,
+        "purchase_invoice_items_fixed": pi_items_fixed,
+        "purchase_receipt_docs_fixed": pr_docs_fixed,
+        "purchase_receipt_items_fixed": pr_items_fixed,
+        "message": _(
+            "Backfill complete: {0} Purchase Invoice(s) ({1} items), {2} Purchase Receipt(s) ({3} items)."
+        ).format(pi_docs_fixed, pi_items_fixed, pr_docs_fixed, pr_items_fixed),
+    }

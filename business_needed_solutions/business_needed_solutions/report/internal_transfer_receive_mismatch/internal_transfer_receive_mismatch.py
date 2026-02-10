@@ -24,6 +24,19 @@ import frappe
 from frappe import _
 from frappe.utils import today, flt
 
+# No tolerance: compare rounded values so matching SI-PI (e.g. after link_si_pi) are not falsely reported as mismatch.
+# Amounts: round to 2 decimals; qty: round to 6 decimals. This avoids float representation noise without allowing any business tolerance.
+
+
+def _amounts_equal(a, b):
+	"""Compare amounts with no tolerance; round to 2 decimals."""
+	return round(flt(a or 0), 2) == round(flt(b or 0), 2)
+
+
+def _qtys_equal(a, b):
+	"""Compare quantities with no tolerance; round to 6 decimals."""
+	return round(flt(a or 0), 6) == round(flt(b or 0), 6)
+
 
 @frappe.whitelist()
 def company_address_query(doctype, txt, searchfield, start, page_len, filters):
@@ -721,26 +734,26 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 				total_pi_net_amount += flt(pi_item.get("pi_net_amount") or 0)
 				total_pi_base_net_amount += flt(pi_item.get("pi_base_net_amount") or 0)
 			
-			# Check quantity match
+			# Check quantity match (no tolerance; rounded comparison)
 			if si_stock_qty > 0:
-				if abs(si_stock_qty - total_pi_stock_qty) > 0.01:  # Allow difference of 0.01
+				if not _qtys_equal(si_stock_qty, total_pi_stock_qty):
 					qty_mismatches.append({
 						"item": si_item.get("item_code") or "",
 						"si_qty": si_stock_qty,
 						"pi_qty": total_pi_stock_qty
 					})
 			else:
-				if abs(si_qty - total_pi_qty) > 0.01:  # Allow difference of 0.01
+				if not _qtys_equal(si_qty, total_pi_qty):
 					qty_mismatches.append({
 						"item": si_item.get("item_code") or "",
 						"si_qty": si_qty,
 						"pi_qty": total_pi_qty
 					})
 			
-			# Check taxable value mismatch
+			# Check taxable value mismatch (no tolerance; rounded comparison)
 			si_taxable_value = si_base_net_amount if si_base_net_amount > 0 else si_net_amount
 			pi_taxable_value = total_pi_base_net_amount if total_pi_base_net_amount > 0 else total_pi_net_amount
-			if abs(si_taxable_value - pi_taxable_value) > 5.0:  # Allow difference of ₹5
+			if not _amounts_equal(si_taxable_value, pi_taxable_value):
 				taxable_value_mismatches.append({
 					"item": si_item.get("item_code") or "",
 					"si_taxable_value": si_taxable_value,
@@ -771,32 +784,81 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 	except Exception as e:
 		frappe.log_error(f"Error checking extra PI items: {str(e)}")
 	
-	# Check grand total mismatch
+	# Check grand total mismatch (no tolerance; rounded comparison)
 	grand_total_mismatch = None
-	if abs(flt(si_doc.grand_total or 0) - pi_grand_total) > 5.0:  # Allow difference of ₹5
+	if not _amounts_equal(si_doc.grand_total, pi_grand_total):
 		grand_total_mismatch = {
 			"si_total": flt(si_doc.grand_total or 0),
 			"pi_total": pi_grand_total,
 			"diff": flt(si_doc.grand_total or 0) - pi_grand_total
 		}
 	
-	# Check tax mismatch (compare in company currency - base_total_taxes_and_charges)
+	# Check tax mismatch (compare in company currency - base_total_taxes_and_charges; no tolerance)
 	tax_mismatch = None
 	si_base_taxes = flt(si_doc.base_total_taxes_and_charges or 0)
 	if si_base_taxes == 0:
-		# Fallback to total_taxes_and_charges if base not available
 		si_base_taxes = flt(si_doc.total_taxes_and_charges or 0)
 	if pi_base_taxes == 0:
-		# Fallback to total_taxes_and_charges if base not available
 		pi_base_taxes = pi_total_taxes
 	
-	if abs(si_base_taxes - pi_base_taxes) > 0.01:
+	if not _amounts_equal(si_base_taxes, pi_base_taxes):
 		tax_mismatch = {
 			"si_tax": si_base_taxes,
 			"pi_tax": pi_base_taxes,
 			"diff": si_base_taxes - pi_base_taxes
 		}
-	
+
+	# Fallback: when item-level linking is incomplete (missing/extra items) but no qty/taxable mismatch,
+	# compare by aggregated item_code totals. Ensures explicitly linked SI-PI (e.g. via link_si_pi) with
+	# matching items/qty/taxable value are not falsely reported as mismatch.
+	if (missing_items or extra_items) and not qty_mismatches and not taxable_value_mismatches:
+		all_pi_items_for_agg = frappe.db.sql(all_pi_items_query, (pi_name,), as_dict=True) or []
+		if all_pi_items_for_agg:
+			si_agg = {}
+			for si_item in si_items:
+				ic = si_item.get("item_code") or ""
+				q = flt(si_item.get("qty") or 0)
+				sq = flt(si_item.get("stock_qty") or q)
+				na = flt(si_item.get("net_amount") or 0)
+				bna = flt(si_item.get("base_net_amount") or 0)
+				if ic not in si_agg:
+					si_agg[ic] = {"qty": 0, "stock_qty": 0, "net_amount": 0, "base_net_amount": 0}
+				si_agg[ic]["qty"] += q
+				si_agg[ic]["stock_qty"] += sq
+				si_agg[ic]["net_amount"] += na
+				si_agg[ic]["base_net_amount"] += bna
+			pi_agg = {}
+			for pi_item in all_pi_items_for_agg:
+				ic = pi_item.get("item_code") or ""
+				q = flt(pi_item.get("qty") or 0)
+				na = flt(pi_item.get("net_amount") or 0)
+				bna = flt(pi_item.get("base_net_amount") or 0)
+				if ic not in pi_agg:
+					pi_agg[ic] = {"qty": 0, "net_amount": 0, "base_net_amount": 0}
+				pi_agg[ic]["qty"] += q
+				pi_agg[ic]["net_amount"] += na
+				pi_agg[ic]["base_net_amount"] += bna
+			agg_match = True
+			for ic, s in si_agg.items():
+				if ic not in pi_agg:
+					agg_match = False
+					break
+				p = pi_agg[ic]
+				if not _qtys_equal(s["qty"], p["qty"]):
+					agg_match = False
+					break
+				sv = s["base_net_amount"] if s["base_net_amount"] > 0 else s["net_amount"]
+				pv = p["base_net_amount"] if p["base_net_amount"] > 0 else p["net_amount"]
+				if not _amounts_equal(sv, pv):
+					agg_match = False
+					break
+			for ic in pi_agg:
+				if ic not in si_agg:
+					agg_match = False
+					break
+			if agg_match and not grand_total_mismatch and not tax_mismatch:
+				return None
+
 	# Build mismatch reason
 	if missing_items or qty_mismatches or taxable_value_mismatches or extra_items or grand_total_mismatch or tax_mismatch:
 		all_mismatches = []
