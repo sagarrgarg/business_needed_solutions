@@ -205,19 +205,23 @@ class BNSDashboard {
 											<span class="badge badge-danger ml-2" id="badge-transfer-mismatch">0</span>
 										</strong>
 									</div>
-									<div class="sub-section-content" id="subcontent-transfer-mismatch" style="display: none; padding-top: 10px;">
-										<p class="text-muted small mb-2">
-											${__("DN/SI with missing or mismatched PR/PI. Click document to view details.")}
-										</p>
-										<div class="mb-2">
-											<a href="/app/query-report/Internal%20Transfer%20Receive%20Mismatch" target="_blank" class="btn btn-secondary btn-xs">
-												<i class="fa fa-external-link"></i> ${__("Open Full Report")}
-											</a>
-										</div>
-										<div id="table-transfer-mismatch">
-											<p class="text-muted">${__("Loading...")}</p>
-										</div>
+							<div class="sub-section-content" id="subcontent-transfer-mismatch" style="display: none; padding-top: 10px;">
+									<p class="text-muted small mb-2">
+										${__("DN/SI with missing or mismatched PR/PI. Data comes from the last prepared report.")}
+									</p>
+									<div class="mb-2 d-flex align-items-center" style="gap: 8px;">
+										<button class="btn btn-primary btn-xs" id="btn-prepare-mismatch-report">
+											<i class="fa fa-refresh"></i> ${__("Prepare New Report")}
+										</button>
+										<a href="/app/query-report/Internal%20Transfer%20Receive%20Mismatch" target="_blank" class="btn btn-secondary btn-xs">
+											<i class="fa fa-external-link"></i> ${__("Open Full Report")}
+										</a>
+										<span class="text-muted small" id="mismatch-report-status"></span>
 									</div>
+									<div id="table-transfer-mismatch">
+										<p class="text-muted">${__("Loading...")}</p>
+									</div>
+								</div>
 								</div>
 							</div>
 						</div>
@@ -338,6 +342,10 @@ class BNSDashboard {
 			self.wrapper.find(".pi-fix-checkbox:not(:disabled)").prop("checked", true);
 			self.update_bulk_fix_button();
 		});
+
+		this.wrapper.find("#btn-prepare-mismatch-report").on("click", function () {
+			self.prepare_mismatch_report();
+		});
 	}
 
 	toggle_section(section) {
@@ -379,8 +387,9 @@ class BNSDashboard {
 	}
 
 	async refresh() {
-		await this.load_expense_accounts();
+		// Run ALL data loads in parallel — load_expense_accounts no longer blocks
 		await Promise.all([
+			this.load_expense_accounts(),
 			this.load_summary(),
 			this.load_items_missing_expense_account(),
 			this.load_pi_wrong_expense_account(),
@@ -420,17 +429,27 @@ class BNSDashboard {
 				(data.unlinked_pan_count || 0) > 0 ? "warning" : ""
 			);
 
-			this.render_number_card(
-				"card-transfer-mismatch",
-				data.transfer_mismatch_count || 0,
-				__("Transfer Mismatches"),
-				(data.transfer_mismatch_count || 0) > 0 ? "danger" : ""
-			);
+			// Transfer mismatch card — show prepared report status
+			const mismatchCount = data.transfer_mismatch_count || 0;
+			const mismatchStatus = data.transfer_mismatch_status || "Not Prepared";
+			let mismatchLabel = __("Transfer Mismatches");
+			if (mismatchStatus === "Completed" && data.transfer_mismatch_prepared_at) {
+				mismatchLabel = __("Mismatches") + '<br><small class="text-muted">' + frappe.datetime.prettyDate(data.transfer_mismatch_prepared_at) + '</small>';
+			} else if (mismatchStatus === "Queued" || mismatchStatus === "Started") {
+				mismatchLabel = __("Mismatches") + '<br><small class="text-muted">' + __("Preparing...") + '</small>';
+			} else {
+				mismatchLabel = __("Mismatches") + '<br><small class="text-muted">' + __("Not prepared yet") + '</small>';
+			}
+
+			const mismatchCard = this.wrapper.find("#card-transfer-mismatch");
+			const mismatchColorClass = mismatchCount > 0 ? "danger" : "";
+			mismatchCard.removeClass("warning danger").addClass(mismatchColorClass);
+			mismatchCard.html('<div class="number">' + mismatchCount + '</div><div class="label">' + mismatchLabel + '</div>');
 
 			this.wrapper.find("#badge-items-missing").text(data.items_missing_expense_account);
 			this.wrapper.find("#badge-pi-fixable").text(data.pi_items_fixable);
 			this.wrapper.find("#badge-unlinked-pan").text(data.unlinked_pan_count || 0);
-			this.wrapper.find("#badge-transfer-mismatch").text(data.transfer_mismatch_count || 0);
+			this.wrapper.find("#badge-transfer-mismatch").text(mismatchCount);
 		} catch (e) {
 			console.error("Failed to load summary:", e);
 		}
@@ -898,7 +917,30 @@ class BNSDashboard {
 
 			const data = result.message;
 			this.wrapper.find("#badge-transfer-mismatch").text(data.count);
-			this.render_transfer_mismatch_table(data.records);
+
+			// Show prepared report status
+			const statusEl = this.wrapper.find("#mismatch-report-status");
+			if (data.status === "Completed" && data.prepared_at) {
+				statusEl.html(
+					'<i class="fa fa-check text-success"></i> ' +
+					__("Last prepared") + ": " + frappe.datetime.prettyDate(data.prepared_at)
+				);
+			} else if (data.status === "Queued" || data.status === "Started") {
+				statusEl.html(
+					'<i class="fa fa-spinner fa-spin"></i> ' + __("Report is being prepared...")
+				);
+				// Poll for completion
+				if (data.prepared_report_name) {
+					this._poll_prepared_report(data.prepared_report_name);
+				}
+			} else {
+				statusEl.html(
+					'<i class="fa fa-info-circle text-muted"></i> ' +
+					__("No prepared report found. Click 'Prepare New Report' to generate.")
+				);
+			}
+
+			this.render_transfer_mismatch_table(data.records, data.status);
 		} catch (e) {
 			console.error("Failed to load transfer mismatch data:", e);
 			this.wrapper.find("#table-transfer-mismatch").html(
@@ -907,11 +949,91 @@ class BNSDashboard {
 		}
 	}
 
-	render_transfer_mismatch_table(records) {
+	async prepare_mismatch_report() {
+		const btn = this.wrapper.find("#btn-prepare-mismatch-report");
+		btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> ' + __("Preparing..."));
+
+		try {
+			const result = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.trigger_mismatch_report_preparation",
+				args: { company: this.get_company() },
+			});
+
+			const data = result.message;
+			frappe.show_alert({ message: data.message, indicator: "blue" });
+
+			this.wrapper.find("#mismatch-report-status").html(
+				'<i class="fa fa-spinner fa-spin"></i> ' + __("Report is being prepared...")
+			);
+
+			// Poll for completion
+			if (data.prepared_report_name) {
+				this._poll_prepared_report(data.prepared_report_name);
+			}
+		} catch (e) {
+			frappe.msgprint(__("Failed to trigger report preparation: {0}", [e.message || e]));
+		} finally {
+			btn.prop("disabled", false).html('<i class="fa fa-refresh"></i> ' + __("Prepare New Report"));
+		}
+	}
+
+	_poll_prepared_report(prepared_report_name, attempt = 0) {
+		const self = this;
+		const maxAttempts = 30;
+		// Exponential backoff: 3s, 5s, 8s, 12s, 15s... capped at 15s
+		const delay = Math.min(3000 + attempt * 2000, 15000);
+
+		setTimeout(async function () {
+			try {
+				const result = await frappe.call({
+					method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_prepared_report_status",
+					args: { prepared_report_name: prepared_report_name },
+				});
+
+				const data = result.message;
+
+				if (data.status === "Completed") {
+					frappe.show_alert({ message: __("Transfer mismatch report is ready!"), indicator: "green" });
+					// Refresh transfer mismatch data + summary
+					self.load_transfer_mismatches();
+					self.load_summary();
+				} else if (data.status === "Error") {
+					self.wrapper.find("#mismatch-report-status").html(
+						'<i class="fa fa-exclamation-circle text-danger"></i> ' +
+						__("Report preparation failed. Try again.")
+					);
+					frappe.show_alert({ message: __("Report preparation failed"), indicator: "red" });
+				} else if (attempt < maxAttempts) {
+					// Still queued/started — keep polling
+					self._poll_prepared_report(prepared_report_name, attempt + 1);
+				} else {
+					self.wrapper.find("#mismatch-report-status").html(
+						'<i class="fa fa-clock-o text-warning"></i> ' +
+						__("Still preparing. Refresh page to check.")
+					);
+				}
+			} catch (e) {
+				console.error("Poll error:", e);
+			}
+		}, delay);
+	}
+
+	render_transfer_mismatch_table(records, status) {
 		const container = this.wrapper.find("#table-transfer-mismatch");
 
 		if (!records || records.length === 0) {
-			container.html('<p class="text-success mb-0">' + __("No internal transfer mismatches found!") + '</p>');
+			if (status !== "Completed") {
+				// No prepared report available — prompt user to run one
+				container.html(
+					'<p class="text-danger mb-0">' +
+					'<i class="fa fa-exclamation-circle"></i> ' +
+					__("No prepared report available. Click 'Prepare New Report' above to generate.") +
+					'</p>'
+				);
+			} else {
+				// Report ran successfully but found zero mismatches
+				container.html('<p class="text-success mb-0">' + __("No internal transfer mismatches found!") + '</p>');
+			}
 			return;
 		}
 

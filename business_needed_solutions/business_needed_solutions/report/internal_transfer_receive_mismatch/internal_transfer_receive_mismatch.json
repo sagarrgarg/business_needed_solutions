@@ -44,7 +44,7 @@
  "module": "Business Needed Solutions",
  "name": "Internal Transfer Receive Mismatch",
  "owner": "Administrator",
- "prepared_report": 0,
+ "prepared_report": 1,
  "ref_doctype": "Delivery Note",
  "report_name": "Internal Transfer Receive Mismatch",
  "report_type": "Script Report",

@@ -420,14 +420,16 @@ def get_dashboard_summary(company=None):
 	# Count of unlinked customer/supplier by PAN
 	unlinked_pan_count = get_unlinked_pan_count()
 	
-	# Count of internal transfer mismatches
-	transfer_mismatch_count = get_internal_transfer_mismatch_count(company)
+	# Get lightweight transfer mismatch info from last prepared report
+	transfer_mismatch_info = get_transfer_mismatch_summary(company)
 	
 	return {
 		"items_missing_expense_account": items_missing_count,
 		"pi_items_fixable": pi_fixable_count,
 		"unlinked_pan_count": unlinked_pan_count,
-		"transfer_mismatch_count": transfer_mismatch_count,
+		"transfer_mismatch_count": transfer_mismatch_info.get("count", 0),
+		"transfer_mismatch_prepared_at": transfer_mismatch_info.get("prepared_at"),
+		"transfer_mismatch_status": transfer_mismatch_info.get("status"),
 		"company": company
 	}
 
@@ -442,6 +444,7 @@ def get_unlinked_pan_count():
 def get_unlinked_customer_supplier_by_pan():
 	"""
 	Get customers and suppliers with matching PAN but no Party Link.
+	Uses batch Party Link lookup to avoid N+1 queries.
 	
 	Returns:
 		dict with count and records list
@@ -469,6 +472,12 @@ def get_unlinked_customer_supplier_by_pan():
 				"supplier_name": s["supplier_name"]
 			}
 	
+	# Batch-fetch ALL Party Links upfront (avoids N+1 db.exists per pair)
+	all_party_links = set()
+	for pl in frappe.get_all("Party Link", fields=["primary_party", "secondary_party"]):
+		all_party_links.add((pl.primary_party, pl.secondary_party))
+		all_party_links.add((pl.secondary_party, pl.primary_party))
+	
 	records = []
 	
 	for customer in customers:
@@ -479,19 +488,10 @@ def get_unlinked_customer_supplier_by_pan():
 		supplier_info = supplier_dict[pan]
 		supplier_name = supplier_info["name"]
 		
-		# Check if Party Link exists in either direction
-		party_link_exists = frappe.db.exists(
-			"Party Link",
-			{
-				"primary_party": customer["name"],
-				"secondary_party": supplier_name
-			}
-		) or frappe.db.exists(
-			"Party Link",
-			{
-				"primary_party": supplier_name,
-				"secondary_party": customer["name"]
-			}
+		# Check both directions using the pre-fetched set (O(1) lookup)
+		party_link_exists = (
+			(customer["name"], supplier_name) in all_party_links
+			or (supplier_name, customer["name"]) in all_party_links
 		)
 		
 		if not party_link_exists:
@@ -568,84 +568,269 @@ def create_party_link(primary_party, secondary_party, primary_role, secondary_ro
 	}
 
 
-@frappe.whitelist()
-def get_internal_transfer_mismatches(company=None, from_date=None, to_date=None):
+def get_transfer_mismatch_summary(company=None):
 	"""
-	Get internal transfer mismatches (DN to PR, SI to PI).
-	
-	Reuses logic from Internal Transfer Receive Mismatch report.
-	
+	Get lightweight transfer mismatch info from the latest Prepared Report.
+	Does NOT run the full report — only reads cached results.
+
 	Args:
 		company: Optional company filter
-		from_date: Optional start date filter
-		to_date: Optional end date filter
-		
+
 	Returns:
-		dict with count and records list
+		dict with count, prepared_at, and status
 	"""
-	# Import the report module to reuse its logic
-	from business_needed_solutions.business_needed_solutions.report.internal_transfer_receive_mismatch import (
-		internal_transfer_receive_mismatch as itrm_report
+	report_name = "Internal Transfer Receive Mismatch"
+
+	# Find the latest completed Prepared Report for this report
+	latest = frappe.db.get_value(
+		"Prepared Report",
+		filters={
+			"report_name": report_name,
+			"status": "Completed",
+		},
+		fieldname=["name", "creation"],
+		order_by="creation desc",
+		as_dict=True,
 	)
-	
-	if not company:
-		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
-	
-	# Build filters for the report
-	filters = frappe._dict({
-		"company": company,
-		"from_date": from_date,
-		"to_date": to_date
-	})
-	
-	# Get data from the report
+
+	if not latest:
+		# Check if one is queued/started
+		pending = frappe.db.get_value(
+			"Prepared Report",
+			filters={
+				"report_name": report_name,
+				"status": ("in", ("Queued", "Started")),
+			},
+			fieldname=["name", "status", "creation"],
+			order_by="creation desc",
+			as_dict=True,
+		)
+		if pending:
+			return {
+				"count": 0,
+				"prepared_at": None,
+				"status": pending.status,
+				"prepared_report_name": pending.name,
+			}
+		return {"count": 0, "prepared_at": None, "status": "Not Prepared"}
+
+	# Read the row count from the prepared report's cached data
+	count = 0
 	try:
-		report_data = itrm_report.get_data(filters) or []
-	except Exception as e:
-		frappe.log_error(f"Error getting internal transfer mismatches: {e}")
-		report_data = []
-	
-	# Transform report data to dashboard format
-	records = []
-	for row in report_data:
-		mismatch_type = "Mismatch"
-		mismatch_reason = row.get("mismatch_reason") or ""
-		
-		# Determine type based on missing_document field
-		missing_doc = row.get("missing_document") or ""
-		if "No PR" in mismatch_reason or missing_doc == "Purchase Receipt":
-			mismatch_type = "Missing PR"
-		elif "No PI" in mismatch_reason or missing_doc == "Purchase Invoice":
-			mismatch_type = "Missing PI"
-		elif "Mismatch" in missing_doc:
-			mismatch_type = "Mismatch"
-		
-		# Get linked document
-		linked_doc = row.get("purchase_receipt") or row.get("purchase_invoice")
-		
-		records.append({
-			"posting_date": row.get("posting_date"),
-			"document_type": row.get("document_type"),
-			"document_name": row.get("document_name"),
-			"grand_total": flt(row.get("grand_total")),
-			"customer": "",  # Report doesn't include customer directly
-			"mismatch_type": mismatch_type,
-			"mismatch_reason": mismatch_reason,
-			"linked_document": linked_doc
-		})
-	
-	# Limit to 100 for dashboard
+		pr_doc = frappe.get_doc("Prepared Report", latest.name)
+		import json as _json
+
+		raw_data = pr_doc.get_prepared_data()
+		if raw_data:
+			data = _json.loads(raw_data.decode("utf-8"))
+			# data is either {"result": [...], "columns": [...]} or a plain list
+			if isinstance(data, dict):
+				result = data.get("result", [])
+			else:
+				result = data
+			count = len(result) if isinstance(result, list) else 0
+	except (FileNotFoundError, OSError):
+		# Data file was deleted from disk — treat as stale/unavailable
+		return {"count": 0, "prepared_at": None, "status": "Not Prepared"}
+	except Exception:
+		count = 0
+
 	return {
-		"count": len(records),
-		"records": records[:100],
-		"company": company
+		"count": count,
+		"prepared_at": str(latest.creation),
+		"status": "Completed",
+		"prepared_report_name": latest.name,
 	}
 
 
-def get_internal_transfer_mismatch_count(company=None):
-	"""Get count of internal transfer mismatches for dashboard summary."""
+@frappe.whitelist()
+def get_internal_transfer_mismatches(company=None):
+	"""
+	Get internal transfer mismatch data from the latest completed Prepared Report.
+	Does NOT run the full report live — reads cached/prepared results only.
+
+	Args:
+		company: Optional company filter
+
+	Returns:
+		dict with count, records, prepared_at, and status
+	"""
+	import gzip
+	import json as _json
+
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
-	
-	data = get_internal_transfer_mismatches(company)
-	return data.get("count", 0)
+
+	report_name = "Internal Transfer Receive Mismatch"
+
+	# Find the latest completed Prepared Report
+	latest = frappe.db.get_value(
+		"Prepared Report",
+		filters={
+			"report_name": report_name,
+			"status": "Completed",
+		},
+		fieldname=["name", "creation", "filters"],
+		order_by="creation desc",
+		as_dict=True,
+	)
+
+	if not latest:
+		# Check for pending
+		pending = frappe.db.get_value(
+			"Prepared Report",
+			filters={
+				"report_name": report_name,
+				"status": ("in", ("Queued", "Started")),
+			},
+			fieldname=["name", "status", "creation"],
+			order_by="creation desc",
+			as_dict=True,
+		)
+		return {
+			"count": 0,
+			"records": [],
+			"company": company,
+			"prepared_at": None,
+			"status": pending.status if pending else "Not Prepared",
+			"prepared_report_name": pending.name if pending else None,
+		}
+
+	# Read the full data from the prepared report
+	records = []
+	try:
+		pr_doc = frappe.get_doc("Prepared Report", latest.name)
+		raw_data = pr_doc.get_prepared_data()
+		if raw_data:
+			data = _json.loads(raw_data.decode("utf-8"))
+			if isinstance(data, dict):
+				result = data.get("result", [])
+			else:
+				result = data
+
+			# Transform report rows to dashboard format
+			for row in (result or []):
+				mismatch_type = "Mismatch"
+				mismatch_reason = row.get("mismatch_reason") or ""
+
+				missing_doc = row.get("missing_document") or ""
+				if "No PR" in mismatch_reason or missing_doc == "Purchase Receipt":
+					mismatch_type = "Missing PR"
+				elif "No PI" in mismatch_reason or missing_doc == "Purchase Invoice":
+					mismatch_type = "Missing PI"
+				elif "Mismatch" in missing_doc:
+					mismatch_type = "Mismatch"
+
+				linked_doc = row.get("purchase_receipt") or row.get("purchase_invoice")
+
+				records.append({
+					"posting_date": row.get("posting_date"),
+					"document_type": row.get("document_type"),
+					"document_name": row.get("document_name"),
+					"grand_total": flt(row.get("grand_total")),
+					"customer": "",
+					"mismatch_type": mismatch_type,
+					"mismatch_reason": mismatch_reason,
+					"linked_document": linked_doc,
+				})
+	except (FileNotFoundError, OSError):
+		# Data file was deleted from disk — stale prepared report
+		return {
+			"count": 0,
+			"records": [],
+			"company": company,
+			"prepared_at": None,
+			"status": "Not Prepared",
+			"prepared_report_name": None,
+		}
+	except Exception as e:
+		frappe.log_error(title="BNS Dashboard: Prepared report read error", message=str(e))
+
+	return {
+		"count": len(records),
+		"records": records[:100],
+		"company": company,
+		"prepared_at": str(latest.creation),
+		"status": "Completed",
+		"prepared_report_name": latest.name,
+	}
+
+
+@frappe.whitelist()
+def trigger_mismatch_report_preparation(company=None, from_date=None, to_date=None):
+	"""
+	Trigger a new Prepared Report for Internal Transfer Receive Mismatch.
+	Enqueues the report generation in the background.
+
+	Args:
+		company: Optional company filter
+		from_date: Optional start date
+		to_date: Optional end date
+
+	Returns:
+		dict with prepared_report name and status
+	"""
+	import json as _json
+	from frappe.core.doctype.prepared_report.prepared_report import get_reports_in_queued_state
+
+	report_name = "Internal Transfer Receive Mismatch"
+
+	filters = {}
+	if company:
+		filters["company"] = company
+	if from_date:
+		filters["from_date"] = from_date
+	if to_date:
+		filters["to_date"] = to_date
+
+	# Check if a report is already queued/started
+	queued = get_reports_in_queued_state(report_name, _json.dumps(filters))
+	if queued:
+		return {
+			"status": "Already Queued",
+			"prepared_report_name": queued[0].get("name"),
+			"message": _("A report is already being prepared. Please wait."),
+		}
+
+	# Create a new Prepared Report (this auto-enqueues via after_insert)
+	from frappe.core.doctype.prepared_report.prepared_report import make_prepared_report
+
+	result = make_prepared_report(report_name, _json.dumps(filters))
+
+	return {
+		"status": "Queued",
+		"prepared_report_name": result.get("name"),
+		"message": _("Report preparation started. This may take a few minutes."),
+	}
+
+
+@frappe.whitelist()
+def get_prepared_report_status(prepared_report_name):
+	"""
+	Check the status of a specific Prepared Report.
+
+	Args:
+		prepared_report_name: The Prepared Report document name
+
+	Returns:
+		dict with status and error_message if any
+	"""
+	if not prepared_report_name:
+		return {"status": "Not Found"}
+
+	doc = frappe.db.get_value(
+		"Prepared Report",
+		prepared_report_name,
+		["status", "error_message", "creation", "report_end_time"],
+		as_dict=True,
+	)
+
+	if not doc:
+		return {"status": "Not Found"}
+
+	return {
+		"status": doc.status,
+		"error_message": doc.error_message,
+		"created_at": str(doc.creation) if doc.creation else None,
+		"completed_at": str(doc.report_end_time) if doc.report_end_time else None,
+	}
