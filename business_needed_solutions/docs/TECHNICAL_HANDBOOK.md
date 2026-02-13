@@ -330,7 +330,7 @@ Replaces ERPNext's standard "Update Items" button on submitted Sales Orders and 
 
 | ID | Severity | Description |
 |----|----------|-------------|
-| BNS-UPD-001 | **CRITICAL** | `update_items.py` line 415: `item_code_changed` variable used but never defined in the new-item code path (line 251 branch where `new_child_flag = True`). Adding a new row to a submitted SO/PO causes `UnboundLocalError` at runtime. |
+| ~~BNS-UPD-001~~ | ~~CRITICAL~~ | **FIXED** — `item_code_changed` now defined in new-item path (`item_code_changed = False`) to prevent `UnboundLocalError` when adding rows to submitted SO/PO |
 | BNS-UPD-002 | **HIGH** | No database lock or transaction guard — concurrent `update_child_items` calls on the same SO/PO can cause race conditions (stale data overwrites, double-counted stock reservations) |
 | BNS-UPD-003 | **MEDIUM** | The function is 530+ lines with deeply nested logic — high maintenance/readability risk |
 
@@ -835,7 +835,7 @@ When `discount_type = "Triple"`:
 | ID | Area | Description |
 |----|------|-------------|
 | BNS-GST-002 | Vehicle Update | `update_vehicle.py` uses `ignore_permissions=True` on `@frappe.whitelist()` — any user can modify any document |
-| BNS-UPD-001 | Update Items | `item_code_changed` undefined in new-item path → `UnboundLocalError` on adding rows to submitted SO/PO |
+| ~~BNS-UPD-001~~ | Update Items | **FIXED** — `item_code_changed` now defined in new-item path |
 | ~~BNS-BOM-001~~ | ~~BOM Variance~~ | **FIXED** — `override_doctype_class` was commented out. Now active with BOM enforcement + `from_bom` mandatory + client-side red highlighting |
 | BNS-INT-001 | Internal Transfer | `utils.py` lines 213-217 unreachable dead code — `parent_doctype` null-guard never runs |
 

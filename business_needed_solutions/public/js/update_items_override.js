@@ -121,49 +121,66 @@ business_needed_solutions.updateItems = (() => {
     }
   };
 
+  const getDialogGridData = (dialog) => {
+    const grid = dialog?.fields_dict?.trans_items?.grid;
+    return grid ? grid.get_data() : [];
+  };
+
+  const findDialogRow = (dialog, rowDoc) => {
+    const data = getDialogGridData(dialog);
+    return data.find((d) => d.idx === rowDoc.idx);
+  };
+
+  const buildItemDetailsArgs = (frm, rowDoc, overrides = {}) => {
+    const args = {
+      item_code: rowDoc.item_code,
+      set_warehouse: frm.doc.set_warehouse,
+      customer: frm.doc.customer || frm.doc.party_name,
+      quotation_to: frm.doc.quotation_to,
+      supplier: frm.doc.supplier,
+      currency: frm.doc.currency,
+      is_internal_supplier: frm.doc.is_internal_supplier,
+      is_internal_customer: frm.doc.is_internal_customer,
+      conversion_rate: frm.doc.conversion_rate,
+      price_list: frm.doc.selling_price_list || frm.doc.buying_price_list,
+      price_list_currency: frm.doc.price_list_currency,
+      plc_conversion_rate: frm.doc.plc_conversion_rate,
+      company: frm.doc.company,
+      order_type: frm.doc.order_type,
+      is_pos: cint(frm.doc.is_pos),
+      is_return: cint(frm.doc.is_return),
+      is_subcontracted: frm.doc.is_subcontracted,
+      ignore_pricing_rule: frm.doc.ignore_pricing_rule,
+      doctype: frm.doc.doctype,
+      name: frm.doc.name,
+      qty: rowDoc.qty || 1,
+      uom: rowDoc.uom,
+      pos_profile: cint(frm.doc.is_pos) ? frm.doc.pos_profile : "",
+      tax_category: frm.doc.tax_category,
+      child_doctype: frm.doc.doctype + " Item",
+      is_old_subcontracting_flow: frm.doc.is_old_subcontracting_flow,
+    };
+    return Object.assign({}, args, overrides);
+  };
+
   const applyItemDetailsToDialogRow = (frm, dialog, rowDoc, discountType) => {
     if (!rowDoc?.item_code) return;
 
-    // Fetch item details to fill Price List Rate / UOM / Conversion Factor
+    // Use BNS wrapper for reliable args handling; get_item_details factors price by
+    // conversion_factor when UOM differs from stock UOM and no separate Item Price exists
     frappe.call({
-      method: "erpnext.stock.get_item_details.get_item_details",
+      method: "business_needed_solutions.business_needed_solutions.overrides.update_items.get_item_details_for_update_items_dialog",
+      freeze: true,
       args: {
+        args: buildItemDetailsArgs(frm, rowDoc),
         doc: frm.doc,
-        args: {
-          item_code: rowDoc.item_code,
-          set_warehouse: frm.doc.set_warehouse,
-          customer: frm.doc.customer || frm.doc.party_name,
-          quotation_to: frm.doc.quotation_to,
-          supplier: frm.doc.supplier,
-          currency: frm.doc.currency,
-          is_internal_supplier: frm.doc.is_internal_supplier,
-          is_internal_customer: frm.doc.is_internal_customer,
-          conversion_rate: frm.doc.conversion_rate,
-          price_list: frm.doc.selling_price_list || frm.doc.buying_price_list,
-          price_list_currency: frm.doc.price_list_currency,
-          plc_conversion_rate: frm.doc.plc_conversion_rate,
-          company: frm.doc.company,
-          order_type: frm.doc.order_type,
-          is_pos: cint(frm.doc.is_pos),
-          is_return: cint(frm.doc.is_return),
-          is_subcontracted: frm.doc.is_subcontracted,
-          ignore_pricing_rule: frm.doc.ignore_pricing_rule,
-          doctype: frm.doc.doctype,
-          name: frm.doc.name,
-          qty: rowDoc.qty || 1,
-          uom: rowDoc.uom,
-          pos_profile: cint(frm.doc.is_pos) ? frm.doc.pos_profile : "",
-          tax_category: frm.doc.tax_category,
-          child_doctype: frm.doc.doctype + " Item",
-          is_old_subcontracting_flow: frm.doc.is_old_subcontracting_flow,
-        },
       },
       callback: (r) => {
         if (r.exc) {
           console.error("Error fetching item details:", r.exc);
           return;
         }
-        
+
         if (!r.message) {
           console.warn("No item details returned for item:", rowDoc.item_code);
           return;
@@ -178,20 +195,12 @@ business_needed_solutions.updateItems = (() => {
           stock_uom,
         } = r.message;
 
-        // Update dialog row
-        const target = dialog.fields_dict.trans_items.df.data.find(
-          (d) => d.idx === rowDoc.idx
-        );
+        // Use rowDoc as fallback when findDialogRow fails (e.g. new rows)
+        const target = findDialogRow(dialog, rowDoc) || rowDoc;
 
-        if (!target) {
-          console.warn("Target row not found for idx:", rowDoc.idx);
-          return;
-        }
-
-        // Update fields - always refresh from server response when item_code changes
         if (stock_uom) target.stock_uom = stock_uom;
         if (uom) target.uom = uom;
-        if (conversion_factor) target.conversion_factor = conversion_factor;
+        if (conversion_factor != null) target.conversion_factor = conversion_factor;
         if (qty && !target.qty) target.qty = qty;
         if (price_list_rate !== undefined && price_list_rate !== null) {
           target.price_list_rate = price_list_rate;
@@ -203,27 +212,33 @@ business_needed_solutions.updateItems = (() => {
       },
     });
 
-    // Fetch Stock UOM / Item Name if not returned by get_item_details
+    // Fallback for Stock UOM / Item Name if not returned
     if (!rowDoc.stock_uom || !rowDoc.item_name) {
-      frappe.db.get_value("Item", rowDoc.item_code, ["stock_uom", "item_name"]).then((r) => {
-        const stockUom = r?.message?.stock_uom;
-        const itemName = r?.message?.item_name;
-        const target = dialog.fields_dict.trans_items.df.data.find(
-          (d) => d.idx === rowDoc.idx
-        );
-        if (!target) return;
+      frappe
+        .xcall("frappe.client.get_value", {
+          doctype: "Item",
+          fieldname: ["stock_uom", "item_name"],
+          filters: { name: rowDoc.item_code },
+        })
+        .then((message) => {
+          const stockUom = message?.stock_uom;
+          const itemName = message?.item_name;
+          const target = findDialogRow(dialog, rowDoc) || rowDoc;
 
-        if (!target.stock_uom && stockUom) {
-          target.stock_uom = stockUom;
-          if (!target.uom) target.uom = stockUom;
-        }
-        if (!target.item_name && itemName) {
-          target.item_name = itemName;
-        }
+          if (!target.stock_uom && stockUom) {
+            target.stock_uom = stockUom;
+            if (!target.uom) target.uom = stockUom;
+          }
+          if (!target.item_name && itemName) {
+            target.item_name = itemName;
+          }
 
-        updateComputedFields(frm, discountType, target);
-        dialog.fields_dict.trans_items.grid.refresh();
-      });
+          updateComputedFields(frm, discountType, target);
+          dialog.fields_dict.trans_items.grid.refresh();
+        })
+        .catch((err) => {
+          console.warn("Failed to fetch Item stock_uom/item_name:", err);
+        });
     }
   };
 
@@ -341,63 +356,30 @@ business_needed_solutions.updateItems = (() => {
         onchange: async function () {
           const dialog = getDialog && getDialog();
           if (!dialog || !this.doc.item_code) return;
-          
-          const rowDocname = this.doc.docname;
+
+          const rowDoc = this.doc;
           const currentDiscountType = await getDiscountType();
-          
-          // Fetch both conversion_factor and price_list_rate for the new UOM
+
+          // Fetch conversion_factor and price_list_rate for the new UOM.
+          // get_item_details factors price by conversion_factor when no separate Item Price for UOM.
           frappe.call({
-            method: "erpnext.stock.get_item_details.get_item_details",
+            method: "business_needed_solutions.business_needed_solutions.overrides.update_items.get_item_details_for_update_items_dialog",
             args: {
+              args: buildItemDetailsArgs(frm, rowDoc, { uom: this.value }),
               doc: frm.doc,
-              args: {
-                item_code: this.doc.item_code,
-                set_warehouse: frm.doc.set_warehouse,
-                customer: frm.doc.customer || frm.doc.party_name,
-                quotation_to: frm.doc.quotation_to,
-                supplier: frm.doc.supplier,
-                currency: frm.doc.currency,
-                is_internal_supplier: frm.doc.is_internal_supplier,
-                is_internal_customer: frm.doc.is_internal_customer,
-                conversion_rate: frm.doc.conversion_rate,
-                price_list: frm.doc.selling_price_list || frm.doc.buying_price_list,
-                price_list_currency: frm.doc.price_list_currency,
-                plc_conversion_rate: frm.doc.plc_conversion_rate,
-                company: frm.doc.company,
-                order_type: frm.doc.order_type,
-                is_pos: cint(frm.doc.is_pos),
-                is_return: cint(frm.doc.is_return),
-                is_subcontracted: frm.doc.is_subcontracted,
-                ignore_pricing_rule: frm.doc.ignore_pricing_rule,
-                doctype: frm.doc.doctype,
-                name: frm.doc.name,
-                qty: this.doc.qty || 1,
-                uom: this.value, // New UOM
-                pos_profile: cint(frm.doc.is_pos) ? frm.doc.pos_profile : "",
-                tax_category: frm.doc.tax_category,
-                child_doctype: frm.doc.doctype + " Item",
-                is_old_subcontracting_flow: frm.doc.is_old_subcontracting_flow,
-              },
             },
             callback: (r) => {
               if (r.exc || !r.message) return;
-              
+
               const { conversion_factor, price_list_rate } = r.message;
-              
-              dialog.fields_dict.trans_items.df.data.some((d) => {
-                if (d.docname === rowDocname) {
-                  if (conversion_factor) {
-                    d.conversion_factor = conversion_factor;
-                  }
-                  // Update price_list_rate for the new UOM
-                  if (price_list_rate !== undefined && price_list_rate !== null) {
-                    d.price_list_rate = price_list_rate;
-                  }
-                  updateComputedFields(frm, currentDiscountType, d);
-                  dialog.fields_dict.trans_items.grid.refresh();
-                  return true;
-                }
-              });
+              const target = findDialogRow(dialog, rowDoc) || rowDoc;
+
+              if (conversion_factor != null) target.conversion_factor = conversion_factor;
+              if (price_list_rate !== undefined && price_list_rate !== null) {
+                target.price_list_rate = price_list_rate;
+              }
+              updateComputedFields(frm, currentDiscountType, target);
+              dialog.fields_dict.trans_items.grid.refresh();
             },
           });
         },

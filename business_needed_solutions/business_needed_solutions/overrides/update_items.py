@@ -29,6 +29,35 @@ from erpnext.stock.doctype.packed_item.packed_item import make_packing_list
 from erpnext.stock.get_item_details import get_conversion_factor, get_item_details, get_item_warehouse
 
 
+@frappe.whitelist()
+def get_item_details_for_update_items_dialog(args, doc=None):
+	"""
+	BNS wrapper for get_item_details used by Update Items dialog.
+	Ensures correct args structure (handles nested args from client) and returns
+	price_list_rate, uom, conversion_factor, stock_uom, item_name, qty.
+	When UOM differs from stock UOM and no separate Item Price exists for that UOM,
+	ERPNext's get_item_details factors the price by conversion_factor automatically.
+	"""
+	if isinstance(args, str):
+		args = json.loads(args)
+	args = frappe._dict(args)
+
+	# Handle nested structure from client: { args: {...}, doc: {...} }
+	inner_args = args.get("args")
+	if inner_args is not None:
+		args = frappe._dict(inner_args)
+	if doc is None and args.get("doc"):
+		doc = args.get("doc")
+
+	if isinstance(doc, str):
+		doc = json.loads(doc) if doc else None
+
+	if not args.get("item_code"):
+		return None
+
+	return get_item_details(args, doc=doc)
+
+
 def _get_discount_type() -> str:
 	"""Return BNS discount type (Single / Triple Compounded)."""
 	return (
@@ -253,6 +282,7 @@ def update_child_items(
 			items_added_or_removed = True
 			check_doc_permissions(parent, "create")
 			child_item = get_new_child_item(d)
+			item_code_changed = False  # New row: no item change, only add
 		else:
 			check_doc_permissions(parent, "write")
 			child_item = frappe.get_doc(parent_doctype + " Item", d.get("docname"))
@@ -463,10 +493,60 @@ def update_child_items(
 				or conversion_factor
 			)
 
-		# Price List Rate + Discounts (BNS)
+		# Price List Rate: use provided value, else fetch from get_item_details (handles new rows + UOM conversion)
+		# get_item_details factors price by conversion_factor when no separate Item Price for selected UOM
 		if d.get("price_list_rate") is not None:
 			plr_precision = child_item.precision("price_list_rate") or 2
 			child_item.price_list_rate = flt(d.get("price_list_rate"), plr_precision)
+		else:
+			item_details_args = {
+				"item_code": d.get("item_code"),
+				"set_warehouse": parent.get("set_warehouse"),
+				"customer": parent.get("customer") or parent.get("party_name"),
+				"quotation_to": parent.get("quotation_to"),
+				"supplier": parent.get("supplier"),
+				"currency": parent.get("currency"),
+				"is_internal_supplier": parent.get("is_internal_supplier"),
+				"is_internal_customer": parent.get("is_internal_customer"),
+				"conversion_rate": parent.get("conversion_rate"),
+				"price_list": (
+					parent.get("selling_price_list") if parent_doctype == "Sales Order" else parent.get("buying_price_list")
+				),
+				"price_list_currency": parent.get("price_list_currency"),
+				"plc_conversion_rate": parent.get("plc_conversion_rate"),
+				"company": parent.get("company"),
+				"order_type": parent.get("order_type"),
+				"is_pos": cint(parent.get("is_pos")),
+				"is_return": cint(parent.get("is_return")),
+				"is_subcontracted": parent.get("is_subcontracted"),
+				"ignore_pricing_rule": parent.get("ignore_pricing_rule"),
+				"doctype": parent_doctype,
+				"name": parent.name,
+				"qty": d.get("qty") or 1,
+				"uom": d.get("uom") or child_item.uom,
+				"pos_profile": cint(parent.get("is_pos")) and parent.get("pos_profile") or "",
+				"tax_category": parent.get("tax_category"),
+				"child_doctype": parent_doctype + " Item",
+				"is_old_subcontracting_flow": parent.get("is_old_subcontracting_flow"),
+			}
+			item_details = get_item_details(item_details_args, doc=parent.as_dict())
+			if item_details and item_details.get("price_list_rate") is not None:
+				plr_precision = child_item.precision("price_list_rate") or 2
+				child_item.price_list_rate = flt(item_details["price_list_rate"], plr_precision)
+				# Recompute rate when client sent 0 (no price_list_rate to compute from)
+				if not flt(d.get("rate")):
+					computed_rate, _ = _compute_rate_from_price_list(
+						parent_doctype=parent_doctype,
+						discount_type=discount_type,
+						price_list_rate=child_item.price_list_rate,
+						discount_percentage=flt(d.get("discount_percentage")),
+						d1=flt(d.get("custom_d1_")),
+						d2=flt(d.get("custom_d2_")),
+						d3=flt(d.get("custom_d3_")),
+					)
+					d["rate"] = computed_rate
+
+		# Discounts (BNS)
 
 		if discount_type == "Single":
 			if d.get("discount_percentage") is not None:
