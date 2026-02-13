@@ -267,7 +267,7 @@ frappe.ui.form.on('Sales Invoice', {
                             fieldname: 'transporter',
                             fieldtype: 'Link',
                             options: 'Supplier',
-                            default: frm.doc.transporter,  // Set default value from form
+                            default: frm.doc.transporter,
                             reqd: 0,
                             get_query: () => {
                                 return {
@@ -276,14 +276,6 @@ frappe.ui.form.on('Sales Invoice', {
                                     }
                                 };
                             }
-                        },
-                        {
-                            label: 'GST Transporter ID',
-                            fieldname: 'gst_transporter_id',
-                            fieldtype: 'Data',
-                            default: frm.doc.gst_transporter_id,  // Set default value from form
-                            depends_on: 'eval: doc.transporter',
-                            reqd: 0
                         }
                     ],
                     primary_action_label: __('Update'),
@@ -295,8 +287,7 @@ frappe.ui.form.on('Sales Invoice', {
                                 doctype: frm.doctype,
                                 docname: frm.doc.name,
                                 vehicle_no: values.vehicle_no,
-                                transporter: values.transporter,
-                                gst_transporter_id: values.gst_transporter_id
+                                transporter: values.transporter
                             },
                             callback: function(r) {
                                 if (!r.exc) {

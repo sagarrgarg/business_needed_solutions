@@ -1,9 +1,24 @@
 # Business Needed Solutions (BNS) — Technical Handbook
 
-> **Version:** 1.0 — Generated 2026-02-13
+> **Version:** 1.1 — Updated 2026-02-13
 > **Author:** Sagar Ratan Garg
 > **License:** Commercial
 > **Framework:** Frappe + ERPNext + India Compliance
+
+---
+
+### Changes Log (v1.1)
+
+| Change | Files Modified | Bug Fixed |
+|--------|---------------|-----------|
+| **BOM enforcement activated** — `override_doctype_class` uncommented, `BNSStockEntry` now active | `hooks.py` | BNS-BOM-001 |
+| **From BOM validation** — `from_bom` must be checked when BOM is enforced for Manufacture | `stock_entry_component_qty_variance.py` | — |
+| **BOM field red highlighting** — Client-side mandatory toggle for `bom_no` + `from_bom` | `doctype_item_grid_controls.js` | — |
+| **Internal Transfer Mismatch → Prepared Report** — runs in background, dashboard reads cached data | `internal_transfer_receive_mismatch.json`, `bns_dashboard.py`, `bns_dashboard.js` | — |
+| **Dashboard: eliminated duplicate API calls** — PAN + Mismatch no longer fetched twice | `bns_dashboard.py` | — |
+| **Dashboard: `load_expense_accounts` unblocked** — moved into `Promise.all` | `bns_dashboard.js` | — |
+| **Dashboard: batch Party Link lookup** — replaced N+1 `db.exists` with single pre-fetch | `bns_dashboard.py` | — |
+| **Dashboard: stale prepared report handling** — `FileNotFoundError` returns "Not Prepared" cleanly | `bns_dashboard.py` | — |
 
 ---
 
@@ -61,21 +76,23 @@
 
 ```
 hooks.py
-├── app_include_js (7 files) ──── Loaded on EVERY desk page
-├── doctype_js (8 doctypes) ──── Loaded on specific form views
-├── doctype_list_js (4 doctypes) ── Loaded on specific list views
-├── doc_events (14 doctypes) ──── Python hooks on document lifecycle
-├── fixtures (3 types) ────────── Schema changes exported with app
-├── after_migrate ─────────────── Post-migration setup
-└── after_app_init ────────────── Monkey-patches at startup
+├── app_include_js (7 files) ────────── Loaded on EVERY desk page
+├── doctype_js (8 doctypes) ─────────── Loaded on specific form views
+├── doctype_list_js (4 doctypes) ────── Loaded on specific list views
+├── override_doctype_class (1) ──────── BNSStockEntry overrides Stock Entry
+├── doc_events (14 doctypes) ────────── Python hooks on document lifecycle
+├── fixtures (3 types) ──────────────── Schema changes exported with app
+├── after_migrate ───────────────────── Post-migration setup
+└── after_app_init ──────────────────── Monkey-patches at startup
 ```
 
 ### Core Design Patterns
 
-1. **Hook-based overrides** — Business logic injected via `doc_events` rather than class inheritance (except for the disabled `BNSStockEntry`)
-2. **Single Settings DocType** — `BNS Settings` is the master toggle for all features
-3. **Client-side form extensions** — Heavy use of `app_include_js` and `doctype_js` to modify ERPNext forms
-4. **Parallel internal transfer system** — A complete replacement for ERPNext's standard inter-company transactions, using `bns_inter_company_reference` instead of `inter_company_invoice_reference`
+1. **Hook-based overrides** — Business logic injected via `doc_events` rather than class inheritance
+2. **Class override** — `BNSStockEntry` overrides Stock Entry via `override_doctype_class` for BOM enforcement + variance tolerance
+3. **Single Settings DocType** — `BNS Settings` is the master toggle for all features
+4. **Client-side form extensions** — Heavy use of `app_include_js` and `doctype_js` to modify ERPNext forms
+5. **Parallel internal transfer system** — A complete replacement for ERPNext's standard inter-company transactions, using `bns_inter_company_reference` instead of `inter_company_invoice_reference`
 
 ---
 
@@ -510,30 +527,52 @@ SI/PI saved → validate hook → validate_stock_update_or_reference()
 ## 11. BOM Component Qty Variance
 
 ### Purpose
-Allows configurable +/- percentage variance tolerance on BOM component quantities in Manufacturing Stock Entries, instead of ERPNext's strict equality check.
+Enforces BOM discipline on Manufacture Stock Entries and allows configurable +/- percentage variance tolerance on BOM component quantities, instead of ERPNext's strict equality check.
 
-### How It Was Supposed to Work
+### How It Works
 ```
-override_doctype_class = {
-    "Stock Entry": "...BNSStockEntry"
-}
+Stock Entry saved (purpose = Manufacture) → BNSStockEntry.validate()
+├── BNS Settings.enforce_bom_for_manufacture enabled?
+│   ├── No → standard ERPNext validation only
+│   └── Yes →
+│       ├── bom_no empty? → frappe.throw("BOM Required")
+│       ├── from_bom unchecked? → frappe.throw("From BOM Required")
+│       └── Both set → validate BOM components exact match
+│           ├── Extra items not in BOM? → frappe.throw("Invalid BOM Components")
+│           └── Missing BOM items? → frappe.throw("Missing BOM Components")
+│
+├── validate_component_and_quantities() override:
+│   ├── BNS Settings.enable_bns_variance_qty enabled?
+│   │   ├── No → fall back to ERPNext strict equality
+│   │   └── Yes → variance tolerance check:
+│   │       ├── Per-item variance from BOM Item.bns_variance_qty
+│   │       ├── Default variance from BNS Settings.bns_default_variance_qty
+│   │       └── actual_qty within expected ± variance% → allow
+│   │           └── outside range → frappe.throw("Quantity Outside Variance Tolerance")
+```
 
-BNSStockEntry overrides:
-1. validate() — adds BOM enforcement for Manufacture entries
-2. validate_component_and_quantities() — replaces strict match with variance tolerance
-3. Per-item variance from BOM Item.bns_variance_qty custom field
-4. Multi-level BOM support with cycle detection
-```
+**Client-side enforcement:**
+When purpose is "Manufacture" and enforcement is on, `bom_no` and `from_bom` are dynamically set as mandatory via `doctype_item_grid_controls.js`. This triggers Frappe's built-in red field highlighting + "Missing Fields" dialog before save even reaches the server.
 
 ### Files Involved
-- `overrides/stock_entry_component_qty_variance.py` (328 lines)
-- `fixtures/custom_field.json` — `BOM Item.bns_variance_qty` (Percent field)
+
+| File | Role |
+|------|------|
+| `overrides/stock_entry_component_qty_variance.py` (336 lines) | `BNSStockEntry` class — BOM enforcement + variance tolerance |
+| `hooks.py` `override_doctype_class` | Registers `BNSStockEntry` as Stock Entry controller |
+| `public/js/doctype_item_grid_controls.js` | Client-side mandatory field toggle for `bom_no` / `from_bom` |
+| `fixtures/custom_field.json` | `BOM Item.bns_variance_qty` (Percent field) |
+
+### BNS Settings Fields
+- `enforce_bom_for_manufacture` — master toggle for BOM + from_bom mandatory
+- `enable_bns_variance_qty` — toggle for variance tolerance (vs strict equality)
+- `bns_default_variance_qty` — default +/- % when per-item variance not set
 
 ### Bugs in This Area
 
 | ID | Severity | Description |
 |----|----------|-------------|
-| BNS-BOM-001 | **CRITICAL** | `override_doctype_class` is **commented out** in hooks.py (lines 164-166). The entire `BNSStockEntry` class — all 328 lines of BOM enforcement, component matching, and variance tolerance — is completely dead code. No BOM variance feature is active. |
+| ~~BNS-BOM-001~~ | ~~CRITICAL~~ | **FIXED** — `override_doctype_class` was commented out. Now active in hooks.py. |
 
 ---
 
@@ -623,7 +662,7 @@ Visual overlay on qty field shows:
 ```
 
 ### Files Involved
-- `public/js/doctype_item_grid_controls.js` — UOM restriction + conversion overlay
+- `public/js/doctype_item_grid_controls.js` — UOM restriction + conversion overlay + BOM mandatory enforcement
 - `public/js/item.js` — Validates `custom_print_uom` is in UOMs table
 
 ### DocTypes Affected
@@ -632,6 +671,7 @@ Stock Entry, Sales Invoice, Sales Order, Delivery Note, Purchase Invoice, Purcha
 ### System Impact
 - Overrides the UOM field query filter to restrict to allowed UOMs only
 - Adds DOM-level visual badges to qty fields (CSS injection)
+- **Stock Entry only:** Dynamically sets `bom_no` and `from_bom` as mandatory when purpose is "Manufacture" and BNS enforcement is on (triggers red field highlighting)
 
 ---
 
@@ -644,7 +684,7 @@ Stock Entry, Sales Invoice, Sales Order, Delivery Note, Purchase Invoice, Purcha
 | 1 | Almonds Sorting Report | Repack yield tracking for almond sorting | SLE, Stock Entry | ORM (N+1) |
 | 2 | Bank GL | Bank-focused General Ledger with party detection | GL Entry, Account | Raw SQL |
 | 3 | Expected Sales Person Wise Summary | Sales performance with price list comparison | SI/SO/DN, Sales Team, Item Price | Raw SQL + frappe.qb |
-| 4 | Internal Transfer Receive Mismatch | Finds DN→PR and SI→PI mismatches | DN, PR, SI, PI + Items | Raw SQL (parameterized) |
+| 4 | Internal Transfer Receive Mismatch | Finds DN→PR and SI→PI mismatches (**Prepared Report** — runs in background) | DN, PR, SI, PI + Items | Raw SQL (parameterized) |
 | 5 | Negative Stock Resolution | Actionable suggestions for negative stock episodes | SLE, Item, BOM, Bin | ORM (N+1) |
 | 6 | Outgoing Stock Audit | Detects negative stock + below-valuation sales | SI/PI/DN/PR, SLE | frappe.qb (cleanest) |
 | 7 | Party GL | Party-focused GL with Party Link expansion | GL Entry, Party Link, PI, PE, JE | Raw SQL + frappe.qb |
@@ -706,8 +746,9 @@ Central configuration hub for all BNS features. Single DocType (singleton) that 
 | `enable_per_warehouse_negative_stock_disallow` | Check | Per-warehouse negative stock |
 | `block_purchase_invoice_same_gstin` | Check | Same-GSTIN PI block (DEAD — not hooked) |
 | `enable_internal_dn_ewaybill` | Check | Auto e-Waybill on internal DN |
-| `enable_bns_variance_qty` | Check | BOM variance tolerance (DEAD — class not active) |
-| `bns_default_variance_qty` | Percent | Default variance % (DEAD) |
+| `enforce_bom_for_manufacture` | Check | BOM + From BOM mandatory for Manufacture Stock Entries |
+| `enable_bns_variance_qty` | Check | BOM variance tolerance (±% instead of strict equality) |
+| `bns_default_variance_qty` | Percent | Default variance % when per-item variance not set |
 | `enable_custom_update_items_po_so` | Check | Custom Update Items on SO/PO |
 | `enable_auto_fifo_reconciliation` | Check | Auto payment reconciliation |
 | `include_future_payments_in_reconciliation` | Check | Include future payments in reconciliation |
@@ -789,13 +830,13 @@ When `discount_type = "Triple"`:
 
 ## 20. Master Bug Registry
 
-### Severity: CRITICAL (4)
+### Severity: CRITICAL (3 active, 1 fixed)
 
 | ID | Area | Description |
 |----|------|-------------|
 | BNS-GST-002 | Vehicle Update | `update_vehicle.py` uses `ignore_permissions=True` on `@frappe.whitelist()` — any user can modify any document |
 | BNS-UPD-001 | Update Items | `item_code_changed` undefined in new-item path → `UnboundLocalError` on adding rows to submitted SO/PO |
-| BNS-BOM-001 | BOM Variance | Entire `BNSStockEntry` class (328 lines) is dead code — `override_doctype_class` commented out |
+| ~~BNS-BOM-001~~ | ~~BOM Variance~~ | **FIXED** — `override_doctype_class` was commented out. Now active with BOM enforcement + `from_bom` mandatory + client-side red highlighting |
 | BNS-INT-001 | Internal Transfer | `utils.py` lines 213-217 unreachable dead code — `parent_doctype` null-guard never runs |
 
 ### Severity: HIGH (10)
@@ -880,7 +921,7 @@ When `discount_type = "Triple"`:
 | Item | `overrides/item_validation.py` | 131 | Expense account validation |
 | Stock | `overrides/stock_update_validation.py` | 197 | SI/PI reference validation |
 | Stock | `overrides/warehouse_negative_stock.py` | 376 | Per-warehouse negative stock |
-| BOM | `overrides/stock_entry_component_qty_variance.py` | 328 | BOM variance (DEAD) |
+| BOM | `overrides/stock_entry_component_qty_variance.py` | 336 | BOM enforcement + variance tolerance (active via `override_doctype_class`) |
 | Update Items | `overrides/update_items.py` | 635 | Custom SO/PO update items |
 | Reconciliation | `auto_payment_reconcile.py` | 687 | FIFO auto-reconciliation |
 | Migration | `migration.py` | 239 | Post-migration setup |
@@ -898,7 +939,7 @@ When `discount_type = "Triple"`:
 | `discount_manipulation_by_type.js` | SI, SO, DN, Quotation | `app_include_js` | Triple discount cascade logic |
 | `direct_print.js` | 9 doctypes | `app_include_js` | Print button override |
 | `item.js` | Item | `app_include_js` | Print UOM validation |
-| `doctype_item_grid_controls.js` | 7 doctypes | `doctype_js` | UOM restriction + conversion overlay |
+| `doctype_item_grid_controls.js` | 7 doctypes + Stock Entry BOM | `doctype_js` | UOM restriction + conversion overlay + BOM mandatory enforcement |
 | `update_items_override.js` | Sales Order, Purchase Order | `doctype_js` | Custom Update Items dialog |
 | `warehouse.js` | Warehouse | `doctype_js` | Negative stock field visibility |
 | `sales_invoice_list.js` | Sales Invoice | `doctype_list_js` | BNS status indicator |

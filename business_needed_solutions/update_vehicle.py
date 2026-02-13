@@ -131,7 +131,12 @@ def _prepare_update_data(
         
     if transporter:
         update_data["transporter"] = transporter
-        update_data["gst_transporter_id"] = gst_transporter_id
+        # Always fetch from Supplier - never trust dialog value (avoids stale GST ID when transporter changes)
+        supplier_values = frappe.db.get_value(
+            "Supplier", transporter, ["supplier_name", "gst_transporter_id"], as_dict=True
+        ) or {}
+        update_data["transporter_name"] = supplier_values.get("supplier_name") or transporter
+        update_data["gst_transporter_id"] = supplier_values.get("gst_transporter_id")
         
     return update_data
 
@@ -148,13 +153,21 @@ def _update_document(doc, update_data: Dict[str, Any]) -> None:
         VehicleUpdateError: If update fails
     """
     try:
-        # Ignore validation restrictions for update after submit
+        # Check that the current user actually has write access to this document
+        if not frappe.has_permission(doc.doctype, "write", doc.name):
+            raise VehicleUpdateError(
+                _("You do not have permission to update {0} {1}").format(doc.doctype, doc.name)
+            )
+
+        # Allow modifying fields on a submitted document
         doc.flags.ignore_validate_update_after_submit = True
         
         # Update the document
         doc.update(update_data)
         doc.save(ignore_permissions=True)
         
+    except VehicleUpdateError:
+        raise
     except Exception as e:
         raise VehicleUpdateError(_("Failed to update document: {0}").format(str(e)))
 
