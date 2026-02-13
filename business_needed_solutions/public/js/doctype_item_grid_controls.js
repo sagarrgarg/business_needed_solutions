@@ -217,3 +217,37 @@ function apply_single_overlay(frm, cdt, cdn) {
         }
     }
 }
+
+
+// ============================================================
+// Stock Entry: BOM Enforcement — red-highlight mandatory fields
+// ============================================================
+// Dynamically sets bom_no and from_bom as required when
+// BNS Settings.enforce_bom_for_manufacture is on and purpose is Manufacture.
+// This triggers Frappe's built-in mandatory field highlighting (red border + scroll).
+
+frappe.ui.form.on('Stock Entry', {
+    refresh(frm) {
+        _toggle_bom_mandatory(frm);
+    },
+    purpose(frm) {
+        _toggle_bom_mandatory(frm);
+    },
+    stock_entry_type(frm) {
+        _toggle_bom_mandatory(frm);
+    }
+});
+
+function _toggle_bom_mandatory(frm) {
+    if (frm.doc.purpose !== 'Manufacture') {
+        frm.toggle_reqd('bom_no', false);
+        frm.toggle_reqd('from_bom', false);
+        return;
+    }
+
+    frappe.db.get_single_value('BNS Settings', 'enforce_bom_for_manufacture').then(val => {
+        const enforce = cint(val);
+        frm.toggle_reqd('bom_no', enforce);
+        frm.toggle_reqd('from_bom', enforce);
+    });
+}

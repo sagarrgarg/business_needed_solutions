@@ -53,6 +53,14 @@ class BNSStockEntry(StockEntry):
             )
             return
 
+        if not cint(self.from_bom):
+            frappe.throw(
+                _("'From BOM' must be checked when BOM is enforced for Manufacture. "
+                  "Please check 'From BOM' to ensure items are sourced from the BOM."),
+                title=_("From BOM Required")
+            )
+            return
+
         self._validate_bom_components_exact_match()
 
     def _validate_bom_components_exact_match(self):
