@@ -30,7 +30,7 @@
     {
       "fieldname": "accounts_section",
       "fieldtype": "Section Break",
-      "label": "BNS Internal Transfer Accounts"
+      "label": "BNS Branch Accounting Accounts"
     },
     {
       "description": "DN debits this (outgoing stock); PR credits this (incoming stock). Used when is_bns_internal_customer/supplier.",
@@ -70,8 +70,8 @@
   "links": [],
   "modified": "2025-01-01 00:00:00.000000",
   "modified_by": "Administrator",
-  "module": "BNS Internal Transfer",
-  "name": "BNS Internal Transfer Settings",
+  "module": "BNS Branch Accounting",
+  "name": "BNS Branch Accounting Settings",
   "owner": "Administrator",
   "permissions": [
     {

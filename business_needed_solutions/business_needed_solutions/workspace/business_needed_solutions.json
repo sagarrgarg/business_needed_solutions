@@ -35,9 +35,9 @@
    "dependencies": "",
    "hidden": 0,
    "is_query_report": 0,
-   "label": "BNS Internal Transfer Settings",
+   "label": "BNS Branch Accounting Settings",
    "link_count": 0,
-   "link_to": "BNS Internal Transfer Settings",
+   "link_to": "BNS Branch Accounting Settings",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"

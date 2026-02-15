@@ -1,11 +1,28 @@
 # Business Needed Solutions (BNS) — Technical Handbook
 
-> **Version:** 1.1 — Updated 2026-02-13
+> **Version:** 1.3 — Updated 2026-02-15
 > **Author:** Sagar Ratan Garg
 > **License:** Commercial
 > **Framework:** Frappe + ERPNext + India Compliance
+> **Companion:** [PSYCHOLOGICAL_HANDBOOK.md](./PSYCHOLOGICAL_HANDBOOK.md) — the *why* behind each feature
 
 ---
+
+### Changes Log (v1.3)
+
+| Change | Files Modified | Bug Fixed |
+|--------|---------------|-----------|
+| **Food Company & FSSAI** — Company: "Is a Food Company" checkbox under MSME fields; Address: "FSSAI License No." visible only when linked Company is food company; Client Script controls visibility | `custom_field.json`, `hooks.py`, `public/js/address.js` | — |
+
+### Changes Log (v1.2)
+
+| Change | Files Modified | Bug Fixed |
+|--------|---------------|-----------|
+| **Suppress Preferred Billing & Shipping Address** — Option to hide `is_primary_address` and `is_shipping_address` on Address; keeps values 0; "Clear Preferred Flags" bulk script | `bns_settings.json`, `bns_settings.py`, `bns_settings.js`, `address_preferred_flags.py`, `hooks.py` | — |
+| **enable_internal_dn_ewaybill moved** — From BNS Settings to BNS Branch Accounting Settings | `bns_settings.json`, `migration.py`, `gst_compliance.py` | — |
+| **Bulk Convert relocated** — Button moved from BNS Settings to BNS Branch Accounting Settings | `bns_settings.js`, `bns_branch_accounting_settings.js` | — |
+| **GST transport validation** — Part A only (gst_transporter_id) no longer requires vehicle_no; aligns with India Compliance | `gst_compliance.py` | — |
+| **Legacy submission wrappers removed** — `validate_stock_modification`, `validate_transaction_modification`, `validate_order_modification` removed from submission_restriction.py | `submission_restriction.py` | BNS-SUB-004 |
 
 ### Changes Log (v1.1)
 
@@ -14,7 +31,7 @@
 | **BOM enforcement activated** — `override_doctype_class` uncommented, `BNSStockEntry` now active | `hooks.py` | BNS-BOM-001 |
 | **From BOM validation** — `from_bom` must be checked when BOM is enforced for Manufacture | `stock_entry_component_qty_variance.py` | — |
 | **BOM field red highlighting** — Client-side mandatory toggle for `bom_no` + `from_bom` | `doctype_item_grid_controls.js` | — |
-| **Internal Transfer Mismatch → Prepared Report** — runs in background, dashboard reads cached data | `internal_transfer_receive_mismatch.json`, `bns_dashboard.py`, `bns_dashboard.js` | — |
+| **Branch Accounting Mismatch → Prepared Report** — runs in background, dashboard reads cached data | `internal_transfer_receive_mismatch.json`, `bns_dashboard.py`, `bns_dashboard.js` | — |
 | **Dashboard: eliminated duplicate API calls** — PAN + Mismatch no longer fetched twice | `bns_dashboard.py` | — |
 | **Dashboard: `load_expense_accounts` unblocked** — moved into `Promise.all` | `bns_dashboard.js` | — |
 | **Dashboard: batch Party Link lookup** — replaced N+1 `db.exists` with single pre-fetch | `bns_dashboard.py` | — |
@@ -25,7 +42,7 @@
 ## Table of Contents
 
 1. [App Architecture Overview](#1-app-architecture-overview)
-2. [Functional Area 1: BNS Internal Transfers](#2-bns-internal-transfers)
+2. [Functional Area 1: BNS Branch Accounting](#2-bns-branch-accounting)
 3. [Functional Area 2: Submission Restriction System](#3-submission-restriction-system)
 4. [Functional Area 3: Triple Discount System (D1/D2/D3)](#4-triple-discount-system)
 5. [Functional Area 4: Custom Update Items (SO/PO)](#5-custom-update-items)
@@ -41,10 +58,13 @@
 15. [Functional Area 14: Custom Reports (11 Reports)](#15-custom-reports)
 16. [Functional Area 15: Print Formats (11 Formats)](#16-print-formats)
 17. [Functional Area 16: BNS Settings DocType](#17-bns-settings-doctype)
-18. [Functional Area 17: Migration & Post-Install](#18-migration--post-install)
-19. [Schema Changes Reference (Custom Fields + Property Setters)](#19-schema-changes-reference)
-20. [Master Bug Registry](#20-master-bug-registry)
-21. [File Reference Index](#21-file-reference-index)
+18. [Functional Area 17: Address Preferred Flags Suppression](#17a-address-preferred-flags-suppression)
+19. [Functional Area 17b: Backfill Billing & Dispatch Location](#17b-backfill-billing--dispatch-location)
+20. [Functional Area 17c: Food Company & FSSAI License](#17c-food-company--fssai-license)
+21. [Functional Area 18: Migration & Post-Install](#18-migration--post-install)
+22. [Schema Changes Reference (Custom Fields + Property Setters)](#19-schema-changes-reference)
+23. [Master Bug Registry](#20-master-bug-registry)
+24. [File Reference Index](#21-file-reference-index)
 
 ---
 
@@ -66,8 +86,8 @@
 | Custom Pages | 1 (BNS Dashboard) |
 | Workspaces | 1 |
 | Override Modules | 8 (in overrides/) |
-| Public JS Files | 14 |
-| Custom Fields | ~50 across 13 DocTypes |
+| Public JS Files | 15 |
+| Custom Fields | ~52 across 14 DocTypes |
 | Property Setters | 4 (fixture) + dynamic (via BNS Settings) |
 | Client Scripts (fixture) | 3 |
 | Fixtures | 5 JSON files |
@@ -77,10 +97,10 @@
 ```
 hooks.py
 ├── app_include_js (7 files) ────────── Loaded on EVERY desk page
-├── doctype_js (8 doctypes) ─────────── Loaded on specific form views
+├── doctype_js (9 doctypes) ─────────── Loaded on specific form views
 ├── doctype_list_js (4 doctypes) ────── Loaded on specific list views
 ├── override_doctype_class (1) ──────── BNSStockEntry overrides Stock Entry
-├── doc_events (14 doctypes) ────────── Python hooks on document lifecycle
+├── doc_events (15 doctypes) ────────── Python hooks on document lifecycle (Address, Customer, Supplier, Item, …)
 ├── fixtures (3 types) ──────────────── Schema changes exported with app
 ├── after_migrate ───────────────────── Post-migration setup
 └── after_app_init ──────────────────── Monkey-patches at startup
@@ -96,7 +116,7 @@ hooks.py
 
 ---
 
-## 2. BNS Internal Transfers
+## 2. BNS Branch Accounting
 
 ### Purpose
 Replaces ERPNext's standard inter-company transaction system with a custom workflow that handles **same-GSTIN** (branch-to-branch) and **different-GSTIN** (company-to-company) internal transfers.
@@ -132,7 +152,8 @@ PI submit → traces back to SI via bill_no or bns_inter_company_reference
 
 | File | Role |
 |------|------|
-| `utils.py` (3,738 lines) | Core engine — all creation, linking, unlinking, validation, conversion, bulk ops |
+| `bns_branch_accounting/utils.py` (~3,800 lines) | Core engine — all creation, linking, unlinking, validation, conversion, bulk ops |
+| `bns_branch_accounting_settings.js` | Bulk Convert to BNS Internal button |
 | `sales_invoice_form.js` | SI form buttons: Convert, Link PI, Unlink PI, Create PI, Create PR, Update Vehicle |
 | `purchase_invoice_form.js` | PI form buttons: Convert, Link SI, Unlink SI |
 | `delivery_note.js` | DN form buttons: Convert, Create PR, Link PR, Unlink PR |
@@ -412,7 +433,7 @@ DN submitted → is BNS internal customer?
 
 **E-Waybill Auto-Generation (on DN submit):**
 ```
-DN submitted → BNS Internal Transfer Settings.enable_internal_dn_ewaybill?
+DN submitted → BNS Branch Accounting Settings.enable_internal_dn_ewaybill?
 ├── No → skip
 └── Yes → is BNS internal customer? + are goods supplied?
     ├── No → skip
@@ -684,7 +705,7 @@ Stock Entry, Sales Invoice, Sales Order, Delivery Note, Purchase Invoice, Purcha
 | 1 | Almonds Sorting Report | Repack yield tracking for almond sorting | SLE, Stock Entry | ORM (N+1) |
 | 2 | Bank GL | Bank-focused General Ledger with party detection | GL Entry, Account | Raw SQL |
 | 3 | Expected Sales Person Wise Summary | Sales performance with price list comparison | SI/SO/DN, Sales Team, Item Price | Raw SQL + frappe.qb |
-| 4 | Internal Transfer Receive Mismatch | Finds DN→PR and SI→PI mismatches (**Prepared Report** — runs in background) | DN, PR, SI, PI + Items | Raw SQL (parameterized) |
+| 4 | Branch Accounting Receive Mismatch | Finds DN→PR and SI→PI mismatches (**Prepared Report** — runs in background) | DN, PR, SI, PI + Items | Raw SQL (parameterized) |
 | 5 | Negative Stock Resolution | Actionable suggestions for negative stock episodes | SLE, Item, BOM, Bin | ORM (N+1) |
 | 6 | Outgoing Stock Audit | Detects negative stock + below-valuation sales | SI/PI/DN/PR, SLE | frappe.qb (cleanest) |
 | 7 | Party GL | Party-focused GL with Party Link expansion | GL Entry, Party Link, PI, PE, JE | Raw SQL + frappe.qb |
@@ -706,7 +727,7 @@ Stock Entry, Sales Invoice, Sales Order, Delivery Note, Purchase Invoice, Purcha
 | BNS-RPT-007 | **MEDIUM** | Almonds Sorting | `fields={"voucher_no"}` uses set literal instead of list. Also N+1 `frappe.get_doc` per Stock Entry. |
 | BNS-RPT-008 | **LOW** | Unlinked Customer-Supplier | No XSS protection — party names with single quotes in onclick handlers will break JavaScript |
 | BNS-RPT-009 | **LOW** | Stock Ledger Negative Episodes | `prev_balance = 0` for first entry assumes stock starts at zero — can cause false episode detection |
-| BNS-RPT-010 | **LOW** | Internal Transfer Mismatch | Inconsistent tolerance: DN→PR uses 0.01 qty / 5.0 amount tolerance, SI→PI uses exact rounded comparison |
+| BNS-RPT-010 | **LOW** | Branch Accounting Mismatch | Inconsistent tolerance: DN→PR uses 0.01 qty / 5.0 amount tolerance, SI→PI uses exact rounded comparison |
 
 ---
 
@@ -733,6 +754,15 @@ Stock Entry, Sales Invoice, Sales Order, Delivery Note, Purchase Invoice, Purcha
 ### Purpose
 Central configuration hub for all BNS features. Single DocType (singleton) that controls every feature toggle.
 
+### Layout (refactored)
+- **General** — Pricing | Data Validation (PAN, expense account) | Address & Location (suppress preferred)
+- **GST & Compliance** — GST validation
+- **Stock & Inventory** — Item grid, stock validation
+- **Manufacturing** — BOM enforcement, variance
+- **Submission** — Restriction controls
+- **Print & Display** — Print format mapping, rate display, item display
+- **Accounts** — FIFO reconciliation
+
 ### Key Fields / Feature Toggles
 
 | Field | Type | Controls |
@@ -752,12 +782,107 @@ Central configuration hub for all BNS features. Single DocType (singleton) that 
 | `enable_auto_fifo_reconciliation` | Check | Auto payment reconciliation |
 | `include_future_payments_in_reconciliation` | Check | Include future payments in reconciliation |
 | `reconciliation_batch_size` | Int | Max allocations per party |
+| `suppress_preferred_billing_shipping_address` | Check | Hide `is_primary_address` and `is_shipping_address` on Address; keeps values at 0; "Clear Preferred Flags" button bulk-resets all addresses |
 
-*Note: `enable_internal_dn_ewaybill` (Auto e-Waybill for Internal Customer DN) moved to BNS Internal Transfer Settings.*
+*Note: `enable_internal_dn_ewaybill` (Auto e-Waybill for Internal Customer DN) moved to BNS Branch Accounting Settings. Bulk Convert button moved to BNS Branch Accounting Settings.*
 
 ### Controller: `bns_settings.py`
-- `on_update()` — calls `apply_settings()` when `discount_type` changes
+- `on_update()` — calls `apply_settings()` when `discount_type` changes; calls `apply_address_settings()` when `suppress_preferred_billing_shipping_address` changes
 - `apply_settings()` — `@frappe.whitelist()` — creates/updates Property Setters for discount fields across all item doctypes
+- `apply_address_settings()` — sets/removes hidden Property Setter on Address `is_primary_address` and `is_shipping_address`
+- `clear_preferred_flags_from_all_addresses()` — `@frappe.whitelist()` module-level — sets `is_primary_address=0`, `is_shipping_address=0` on all Address records
+- `backfill_billing_and_dispatch_location(dry_run)` — `@frappe.whitelist()` — backfills `billing_location` (from customer_address) and `dispatch_location` (from dispatch_address_name) on SI and DN using Location.linked_address (requires Location Based Series)
+
+---
+
+## 17a. Address Preferred Flags Suppression
+
+### Purpose
+Optionally hide "Preferred Billing Address" (`is_primary_address`) and "Preferred Shipping Address" (`is_shipping_address`) on the Address doctype. Keeps these values at 0 to avoid ERPNext's default address selection behavior. Useful when address selection is driven by other logic (e.g., Location, internal transfer flows).
+
+### How It Works
+```
+BNS Settings.suppress_preferred_billing_shipping_address = 1
+├── apply_address_settings() → Property Setter: Address.is_primary_address hidden=1
+│                            → Property Setter: Address.is_shipping_address hidden=1
+├── Address before_save → enforce_suppress_preferred_address() → forces both fields to 0
+└── "Clear Preferred Flags from All Addresses" button → bulk UPDATE all addresses to 0
+```
+
+### Files Involved
+
+| File | Role |
+|------|------|
+| `bns_settings.py` | `apply_address_settings()`, `clear_preferred_flags_from_all_addresses()` |
+| `bns_settings.js` | "Clear Preferred Flags from All Addresses" button (with confirmation) |
+| `overrides/address_preferred_flags.py` | `enforce_suppress_preferred_address()` — Address before_save hook |
+| `hooks.py` | Address doc_events `before_save` |
+
+### System Impact
+- Property Setters dynamically hide Address fields when setting is on; unhide when off
+- Address saves always force 0 when suppressed, regardless of how the document was created (UI, API, import)
+
+---
+
+## 17b. Backfill Billing & Dispatch Location
+
+### Purpose
+One-time backfill script for older Sales Invoice and Delivery Note documents. Uses Location's one-to-one `linked_address` (from Location Based Series) to set:
+- **billing_location** (compulsory): From `customer_address` when a Location matches.
+- **dispatch_location** (optional): From `dispatch_address_name` when present and a Location matches.
+
+### How It Works
+```
+BNS Settings → "Backfill Billing & Dispatch Location" button
+├── dry_run=1: Preview counts (SI billing/dispatch, DN billing/dispatch)
+├── User confirms → dry_run=0: UPDATE tabSales Invoice / tabDelivery Note
+└── Uses: SELECT name FROM tabLocation WHERE linked_address = <address>
+```
+
+### Requirements
+- Location Based Series app (adds `billing_location`, `dispatch_location` to SI/DN, `linked_address` to Location)
+- Location records with `linked_address` populated
+
+### Files Involved
+- `bns_settings.py` — `backfill_billing_and_dispatch_location(dry_run)`
+- `bns_settings.js` — Button under "Location" group
+
+---
+
+## 17c. Food Company & FSSAI License
+
+### Purpose
+For Indian food businesses, FSSAI (Food Safety and Standards Authority of India) license number must appear on invoices and bills. This customization:
+- Marks a Company as "Is a Food Company" (checkbox under MSME fields)
+- Adds "FSSAI License No." to Company Addresses — visible only when the linked Company is a food company
+- Bill/invoice print format integration is done manually by the user
+
+### How It Works
+```
+Company form → bns_is_food_company (Check) after bns_msme_type
+Address form → bns_fssai_license_no (Data) after is_your_company_address
+├── Field hidden by default (hidden=1)
+├── Client Script: on load, refresh, is_your_company_address change, links change
+│   ├── If is_your_company_address AND links has Company row
+│   │   └── frappe.db.get_value("Company", link_name, "bns_is_food_company")
+│   │       ├── 1 → show bns_fssai_license_no
+│   │       └── 0 → hide
+│   └── Else → hide
+└── User enters FSSAI License No. for company address
+```
+
+### Design Rationale
+- **Address, not Company:** FSSAI is stored on Address because a company may have multiple addresses (branches, warehouses), each with its own license if required.
+- **Client Script for visibility:** `depends_on` cannot reference Company fields from Address — the link is in a Dynamic Link child table. Client Script fetches the linked Company's `bns_is_food_company` and toggles visibility.
+- **No server-side validation:** No mandatory check — license is optional per address; bill copy inclusion is user-defined.
+
+### Files Involved
+
+| File | Role |
+|------|------|
+| `fixtures/custom_field.json` | `Company.bns_is_food_company`, `Address.bns_fssai_license_no` |
+| `public/js/address.js` | `toggleFssaiField()`, `isLinkedCompanyFoodCompany()` |
+| `hooks.py` | `doctype_js` — Address |
 
 ---
 
@@ -768,7 +893,7 @@ Runs `migration.after_migrate()` which:
 1. Adds "BNS Internally Transferred" to status options on DN, PR, SI, PI via Property Setter
 2. Creates DocType Link records for SI↔PI and DN↔PR sidebar navigation
 3. Removes old renamed field `is_bns_internal_customer` from Purchase Receipt
-4. Migrates `enable_internal_dn_ewaybill` from BNS Settings to BNS Internal Transfer Settings (one-time)
+4. Migrates `enable_internal_dn_ewaybill` from BNS Settings to BNS Branch Accounting Settings (one-time)
 5. Calls `BNS Settings.apply_settings()` to ensure discount configuration is current
 
 ### `after_app_init` Hook
@@ -790,7 +915,7 @@ Runs `warehouse_negative_stock.apply_patches()` which monkey-patches 3 ERPNext f
 
 | DocType | Fields Added |
 |---------|-------------|
-| Company | `bns_previously_known_as`, `bns_company_cin`, `bns_msme_no`, `bns_msme_type` |
+| Company | `bns_previously_known_as`, `bns_company_cin`, `bns_msme_no`, `bns_msme_type`, `bns_is_food_company` |
 | Warehouse | `bns_disallow_negative_stock` |
 | POS Profile | `naming_series` |
 | Sales Order | `custom_remarks` |
@@ -802,6 +927,7 @@ Runs `warehouse_negative_stock.apply_patches()` which monkey-patches 3 ERPNext f
 | Quotation Item | `custom_d1_`, `custom_d2_`, `custom_d3_` |
 | Delivery Note Item | `custom_d1_`, `custom_d2_`, `custom_d3_` |
 | Sales Order Item | `custom_d1_`, `custom_d2_`, `custom_d3_` |
+| Address | `bns_fssai_license_no` |
 | Delivery Note | `custom_builty_no`, `custom_destination`, `custom_doc_no`, `custom_terms_of_delivery`, `is_bns_internal_customer`, `bns_inter_company_reference` |
 | Purchase Receipt | `bns_inter_company_reference`, `custom_destination`, `is_bns_internal_supplier` |
 | Sales Invoice | `is_print_payment_terms`, `bns_show_item_code`, `is_print_gst_rate_per_row`, `is_print_gst_table`, `bns_show_item_barcode`, `custom_builty_no`, `custom_destination`, `custom_doc_no`, `custom_terms_of_delivery`, `is_bns_internal_customer`, `bns_inter_company_reference`, `is_bns_internal_check` |
@@ -839,14 +965,14 @@ When `discount_type = "Triple"`:
 | BNS-GST-002 | Vehicle Update | `update_vehicle.py` uses `ignore_permissions=True` on `@frappe.whitelist()` — any user can modify any document |
 | ~~BNS-UPD-001~~ | Update Items | **FIXED** — `item_code_changed` now defined in new-item path |
 | ~~BNS-BOM-001~~ | ~~BOM Variance~~ | **FIXED** — `override_doctype_class` was commented out. Now active with BOM enforcement + `from_bom` mandatory + client-side red highlighting |
-| BNS-INT-001 | Internal Transfer | ~~Unreachable dead code~~ — Fixed |
+| BNS-INT-001 | Branch Accounting | ~~Unreachable dead code~~ — Fixed |
 
 ### Severity: HIGH (10)
 
 | ID | Area | Description |
 |----|------|-------------|
-| BNS-INT-002 | Internal Transfer | Whitelisted functions lack permission checks — any user can modify submitted documents |
-| BNS-INT-003 | Internal Transfer | `convert_*` functions modify multiple docs without transaction wrapping |
+| BNS-INT-002 | Branch Accounting | Whitelisted functions lack permission checks — any user can modify submitted documents |
+| BNS-INT-003 | Branch Accounting | `convert_*` functions modify multiple docs without transaction wrapping |
 | BNS-GST-001 | GST Compliance | ~~Never hooked~~ — Fixed: hooked to PI validate |
 | BNS-NEG-001 | Negative Stock | `sle.copy().update()` returns `None` — exceptions accumulate as `None` |
 | BNS-NEG-002 | Negative Stock | `actual_qty` double-counted in patched validate_negative_stock |
@@ -861,9 +987,9 @@ When `discount_type = "Triple"`:
 
 | ID | Area | Description |
 |----|------|-------------|
-| BNS-INT-004 | Internal Transfer | SI→PR reference function is no-op |
-| BNS-INT-005 | Internal Transfer | N+1 queries in bulk operations |
-| BNS-INT-006 | Internal Transfer | DN cancellation validation swallows non-validation errors |
+| BNS-INT-004 | Branch Accounting | SI→PR reference function is no-op |
+| BNS-INT-005 | Branch Accounting | N+1 queries in bulk operations |
+| BNS-INT-006 | Branch Accounting | DN cancellation validation swallows non-validation errors |
 | BNS-DISC-001 | Discounts | `rate` set read-only on purchase documents too |
 | BNS-PAN-001 | PAN | Cross-doctype duplicates not checked |
 | BNS-PAN-002 | PAN | No format validation |
@@ -884,8 +1010,8 @@ When `discount_type = "Triple"`:
 
 | ID | Area | Description |
 |----|------|-------------|
-| BNS-INT-007 | Internal Transfer | Duplicate helper functions |
-| BNS-INT-008 | Internal Transfer | Global `fetch_link_title` override |
+| BNS-INT-007 | Branch Accounting | Duplicate helper functions |
+| BNS-INT-008 | Branch Accounting | Global `fetch_link_title` override |
 | BNS-PAN-004 | PAN | `doc.pan` without `.get()` |
 | BNS-PAN-005 | PAN | Exception swallowed in find |
 | BNS-ITEM-001 | Item | Validation errors logged as errors |
@@ -913,9 +1039,10 @@ When `discount_type = "Triple"`:
 
 | Area | File | Lines | Purpose |
 |------|------|-------|---------|
-| Settings | `doctype/bns_settings/bns_settings.py` | ~200 | Settings controller, `apply_settings()` |
+| Settings | `doctype/bns_settings/bns_settings.py` | ~360 | Settings controller, `apply_settings()`, `apply_address_settings()`, `clear_preferred_flags_from_all_addresses()` |
+| Address | `overrides/address_preferred_flags.py` | ~25 | Enforce is_primary_address/is_shipping_address=0 when suppressed |
 | Settings | `doctype/bns_settings_print_format/bns_settings_print_format.py` | ~5 | Empty controller |
-| Internal Transfer | `business_needed_solutions/utils.py` | 3,738 | Core transfer engine |
+| Branch Accounting | `bns_branch_accounting/utils.py` | ~3,800 | Core transfer engine, bulk convert, get_bulk_conversion_preview |
 | Submission | `overrides/submission_restriction.py` | 267 | Submission permission checking |
 | GST | `overrides/gst_compliance.py` | 459 | Vehicle validation, e-Waybill |
 | GST | `update_vehicle.py` | 175 | Post-submit vehicle update |
@@ -926,7 +1053,7 @@ When `discount_type = "Triple"`:
 | BOM | `overrides/stock_entry_component_qty_variance.py` | 336 | BOM enforcement + variance tolerance (active via `override_doctype_class`) |
 | Update Items | `overrides/update_items.py` | 635 | Custom SO/PO update items |
 | Reconciliation | `auto_payment_reconcile.py` | 687 | FIFO auto-reconciliation |
-| Migration | `migration.py` | 239 | Post-migration setup |
+| Migration | `migration.py` | ~280 | Post-migration setup, migrate_internal_dn_ewaybill_setting |
 | Patch | `patch/stock_entry_patch.py` | ~50 | Stock entry data migration |
 | Test | `test_submission_restriction.py` | 271 | Manual test script |
 
@@ -944,6 +1071,8 @@ When `discount_type = "Triple"`:
 | `doctype_item_grid_controls.js` | 7 doctypes + Stock Entry BOM | `doctype_js` | UOM restriction + conversion overlay + BOM mandatory enforcement |
 | `update_items_override.js` | Sales Order, Purchase Order | `doctype_js` | Custom Update Items dialog |
 | `warehouse.js` | Warehouse | `doctype_js` | Negative stock field visibility |
+| `address.js` | Address | `doctype_js` | FSSAI License No. visibility when linked Company is food company |
+| `bns_branch_accounting_settings.js` | BNS Branch Accounting Settings | doctype_js | Bulk Convert to BNS Internal button |
 | `sales_invoice_list.js` | Sales Invoice | `doctype_list_js` | BNS status indicator |
 | `purchase_invoice_list.js` | Purchase Invoice | `doctype_list_js` | BNS status indicator |
 | `delivery_note_list.js` | Delivery Note | `doctype_list_js` | BNS status indicator |

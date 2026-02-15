@@ -6,11 +6,13 @@
  "engine": "InnoDB",
  "field_order": [
   "tab_break_general",
-  "general_section",
+  "pricing_section",
   "discount_type",
-  "column_break_pan",
+  "validation_section",
+  "column_break_validation",
   "enforce_pan_uniqueness",
   "enforce_expense_account_for_non_stock_items",
+  "address_section",
   "suppress_preferred_billing_shipping_address",
 
   "tab_break_gst_compliance",
@@ -68,9 +70,9 @@
    "label": "General"
   },
   {
-   "fieldname": "general_section",
+   "fieldname": "pricing_section",
    "fieldtype": "Section Break",
-   "label": "Pricing & Data Validation"
+   "label": "Pricing"
   },
   {
    "default": "Single",
@@ -82,7 +84,12 @@
    "permlevel": 1
   },
   {
-   "fieldname": "column_break_pan",
+   "fieldname": "validation_section",
+   "fieldtype": "Section Break",
+   "label": "Data Validation"
+  },
+  {
+   "fieldname": "column_break_validation",
    "fieldtype": "Column Break"
   },
   {
@@ -100,8 +107,13 @@
    "label": "Enforce Expense Account for Non-Stock Items"
   },
   {
+   "fieldname": "address_section",
+   "fieldtype": "Section Break",
+   "label": "Address & Location"
+  },
+  {
    "default": "0",
-   "description": "Hide Preferred Billing Address (is_primary_address) and Preferred Shipping Address (is_shipping_address) on Address. Keeps values at 0. Use 'Clear Preferred Flags' to reset all existing addresses.",
+   "description": "Hide Preferred Billing Address (is_primary_address) and Preferred Shipping Address (is_shipping_address) on Address. Keeps values at 0. Use toolbar 'Clear Preferred Flags' to reset existing addresses.",
    "fieldname": "suppress_preferred_billing_shipping_address",
    "fieldtype": "Check",
    "label": "Suppress Preferred Billing & Shipping Address"
@@ -237,7 +249,7 @@
   {
    "fieldname": "tab_break_print",
    "fieldtype": "Tab Break",
-   "label": "Print Format"
+   "label": "Print & Display"
   },
   {
    "fieldname": "print_format_section",

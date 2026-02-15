@@ -184,9 +184,9 @@ def maybe_generate_internal_dn_ewaybill(doc, method: Optional[str] = None) -> No
         method (Optional[str]): The method being called
     """
     try:
-        # Guard: Check if feature is enabled in BNS Internal Transfer Settings
+        # Guard: Check if feature is enabled in BNS Branch Accounting Settings
         if not _is_internal_dn_ewaybill_enabled():
-            logger.debug("Internal DN e-Waybill feature is disabled in BNS Internal Transfer Settings")
+            logger.debug("Internal DN e-Waybill feature is disabled in BNS Branch Accounting Settings")
             return
 
         # Guard: Only process on submit (docstatus == 1)
@@ -321,13 +321,13 @@ def maybe_generate_internal_dn_ewaybill(doc, method: Optional[str] = None) -> No
 
 def _is_internal_dn_ewaybill_enabled() -> bool:
     """
-    Check if internal DN e-Waybill feature is enabled in BNS Internal Transfer Settings.
+    Check if internal DN e-Waybill feature is enabled in BNS Branch Accounting Settings.
     
     Returns:
         bool: True if feature is enabled, False otherwise
     """
     try:
-        return bool(frappe.db.get_single_value("BNS Internal Transfer Settings", "enable_internal_dn_ewaybill"))
+        return bool(frappe.db.get_single_value("BNS Branch Accounting Settings", "enable_internal_dn_ewaybill"))
     except Exception as e:
         logger.error(f"Error checking internal DN e-Waybill setting: {str(e)}")
         return False

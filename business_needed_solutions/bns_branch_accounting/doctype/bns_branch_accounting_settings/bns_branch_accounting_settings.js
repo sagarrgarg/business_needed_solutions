@@ -1,7 +1,7 @@
 // Copyright (c) 2025, Business Needed Solutions and contributors
 // For license information, please see license.txt
 
-frappe.ui.form.on("BNS Internal Transfer Settings", {
+frappe.ui.form.on("BNS Branch Accounting Settings", {
 	refresh: function (frm) {
 		// Bulk Convert to BNS Internal button
 		frm.add_custom_button(__("Bulk Convert to BNS Internal"), function () {
@@ -38,7 +38,7 @@ frappe.ui.form.on("BNS Internal Transfer Settings", {
 				if (!values.from_date) return;
 
 				frappe.call({
-					method: "business_needed_solutions.bns_internal_transfer.utils.get_bulk_conversion_preview",
+					method: "business_needed_solutions.bns_branch_accounting.utils.get_bulk_conversion_preview",
 					args: { from_date: values.from_date, force: values.force ? 1 : 0 },
 					freeze: true,
 					freeze_message: __("Getting preview..."),
@@ -110,7 +110,7 @@ frappe.ui.form.on("BNS Internal Transfer Settings", {
 						__("Are you sure you want to convert {0} document(s) to BNS Internally Transferred?", totalCount),
 						function () {
 							frappe.call({
-								method: "business_needed_solutions.bns_internal_transfer.utils.bulk_convert_to_bns_internal",
+								method: "business_needed_solutions.bns_branch_accounting.utils.bulk_convert_to_bns_internal",
 								args: { from_date: values.from_date, force: values.force ? 1 : 0 },
 								freeze: true,
 								freeze_message: __("Converting documents..."),

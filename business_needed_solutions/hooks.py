@@ -52,6 +52,8 @@ app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 doctype_js = {
+              # Address (FSSAI visibility for food companies)
+              "Address": "public/js/address.js",
               # Stock Transactions
               "Stock Entry" : "public/js/doctype_item_grid_controls.js",
               
@@ -197,19 +199,22 @@ doc_events = {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Delivery Note": {
-        "validate": "business_needed_solutions.bns_internal_transfer.utils.validate_bns_internal_delivery_note_return",
+        "validate": [
+            "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_delivery_note_return",
+            "business_needed_solutions.bns_branch_accounting.billing_location.validate_billing_location"
+        ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.business_needed_solutions.overrides.gst_compliance.validate_internal_dn_vehicle_no",
-            "business_needed_solutions.bns_internal_transfer.utils.update_delivery_note_status_for_bns_internal",
+            "business_needed_solutions.bns_branch_accounting.utils.update_delivery_note_status_for_bns_internal",
             "business_needed_solutions.business_needed_solutions.overrides.gst_compliance.maybe_generate_internal_dn_ewaybill"
         ],
-        "on_cancel": "business_needed_solutions.bns_internal_transfer.utils.validate_delivery_note_cancellation"
+        "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.validate_delivery_note_cancellation"
     },
     "Purchase Receipt": {
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
-            "business_needed_solutions.bns_internal_transfer.utils.update_purchase_receipt_status_for_bns_internal"
+            "business_needed_solutions.bns_branch_accounting.utils.update_purchase_receipt_status_for_bns_internal"
         ]
     },
     "Stock Reconciliation": {
@@ -218,18 +223,19 @@ doc_events = {
     "Sales Invoice": {
         "validate": [
             "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference",
-            "business_needed_solutions.bns_internal_transfer.utils.validate_bns_internal_customer_return",
-            "business_needed_solutions.bns_internal_transfer.utils.validate_sales_invoice_company_address_from_dn"
+            "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_customer_return",
+            "business_needed_solutions.bns_branch_accounting.utils.validate_sales_invoice_company_address_from_dn",
+            "business_needed_solutions.bns_branch_accounting.billing_location.validate_billing_location"
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
-            "business_needed_solutions.bns_internal_transfer.utils.update_sales_invoice_status_for_bns_internal"
+            "business_needed_solutions.bns_branch_accounting.utils.update_sales_invoice_status_for_bns_internal"
         ]
     },
     "Purchase Invoice": {
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
-            "business_needed_solutions.bns_internal_transfer.utils.update_purchase_invoice_status_for_bns_internal"
+            "business_needed_solutions.bns_branch_accounting.utils.update_purchase_invoice_status_for_bns_internal"
         ],
         "validate": [
             "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference",
@@ -243,6 +249,7 @@ doc_events = {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Sales Order": {
+        "validate": "business_needed_solutions.bns_branch_accounting.billing_location.validate_billing_location",
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Purchase Order": {
@@ -256,9 +263,9 @@ doc_events = {
 fixtures = [
             # {"doctype": "Client Script", "filters": [["module" , "in" , ("Business Needed Solutions" )]]},
             # {"doctype": "Print Format", "filters": [["module" , "in" , ("Business Needed Solutions" )]],"overwrite": True},
-            {"doctype": "Custom Field", "filters": [["module", "in", ("Business Needed Solutions", "BNS Internal Transfer")]], "overwrite": True},
+            {"doctype": "Custom Field", "filters": [["module", "in", ("Business Needed Solutions", "BNS Branch Accounting")]], "overwrite": True},
             {"doctype": "Terms and Conditions", "filters": [["name", "in", ("General")]], "overwrite": True},
-            {"doctype": "Property Setter", "filters": [["module", "in", ("Business Needed Solutions", "BNS Internal Transfer")]], "overwrite": True}
+            {"doctype": "Property Setter", "filters": [["module", "in", ("Business Needed Solutions", "BNS Branch Accounting")]], "overwrite": True}
         ]
 # fixtures = [{"doctype": "Report", "filters": [["module" , "in" , ("Business Needed Solutions" )]]}]
 

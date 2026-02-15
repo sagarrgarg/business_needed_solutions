@@ -5,7 +5,7 @@ import frappe
 from frappe.model.document import Document
 
 
-class BNSInternalTransferSettings(Document):
-	"""Single doctype for BNS Internal Transfer account mapping."""
+class BNSBranchAccountingSettings(Document):
+	"""Single doctype for BNS Branch Accounting account mapping."""
 
 	pass

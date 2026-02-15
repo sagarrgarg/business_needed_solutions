@@ -28,12 +28,21 @@ def after_migrate():
         # Add "BNS Internally Transferred" to status field options
         add_bns_status_option()
         
-        # Add linked documents for BNS Internal Transfers
-        add_bns_internal_transfer_links()
+        # Add linked documents for BNS Branch Accounting
+        add_bns_branch_accounting_links()
 
-        # Migrate enable_internal_dn_ewaybill from BNS Settings to BNS Internal Transfer Settings
+        # Rename BNS Internal Transfer Settings to BNS Branch Accounting Settings (for existing sites)
+        _rename_internal_transfer_settings_doctype()
+
+        # Migrate enable_internal_dn_ewaybill from BNS Settings to BNS Branch Accounting Settings
         migrate_internal_dn_ewaybill_setting()
-        
+
+        # Move billing_location custom fields from Location Based Series to BNS Branch Accounting
+        _migrate_billing_location_module()
+
+        # Update Client Scripts that reference old bns_internal_transfer module path
+        _migrate_client_scripts_bns_module_path()
+
         # Remove old is_bns_internal_customer field from Purchase Receipt
         remove_old_pr_internal_customer_field()
         
@@ -125,9 +134,9 @@ def add_bns_status_option():
             # Continue with other doctypes even if one fails
 
 
-def add_bns_internal_transfer_links():
+def add_bns_branch_accounting_links():
     """
-    Add linked documents for BNS Internal Transfers:
+    Add linked documents for BNS Branch Accounting:
     - Sales Invoice -> Purchase Invoice (via bns_inter_company_reference)
     - Purchase Invoice -> Sales Invoice (via bns_inter_company_reference)
     - Delivery Note -> Purchase Receipt (via bns_inter_company_reference)
@@ -141,28 +150,28 @@ def add_bns_internal_transfer_links():
             "parent": "Sales Invoice",
             "link_doctype": "Purchase Invoice",
             "link_fieldname": "bns_inter_company_reference",
-            "group": "BNS Internal Transfer",
+            "group": "BNS Branch Accounting",
             "custom": 1
         },
         {
             "parent": "Purchase Invoice",
             "link_doctype": "Sales Invoice",
             "link_fieldname": "bns_inter_company_reference",
-            "group": "BNS Internal Transfer",
+            "group": "BNS Branch Accounting",
             "custom": 1
         },
         {
             "parent": "Delivery Note",
             "link_doctype": "Purchase Receipt",
             "link_fieldname": "bns_inter_company_reference",
-            "group": "BNS Internal Transfer",
+            "group": "BNS Branch Accounting",
             "custom": 1
         },
         {
             "parent": "Purchase Receipt",
             "link_doctype": "Delivery Note",
             "link_fieldname": "bns_inter_company_reference",
-            "group": "BNS Internal Transfer",
+            "group": "BNS Branch Accounting",
             "custom": 1
         }
     ]
@@ -207,19 +216,36 @@ def add_bns_internal_transfer_links():
             # Continue with other links even if one fails
 
 
+def _rename_internal_transfer_settings_doctype():
+    """
+    Rename DocType BNS Internal Transfer Settings to BNS Branch Accounting Settings.
+    For existing installations that have the old doctype.
+    """
+    try:
+        if frappe.db.exists("DocType", "BNS Internal Transfer Settings") and not frappe.db.exists(
+            "DocType", "BNS Branch Accounting Settings"
+        ):
+            frappe.rename_doc("DocType", "BNS Internal Transfer Settings", "BNS Branch Accounting Settings")
+            frappe.db.commit()
+            logger.info("Renamed DocType BNS Internal Transfer Settings to BNS Branch Accounting Settings")
+    except Exception as e:
+        logger.error(f"Error renaming BNS Internal Transfer Settings doctype: {e}")
+        frappe.db.rollback()
+
+
 def migrate_internal_dn_ewaybill_setting():
     """
-    Copy enable_internal_dn_ewaybill from BNS Settings to BNS Internal Transfer Settings.
+    Copy enable_internal_dn_ewaybill from BNS Settings to BNS Branch Accounting Settings.
     Called when the setting is moved to the new module. Reads from tabSingles directly
     since BNS Settings may have the field removed from its doctype schema.
     """
     try:
-        if not frappe.db.exists("DocType", "BNS Internal Transfer Settings"):
+        if not frappe.db.exists("DocType", "BNS Branch Accounting Settings"):
             return
 
-        # Check if we already migrated (BNS Internal Transfer Settings has a value)
+        # Check if we already migrated (BNS Branch Accounting Settings has a value)
         new_val = frappe.db.sql(
-            "SELECT value FROM tabSingles WHERE doctype = 'BNS Internal Transfer Settings' AND field = 'enable_internal_dn_ewaybill'",
+            "SELECT value FROM tabSingles WHERE doctype = 'BNS Branch Accounting Settings' AND field = 'enable_internal_dn_ewaybill'",
             as_dict=True,
         )
         if new_val:
@@ -234,11 +260,67 @@ def migrate_internal_dn_ewaybill_setting():
             return
 
         value = 1 if str(old_val[0]["value"] or "").strip() in ("1", "true", "True") else 0
-        frappe.db.set_value("BNS Internal Transfer Settings", None, "enable_internal_dn_ewaybill", value, update_modified=False)
+        frappe.db.set_value("BNS Branch Accounting Settings", None, "enable_internal_dn_ewaybill", value, update_modified=False)
         frappe.db.commit()
-        logger.info("Migrated enable_internal_dn_ewaybill to BNS Internal Transfer Settings")
+        logger.info("Migrated enable_internal_dn_ewaybill to BNS Branch Accounting Settings")
     except Exception as e:
         logger.error(f"Error migrating enable_internal_dn_ewaybill: {str(e)}")
+        frappe.db.rollback()
+
+
+def _migrate_billing_location_module():
+    """
+    Update billing_location custom field module from 'Location Based Series' to
+    'BNS Branch Accounting' for existing installations.
+    """
+    billing_location_fields = [
+        "Sales Invoice-billing_location",
+        "Delivery Note-billing_location",
+    ]
+    try:
+        for name in billing_location_fields:
+            if frappe.db.exists("Custom Field", name):
+                cf = frappe.get_doc("Custom Field", name)
+                if cf.module == "Location Based Series":
+                    cf.module = "BNS Branch Accounting"
+                    cf.save(ignore_permissions=True)
+                    frappe.db.commit()
+                    logger.info(f"Updated Custom Field {name} module to BNS Branch Accounting")
+    except Exception as e:
+        logger.error(f"Error migrating billing_location module: {e}")
+        frappe.db.rollback()
+
+
+def _migrate_client_scripts_bns_module_path():
+    """
+    Update Client Script records that reference business_needed_solutions.bns_internal_transfer
+    to business_needed_solutions.bns_branch_accounting. Fixes ModuleNotFoundError for existing sites.
+    """
+    old_path = "business_needed_solutions.bns_internal_transfer"
+    new_path = "business_needed_solutions.bns_branch_accounting"
+    try:
+        scripts = frappe.db.sql(
+            """
+            SELECT name, script FROM `tabClient Script`
+            WHERE script LIKE %s
+            """,
+            ("%" + old_path + "%",),
+            as_dict=True,
+        )
+        for row in scripts:
+            if old_path in (row.get("script") or ""):
+                frappe.db.set_value(
+                    "Client Script",
+                    row["name"],
+                    "script",
+                    (row["script"] or "").replace(old_path, new_path),
+                    update_modified=False,
+                )
+                logger.info(f"Updated Client Script {row['name']} module path: {old_path} -> {new_path}")
+        if scripts:
+            frappe.db.commit()
+    except Exception as e:
+        logger.error(f"Error migrating Client Scripts bns module path: {e}")
         frappe.db.rollback()
 
 

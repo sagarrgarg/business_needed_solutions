@@ -356,3 +356,98 @@ def clear_preferred_flags_from_all_addresses() -> dict:
         frappe.db.commit()
     frappe.clear_cache(doctype="Address")
     return {"updated": count, "message": _("Cleared preferred flags from {0} address(es).").format(count)}
+
+
+@frappe.whitelist()
+def backfill_billing_and_dispatch_location(dry_run=1) -> dict:
+    """
+    Backfill billing_location and dispatch_location on older Sales Invoice and Delivery Note
+    using Location's one-to-one linked_address.
+
+    - billing_location (compulsory): Set from customer_address when Location.linked_address matches.
+    - dispatch_location (optional): Set from dispatch_address_name when present and Location matches.
+
+    Requires Location Based Series (billing_location, dispatch_location, Location.linked_address).
+
+    Args:
+        dry_run: 1 = preview only, 0 = apply updates.
+
+    Returns:
+        Dict with counts and details.
+    """
+    dry_run = 1 if dry_run in (1, "1", True) else 0
+    if not frappe.db.has_column("Location", "linked_address"):
+        return {"success": False, "message": _("Location.linked_address not found. Location Based Series required.")}
+
+    results = {"sales_invoice": {"billing": 0, "dispatch": 0}, "delivery_note": {"billing": 0, "dispatch": 0}}
+
+    for doctype in ("Sales Invoice", "Delivery Note"):
+        has_billing = frappe.db.has_column(doctype, "billing_location")
+        has_dispatch = frappe.db.has_column(doctype, "dispatch_location")
+        has_customer_addr = frappe.db.has_column(doctype, "customer_address")
+        has_dispatch_addr = frappe.db.has_column(doctype, "dispatch_address_name")
+        if not has_billing and not has_dispatch:
+            continue
+
+        # Build address -> location map (linked_address is one-to-one)
+        loc_map = frappe.db.sql(
+            """SELECT linked_address, name FROM tabLocation WHERE linked_address IS NOT NULL AND linked_address != ''""",
+            as_dict=True,
+        )
+        addr_to_loc = {r.linked_address: r.name for r in loc_map if r.linked_address}
+        if not addr_to_loc:
+            continue
+
+        # Billing location from customer_address
+        if has_billing and has_customer_addr:
+            docs = frappe.db.sql(
+                f"""SELECT name, customer_address FROM `tab{doctype}` 
+                   WHERE customer_address IS NOT NULL AND customer_address != '' 
+                   AND (billing_location IS NULL OR billing_location = '') AND docstatus = 1""",
+                as_dict=True,
+            )
+            for doc in docs:
+                loc = addr_to_loc.get(doc.customer_address)
+                if loc:
+                    if not dry_run:
+                        frappe.db.set_value(doctype, doc.name, "billing_location", loc)
+                    results[_doctype_key(doctype)]["billing"] += 1
+
+        # Dispatch location from dispatch_address_name (optional)
+        if has_dispatch and has_dispatch_addr:
+            docs = frappe.db.sql(
+                f"""SELECT name, dispatch_address_name FROM `tab{doctype}` 
+                   WHERE dispatch_address_name IS NOT NULL AND dispatch_address_name != '' 
+                   AND (dispatch_location IS NULL OR dispatch_location = '') AND docstatus = 1""",
+                as_dict=True,
+            )
+            for doc in docs:
+                loc = addr_to_loc.get(doc.dispatch_address_name)
+                if loc:
+                    if not dry_run:
+                        frappe.db.set_value(doctype, doc.name, "dispatch_location", loc)
+                    results[_doctype_key(doctype)]["dispatch"] += 1
+
+    if not dry_run:
+        frappe.db.commit()
+        frappe.clear_cache(doctype="Sales Invoice")
+        frappe.clear_cache(doctype="Delivery Note")
+
+    total = sum(results["sales_invoice"].values()) + sum(results["delivery_note"].values())
+    msg = _("SI: {0} billing, {1} dispatch. DN: {2} billing, {3} dispatch.").format(
+        results["sales_invoice"]["billing"],
+        results["sales_invoice"]["dispatch"],
+        results["delivery_note"]["billing"],
+        results["delivery_note"]["dispatch"],
+    )
+    if dry_run:
+        msg = _("Preview (dry run): ") + msg
+    else:
+        msg = _("Updated: ") + msg
+
+    return {"success": True, "total": total, "details": results, "message": msg}
+
+
+def _doctype_key(doctype: str) -> str:
+    """Return key for doctype in results dict."""
+    return "sales_invoice" if doctype == "Sales Invoice" else "delivery_note"
