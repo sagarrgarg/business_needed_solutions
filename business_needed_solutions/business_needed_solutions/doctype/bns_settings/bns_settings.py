@@ -30,14 +30,15 @@ class BNSSettings(Document):
     
     def on_update(self) -> None:
         """
-        Handle document updates and apply settings when discount type changes.
+        Handle document updates and apply settings when discount type or address settings change.
         """
-        if not self.has_value_changed('discount_type'):
-            return
-            
         try:
-            self.apply_settings()
-            logger.info(f"BNS Settings updated successfully for discount type: {self.discount_type}")
+            if self.has_value_changed('discount_type'):
+                self.apply_settings()
+                logger.info(f"BNS Settings updated successfully for discount type: {self.discount_type}")
+            if self.has_value_changed('suppress_preferred_billing_shipping_address'):
+                self.apply_address_settings()
+                logger.info(f"BNS Settings: suppress_preferred_billing_shipping_address = {self.suppress_preferred_billing_shipping_address}")
         except Exception as e:
             logger.error(f"Error updating BNS Settings: {str(e)}")
             raise BNSSettingsError(f"Failed to update BNS Settings: {str(e)}")
@@ -325,6 +326,33 @@ class BNSSettings(Document):
             "field_name": fieldname,
             "property": property_name,
             "value": value,
-            "property_type": "Check" if property_name in ["in_list_view", "read_only"] else "Int"
+            "property_type": "Check" if property_name in ["in_list_view", "read_only", "hidden"] else "Int"
         })
         ps.save()
+
+    def apply_address_settings(self) -> None:
+        """Apply or remove hidden property on Address is_primary_address and is_shipping_address."""
+        hidden_val = "1" if self.get("suppress_preferred_billing_shipping_address") else "0"
+        for fieldname in ("is_primary_address", "is_shipping_address"):
+            self._set_property_setter("Address", fieldname, "hidden", hidden_val)
+        frappe.clear_cache(doctype="Address")
+
+
+@frappe.whitelist()
+def clear_preferred_flags_from_all_addresses() -> dict:
+    """
+    Set is_primary_address=0 and is_shipping_address=0 on all Address records.
+    Use when Suppress Preferred Billing & Shipping Address is enabled to clean past data.
+    """
+    count_result = frappe.db.sql(
+        """SELECT COUNT(*) FROM tabAddress WHERE is_primary_address = 1 OR is_shipping_address = 1"""
+    )
+    count = count_result[0][0] if count_result else 0
+    if count > 0:
+        frappe.db.sql(
+            """UPDATE tabAddress SET is_primary_address = 0, is_shipping_address = 0
+               WHERE is_primary_address = 1 OR is_shipping_address = 1"""
+        )
+        frappe.db.commit()
+    frappe.clear_cache(doctype="Address")
+    return {"updated": count, "message": _("Cleared preferred flags from {0} address(es).").format(count)}

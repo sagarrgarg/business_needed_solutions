@@ -1,0 +1,1 @@
+# BNS Internal Transfer doctypes

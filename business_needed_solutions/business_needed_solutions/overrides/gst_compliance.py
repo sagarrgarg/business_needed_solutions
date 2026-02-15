@@ -184,9 +184,9 @@ def maybe_generate_internal_dn_ewaybill(doc, method: Optional[str] = None) -> No
         method (Optional[str]): The method being called
     """
     try:
-        # Guard: Check if feature is enabled in BNS Settings
+        # Guard: Check if feature is enabled in BNS Internal Transfer Settings
         if not _is_internal_dn_ewaybill_enabled():
-            logger.debug("Internal DN e-Waybill feature is disabled in BNS Settings")
+            logger.debug("Internal DN e-Waybill feature is disabled in BNS Internal Transfer Settings")
             return
 
         # Guard: Only process on submit (docstatus == 1)
@@ -321,13 +321,13 @@ def maybe_generate_internal_dn_ewaybill(doc, method: Optional[str] = None) -> No
 
 def _is_internal_dn_ewaybill_enabled() -> bool:
     """
-    Check if internal DN e-Waybill feature is enabled in BNS Settings.
+    Check if internal DN e-Waybill feature is enabled in BNS Internal Transfer Settings.
     
     Returns:
         bool: True if feature is enabled, False otherwise
     """
     try:
-        return bool(frappe.db.get_single_value("BNS Settings", "enable_internal_dn_ewaybill"))
+        return bool(frappe.db.get_single_value("BNS Internal Transfer Settings", "enable_internal_dn_ewaybill"))
     except Exception as e:
         logger.error(f"Error checking internal DN e-Waybill setting: {str(e)}")
         return False
@@ -378,7 +378,9 @@ def _validate_transport_details(doc) -> Optional[str]:
     """
     Validate transporter/vehicle details required for e-Waybill generation.
     
-    This mirrors the validation in India Compliance's GSTTransactionData.validate_mode_of_transport().
+    Aligns with India Compliance's GSTTransactionData.set_transporter_details():
+    - Part A Only: gst_transporter_id is sufficient (no vehicle_no required)
+    - Part A + Part B: mode_of_transport + vehicle/lr details required
     
     Args:
         doc: The document to validate
@@ -387,17 +389,18 @@ def _validate_transport_details(doc) -> Optional[str]:
         Optional[str]: Error message if validation fails, None if valid
     """
     mode_of_transport = doc.get("mode_of_transport")
-    gst_transporter_id = doc.get("gst_transporter_id")
-    
+    gst_transporter_id = (doc.get("gst_transporter_id") or "").strip()
+
     # Either mode_of_transport or gst_transporter_id is required
     if not mode_of_transport and not gst_transporter_id:
         return _("Either GST Transporter ID or Mode of Transport is required to generate e-Waybill")
-    
-    # If only gst_transporter_id is provided (Part A only), that's acceptable
-    if gst_transporter_id and not mode_of_transport:
+
+    # Part A Only: gst_transporter_id is sufficient — India Compliance generates
+    # e-Waybill without vehicle_no when transporter ID is provided
+    if gst_transporter_id:
         return None
-    
-    # Validate based on mode of transport
+
+    # Part A + Part B: validate mode-specific requirements when no transporter ID
     if mode_of_transport == "Road" and not doc.get("vehicle_no"):
         return _("Vehicle Number is required to generate e-Waybill for supply via Road")
     

@@ -1,13 +1,12 @@
 (function() {
+    // Scope: only override when on Purchase Invoice form (avoids affecting other doctypes).
+    // Handles deleted SI/SI Item references by returning name as fallback instead of 404.
     var _fetch_link_title = frappe.utils.fetch_link_title;
     frappe.utils.fetch_link_title = function(doctype, name) {
-        if (doctype === 'Sales Invoice' && name && cur_frm && cur_frm.doctype === 'Purchase Invoice') {
-            return _fetch_link_title.apply(this, arguments).catch(function() {
-                frappe.utils.add_link_title(doctype, name, name);
-                return name;
-            });
+        if (!cur_frm || cur_frm.doctype !== 'Purchase Invoice') {
+            return _fetch_link_title.apply(this, arguments);
         }
-        if (doctype === 'Sales Invoice Item' && name && cur_frm && cur_frm.doctype === 'Purchase Invoice') {
+        if ((doctype === 'Sales Invoice' || doctype === 'Sales Invoice Item') && name) {
             return _fetch_link_title.apply(this, arguments).catch(function() {
                 frappe.utils.add_link_title(doctype, name, name);
                 return name;
@@ -55,7 +54,7 @@ frappe.ui.form.on('Purchase Invoice', {
                     frm.add_custom_button(__('Convert to BNS Internal'), function() {
                         // Check if SI exists with name matching PI's bill_no
                         frappe.call({
-                            method: 'business_needed_solutions.business_needed_solutions.utils.get_sales_invoice_by_bill_no',
+                            method: 'business_needed_solutions.bns_internal_transfer.utils.get_sales_invoice_by_bill_no',
                             args: {
                                 purchase_invoice: frm.doc.name
                             },
@@ -108,7 +107,7 @@ frappe.ui.form.on('Purchase Invoice', {
                                         if (values.sales_invoice) {
                                             // Validate items match before converting
                                             frappe.call({
-                                                method: 'business_needed_solutions.business_needed_solutions.utils.validate_si_pi_items_match',
+                                                method: 'business_needed_solutions.bns_internal_transfer.utils.validate_si_pi_items_match',
                                                 args: {
                                                     sales_invoice: values.sales_invoice,
                                                     purchase_invoice: frm.doc.name
@@ -125,7 +124,7 @@ frappe.ui.form.on('Purchase Invoice', {
                                                     
                                                     // Proceed with conversion
                                                     frappe.call({
-                                                        method: 'business_needed_solutions.business_needed_solutions.utils.convert_purchase_invoice_to_bns_internal',
+                                                        method: 'business_needed_solutions.bns_internal_transfer.utils.convert_purchase_invoice_to_bns_internal',
                                                         args: {
                                                             purchase_invoice: frm.doc.name,
                                                             sales_invoice: values.sales_invoice
@@ -148,7 +147,7 @@ frappe.ui.form.on('Purchase Invoice', {
                                         } else {
                                             // No SI provided, just convert PI
                                             frappe.call({
-                                                method: 'business_needed_solutions.business_needed_solutions.utils.convert_purchase_invoice_to_bns_internal',
+                                                method: 'business_needed_solutions.bns_internal_transfer.utils.convert_purchase_invoice_to_bns_internal',
                                                 args: {
                                                     purchase_invoice: frm.doc.name,
                                                     sales_invoice: null
@@ -187,7 +186,7 @@ frappe.ui.form.on('Purchase Invoice', {
                         __('Are you sure you want to unlink this Purchase Invoice from Sales Invoice {0}?', [frm.doc.bns_inter_company_reference]),
                         function() {
                             frappe.call({
-                                method: 'business_needed_solutions.business_needed_solutions.utils.unlink_si_pi',
+                                method: 'business_needed_solutions.bns_internal_transfer.utils.unlink_si_pi',
                                 args: {
                                     purchase_invoice: frm.doc.name
                                 },
@@ -271,7 +270,7 @@ frappe.ui.form.on('Purchase Invoice', {
                                     }
                                     
                                     frappe.call({
-                                        method: 'business_needed_solutions.business_needed_solutions.utils.link_si_pi',
+                                        method: 'business_needed_solutions.bns_internal_transfer.utils.link_si_pi',
                                         args: {
                                             sales_invoice: values.sales_invoice,
                                             purchase_invoice: frm.doc.name

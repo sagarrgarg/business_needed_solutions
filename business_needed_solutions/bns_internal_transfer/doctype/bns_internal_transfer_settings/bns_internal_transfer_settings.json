@@ -1,0 +1,103 @@
+{
+  "actions": [],
+  "allow_rename": 0,
+  "creation": "2025-01-01 00:00:00.000000",
+  "doctype": "DocType",
+  "engine": "InnoDB",
+  "field_order": [
+    "gst_ewaybill_section",
+    "enable_internal_dn_ewaybill",
+    "accounts_section",
+    "stock_in_transit_account",
+    "internal_sales_account",
+    "internal_purchase_account",
+    "column_break_accounts",
+    "internal_branch_debtor_account"
+  ],
+  "fields": [
+    {
+      "fieldname": "gst_ewaybill_section",
+      "fieldtype": "Section Break",
+      "label": "GST & e-Waybill"
+    },
+    {
+      "default": "0",
+      "description": "Auto-generate e-Waybill for Delivery Notes when customer is BNS internal and billing GSTIN equals company GSTIN (respects GST Settings thresholds).",
+      "fieldname": "enable_internal_dn_ewaybill",
+      "fieldtype": "Check",
+      "label": "Auto e-Waybill for Internal Customer DN"
+    },
+    {
+      "fieldname": "accounts_section",
+      "fieldtype": "Section Break",
+      "label": "BNS Internal Transfer Accounts"
+    },
+    {
+      "description": "DN debits this (outgoing stock); PR credits this (incoming stock). Used when is_bns_internal_customer/supplier.",
+      "fieldname": "stock_in_transit_account",
+      "fieldtype": "Link",
+      "label": "Stock in Transit Account",
+      "options": "Account"
+    },
+    {
+      "description": "SI credits this instead of income account when is_bns_internal_customer.",
+      "fieldname": "internal_sales_account",
+      "fieldtype": "Link",
+      "label": "Internal Sales Account",
+      "options": "Account"
+    },
+    {
+      "description": "PI debits this instead of expense account when is_bns_internal_supplier.",
+      "fieldname": "internal_purchase_account",
+      "fieldtype": "Link",
+      "label": "Internal Purchase Account",
+      "options": "Account"
+    },
+    {
+      "fieldname": "column_break_accounts",
+      "fieldtype": "Column Break"
+    },
+    {
+      "description": "Optional. Inter-branch receivable (e.g. Debtors - Branch B).",
+      "fieldname": "internal_branch_debtor_account",
+      "fieldtype": "Link",
+      "label": "Internal Branch Debtor Account",
+      "options": "Account"
+    }
+  ],
+  "idx": 1,
+  "issingle": 1,
+  "links": [],
+  "modified": "2025-01-01 00:00:00.000000",
+  "modified_by": "Administrator",
+  "module": "BNS Internal Transfer",
+  "name": "BNS Internal Transfer Settings",
+  "owner": "Administrator",
+  "permissions": [
+    {
+      "create": 1,
+      "delete": 1,
+      "email": 1,
+      "print": 1,
+      "read": 1,
+      "role": "System Manager",
+      "share": 1,
+      "write": 1
+    },
+    {
+      "read": 1,
+      "role": "Accounts Manager"
+    },
+    {
+      "create": 1,
+      "delete": 1,
+      "read": 1,
+      "role": "Accounts Manager",
+      "write": 1
+    }
+  ],
+  "sort_field": "modified",
+  "sort_order": "DESC",
+  "states": [],
+  "track_changes": 0
+}

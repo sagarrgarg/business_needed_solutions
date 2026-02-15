@@ -186,7 +186,7 @@ PI submit → traces back to SI via bill_no or bns_inter_company_reference
 
 | ID | Severity | Description |
 |----|----------|-------------|
-| BNS-INT-001 | **CRITICAL** | `utils.py` lines 213-217: Dead code due to `else: return` — the guard `if not parent_doctype or not inter_company_reference` is unreachable. If `inter_company_reference` is set but `parent_doctype` lookup fails, line 220 crashes with `None + " Item"` TypeError |
+| BNS-INT-001 | **CRITICAL** | ~~Redundant `or not inter_company_reference` in guard~~ — Fixed: simplified to `if not parent_doctype` |
 | BNS-INT-002 | **HIGH** | All `@frappe.whitelist()` functions in `utils.py` lack `frappe.has_permission()` checks. Any authenticated user (even website users) can invoke `convert_*`, `link_*`, `unlink_*`, `bulk_convert_*` and modify submitted documents |
 | BNS-INT-003 | **HIGH** | `convert_*` functions modify multiple documents (SI + PI + PI items) without database transaction wrapping. Partial failure leaves inconsistent state (e.g., SI marked as internal but PI not linked) |
 | BNS-INT-004 | **MEDIUM** | `_update_sales_invoice_pr_reference` is a no-op (`pass`) — SI→PR reference is never established when creating PR from SI |
@@ -239,7 +239,7 @@ Stock Entry, Delivery Note, Purchase Receipt, Stock Reconciliation, Sales Invoic
 | BNS-SUB-001 | **HIGH (Design)** | All three categories share the SAME `restrict_submission` toggle and `submission_restriction_override_roles` field. The three-category architecture is entirely non-functional — you cannot restrict stock submissions independently from transaction submissions. The design suggests per-category control was intended but never implemented. |
 | BNS-SUB-002 | **MEDIUM** | Module-level `_()` translation calls in `DOCUMENT_CATEGORIES` dict — translation happens at import time when user language context may not be set. Messages may display in the wrong language. |
 | BNS-SUB-003 | **LOW** | `SubmissionRestrictionError` custom exception defined but never raised — all errors use `frappe.throw()` |
-| BNS-SUB-004 | **LOW** | Legacy wrapper functions `validate_stock_modification`, `validate_transaction_modification`, `validate_order_modification` exist but are unused in hooks.py |
+| BNS-SUB-004 | **LOW** | ~~Legacy wrapper functions removed (were unused)~~ — Fixed |
 
 ---
 
@@ -412,7 +412,7 @@ DN submitted → is BNS internal customer?
 
 **E-Waybill Auto-Generation (on DN submit):**
 ```
-DN submitted → BNS Settings.enable_internal_dn_ewaybill?
+DN submitted → BNS Internal Transfer Settings.enable_internal_dn_ewaybill?
 ├── No → skip
 └── Yes → is BNS internal customer? + are goods supplied?
     ├── No → skip
@@ -433,7 +433,7 @@ DN submitted → BNS Settings.enable_internal_dn_ewaybill?
 
 | ID | Severity | Description |
 |----|----------|-------------|
-| BNS-GST-001 | **HIGH** | `validate_purchase_invoice_same_gstin()` is fully implemented (blocks self-invoicing when supplier GSTIN == company GSTIN) but is NEVER registered in hooks.py. This entire validation is dead code. |
+| BNS-GST-001 | **HIGH** | ~~`validate_purchase_invoice_same_gstin()` never hooked~~ — Fixed: now hooked to Purchase Invoice validate |
 | BNS-GST-002 | **CRITICAL** | `update_vehicle.py:_update_document()` uses `doc.save(ignore_permissions=True)` on a `@frappe.whitelist()` endpoint. ANY authenticated user can update ANY document's vehicle/transporter fields, regardless of role. No doctype restriction either — arbitrary doctypes can be targeted. |
 | BNS-GST-003 | **MEDIUM** | E-Waybill generation failures are silently swallowed (`msgprint` warning only) — DN submits successfully but e-Waybill may be missing |
 | BNS-GST-004 | **MEDIUM** | `_is_inter_state_transfer` compares full GSTIN strings — functionally correct but the standard approach is comparing first 2 characters (state code). Full comparison means same-state, different-business GSTINs are treated as inter-state. |
@@ -745,7 +745,6 @@ Central configuration hub for all BNS features. Single DocType (singleton) that 
 | `enforce_stock_update_or_reference` | Check | SI/PI stock reference validation |
 | `enable_per_warehouse_negative_stock_disallow` | Check | Per-warehouse negative stock |
 | `block_purchase_invoice_same_gstin` | Check | Same-GSTIN PI block (DEAD — not hooked) |
-| `enable_internal_dn_ewaybill` | Check | Auto e-Waybill on internal DN |
 | `enforce_bom_for_manufacture` | Check | BOM + From BOM mandatory for Manufacture Stock Entries |
 | `enable_bns_variance_qty` | Check | BOM variance tolerance (±% instead of strict equality) |
 | `bns_default_variance_qty` | Percent | Default variance % when per-item variance not set |
@@ -753,6 +752,8 @@ Central configuration hub for all BNS features. Single DocType (singleton) that 
 | `enable_auto_fifo_reconciliation` | Check | Auto payment reconciliation |
 | `include_future_payments_in_reconciliation` | Check | Include future payments in reconciliation |
 | `reconciliation_batch_size` | Int | Max allocations per party |
+
+*Note: `enable_internal_dn_ewaybill` (Auto e-Waybill for Internal Customer DN) moved to BNS Internal Transfer Settings.*
 
 ### Controller: `bns_settings.py`
 - `on_update()` — calls `apply_settings()` when `discount_type` changes
@@ -767,7 +768,8 @@ Runs `migration.after_migrate()` which:
 1. Adds "BNS Internally Transferred" to status options on DN, PR, SI, PI via Property Setter
 2. Creates DocType Link records for SI↔PI and DN↔PR sidebar navigation
 3. Removes old renamed field `is_bns_internal_customer` from Purchase Receipt
-4. Calls `BNS Settings.apply_settings()` to ensure discount configuration is current
+4. Migrates `enable_internal_dn_ewaybill` from BNS Settings to BNS Internal Transfer Settings (one-time)
+5. Calls `BNS Settings.apply_settings()` to ensure discount configuration is current
 
 ### `after_app_init` Hook
 Runs `warehouse_negative_stock.apply_patches()` which monkey-patches 3 ERPNext functions at startup.
@@ -837,7 +839,7 @@ When `discount_type = "Triple"`:
 | BNS-GST-002 | Vehicle Update | `update_vehicle.py` uses `ignore_permissions=True` on `@frappe.whitelist()` — any user can modify any document |
 | ~~BNS-UPD-001~~ | Update Items | **FIXED** — `item_code_changed` now defined in new-item path |
 | ~~BNS-BOM-001~~ | ~~BOM Variance~~ | **FIXED** — `override_doctype_class` was commented out. Now active with BOM enforcement + `from_bom` mandatory + client-side red highlighting |
-| BNS-INT-001 | Internal Transfer | `utils.py` lines 213-217 unreachable dead code — `parent_doctype` null-guard never runs |
+| BNS-INT-001 | Internal Transfer | ~~Unreachable dead code~~ — Fixed |
 
 ### Severity: HIGH (10)
 
@@ -845,7 +847,7 @@ When `discount_type = "Triple"`:
 |----|------|-------------|
 | BNS-INT-002 | Internal Transfer | Whitelisted functions lack permission checks — any user can modify submitted documents |
 | BNS-INT-003 | Internal Transfer | `convert_*` functions modify multiple docs without transaction wrapping |
-| BNS-GST-001 | GST Compliance | `validate_purchase_invoice_same_gstin` fully implemented but never hooked — dead code |
+| BNS-GST-001 | GST Compliance | ~~Never hooked~~ — Fixed: hooked to PI validate |
 | BNS-NEG-001 | Negative Stock | `sle.copy().update()` returns `None` — exceptions accumulate as `None` |
 | BNS-NEG-002 | Negative Stock | `actual_qty` double-counted in patched validate_negative_stock |
 | BNS-UPD-002 | Update Items | No database lock — concurrent calls cause race conditions |
@@ -892,7 +894,7 @@ When `discount_type = "Triple"`:
 | BNS-GST-005 | GST | Dead custom exception class |
 | BNS-GST-006 | GST | Float comparison without flt() |
 | BNS-SUB-003 | Submission | Dead custom exception class |
-| BNS-SUB-004 | Submission | Unused legacy wrappers |
+| BNS-SUB-004 | Submission | ~~Unused legacy wrappers~~ — Fixed: removed |
 | BNS-NEG-004 | Negative Stock | `get_or_make_bin` side effect |
 | BNS-REC-004 | Reconciliation | No per-party idempotency |
 | BNS-RPT-007 | Reports | Set literal for fields |

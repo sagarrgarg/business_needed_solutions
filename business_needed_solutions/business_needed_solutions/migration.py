@@ -30,6 +30,9 @@ def after_migrate():
         
         # Add linked documents for BNS Internal Transfers
         add_bns_internal_transfer_links()
+
+        # Migrate enable_internal_dn_ewaybill from BNS Settings to BNS Internal Transfer Settings
+        migrate_internal_dn_ewaybill_setting()
         
         # Remove old is_bns_internal_customer field from Purchase Receipt
         remove_old_pr_internal_customer_field()
@@ -202,6 +205,41 @@ def add_bns_internal_transfer_links():
             logger.error(f"Error creating link from {link_config.get('parent')} to {link_config.get('link_doctype')}: {str(e)}")
             frappe.db.rollback()
             # Continue with other links even if one fails
+
+
+def migrate_internal_dn_ewaybill_setting():
+    """
+    Copy enable_internal_dn_ewaybill from BNS Settings to BNS Internal Transfer Settings.
+    Called when the setting is moved to the new module. Reads from tabSingles directly
+    since BNS Settings may have the field removed from its doctype schema.
+    """
+    try:
+        if not frappe.db.exists("DocType", "BNS Internal Transfer Settings"):
+            return
+
+        # Check if we already migrated (BNS Internal Transfer Settings has a value)
+        new_val = frappe.db.sql(
+            "SELECT value FROM tabSingles WHERE doctype = 'BNS Internal Transfer Settings' AND field = 'enable_internal_dn_ewaybill'",
+            as_dict=True,
+        )
+        if new_val:
+            return
+
+        # Read from BNS Settings (tabSingles) - works even if field removed from doctype
+        old_val = frappe.db.sql(
+            "SELECT value FROM tabSingles WHERE doctype = 'BNS Settings' AND field = 'enable_internal_dn_ewaybill'",
+            as_dict=True,
+        )
+        if not old_val:
+            return
+
+        value = 1 if str(old_val[0]["value"] or "").strip() in ("1", "true", "True") else 0
+        frappe.db.set_value("BNS Internal Transfer Settings", None, "enable_internal_dn_ewaybill", value, update_modified=False)
+        frappe.db.commit()
+        logger.info("Migrated enable_internal_dn_ewaybill to BNS Internal Transfer Settings")
+    except Exception as e:
+        logger.error(f"Error migrating enable_internal_dn_ewaybill: {str(e)}")
+        frappe.db.rollback()
 
 
 def remove_old_pr_internal_customer_field():
