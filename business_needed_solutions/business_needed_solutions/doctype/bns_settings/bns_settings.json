@@ -18,6 +18,9 @@
   "column_break_gst",
   "enable_internal_dn_ewaybill",
 
+  "address_section",
+  "suppress_preferred_billing_shipping_address",
+
   "tab_break_grid",
   "item_grid_section",
   "enable_uom_restriction",
@@ -126,6 +129,18 @@
    "fieldname": "enable_internal_dn_ewaybill",
    "fieldtype": "Check",
    "label": "Auto e-Waybill for Internal Customer DN"
+  },
+  {
+   "fieldname": "address_section",
+   "fieldtype": "Section Break",
+   "label": "Address Behaviour"
+  },
+  {
+   "default": "0",
+   "description": "When enabled, is_primary_address and is_shipping_address are forced to 0 on every Address save.",
+   "fieldname": "suppress_preferred_billing_shipping_address",
+   "fieldtype": "Check",
+   "label": "Suppress Preferred Billing & Shipping Address"
   },
   {
    "fieldname": "tab_break_grid",

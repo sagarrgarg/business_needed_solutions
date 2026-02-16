@@ -227,6 +227,32 @@ class BNSDashboard {
 						</div>
 					</div>
 				</div>
+
+				<!-- Third Section - Food Company Addresses & FSSAI (hidden unless food company) -->
+				<div class="row mt-0" id="row-food-addresses" style="display: none;">
+					<div class="col-lg-6">
+						<div class="frappe-card" id="section-food-addresses">
+							<div class="card-header d-flex justify-content-between align-items-center section-header" 
+								 style="cursor: pointer; padding: 12px 15px; background: var(--subtle-bg);"
+								 data-section="food-addresses">
+								<h5 class="mb-0">
+									<i class="fa fa-chevron-down section-toggle collapsed" id="toggle-food-addresses"></i>
+									<i class="fa fa-map-marker text-muted mr-2"></i>
+									${__("Company Addresses & FSSAI")}
+									<span class="badge badge-secondary ml-2" id="badge-food-addresses">0</span>
+								</h5>
+							</div>
+							<div class="card-body section-content" id="content-food-addresses" style="display: none;">
+								<p class="text-muted small mb-2" id="food-addresses-hint">
+									${__("Only shown when Company is marked as a Food Company.")}
+								</p>
+								<div id="table-food-addresses" class="food-addresses-table-wrap">
+									<p class="text-muted">${__("Loading...")}</p>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
 			</div>
 
 			<style>
@@ -303,6 +329,34 @@ class BNSDashboard {
 				}
 				.bns-dashboard-container .row-not-fixable {
 					opacity: 0.7;
+				}
+				.bns-dashboard-container .row-fssai-ok {
+					background: rgba(34, 197, 94, 0.12);
+					border-left: 3px solid var(--green-500, #22c55e);
+				}
+				.bns-dashboard-container .row-fssai-missing {
+					background: rgba(239, 68, 68, 0.1);
+					border-left: 3px solid var(--red-500, #ef4444);
+				}
+				.bns-dashboard-container .food-address-name {
+					font-weight: 600;
+					color: var(--text-color);
+				}
+				.bns-dashboard-container .food-address-full {
+					font-size: 0.8rem;
+					color: var(--text-muted);
+					line-height: 1.4;
+					white-space: pre-line;
+				}
+				.bns-dashboard-container .fssai-badge {
+					font-family: var(--font-family-mono, monospace);
+					font-size: 0.8rem;
+					padding: 2px 6px;
+					border-radius: 4px;
+				}
+				.bns-dashboard-container .food-addresses-table-wrap {
+					max-height: 400px;
+					overflow-y: auto;
 				}
 				.bns-dashboard-container .expense-account-select {
 					min-width: 150px;
@@ -394,6 +448,7 @@ class BNSDashboard {
 			this.load_items_missing_expense_account(),
 			this.load_pi_wrong_expense_account(),
 			this.load_all_expense_items(),
+			this.load_food_company_addresses(),
 			this.load_unlinked_pan(),
 			this.load_transfer_mismatches(),
 		]);
@@ -793,6 +848,119 @@ class BNSDashboard {
 		} catch (e) {
 			frappe.msgprint(__("Failed: {0}", [e.message || e]));
 			btn.prop("disabled", false).text(__("Update"));
+		}
+	}
+
+	// ========== Food Company Addresses & FSSAI ==========
+
+	async load_food_company_addresses() {
+		try {
+			const result = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_food_company_addresses",
+				args: { company: this.get_company() },
+			});
+
+			const data = result.message;
+
+			const row = this.wrapper.find("#row-food-addresses");
+			const content = this.wrapper.find("#content-food-addresses");
+			const toggle = this.wrapper.find("#toggle-food-addresses");
+			const hint = this.wrapper.find("#food-addresses-hint");
+
+			if (!data.is_food_company) {
+				row.hide();
+				return;
+			}
+
+			row.show();
+			hint.text(__("Addresses linked to this company. Green = FSSAI present, Red = missing."));
+			this.wrapper.find("#badge-food-addresses").text(data.addresses ? data.addresses.length : 0);
+			this.render_food_addresses_table(data.addresses || []);
+			content.hide();
+			toggle.addClass("collapsed");
+		} catch (e) {
+			this.wrapper.find("#row-food-addresses").hide();
+		}
+	}
+
+	render_food_addresses_table(addresses) {
+		const container = this.wrapper.find("#table-food-addresses");
+
+		if (!addresses || addresses.length === 0) {
+			container.html(
+				'<p class="text-muted mb-0">' +
+				'<i class="fa fa-map-marker"></i> ' +
+				__("No company addresses linked yet. Add an Address and link it to this Company.") +
+				"</p>"
+			);
+			return;
+		}
+
+		const self = this;
+		let html = '<table class="table table-sm"><thead><tr>';
+		html += '<th>' + __("Address") + '</th>';
+		html += '<th style="width: 100px;">' + __("Status") + '</th>';
+		html += '<th style="width: 200px;">' + __("FSSAI") + '</th>';
+		html += '</tr></thead><tbody>';
+
+		addresses.forEach(function (addr) {
+			const rowClass = addr.has_fssai ? "row-fssai-ok" : "row-fssai-missing";
+			const displayName = addr.address_title || addr.name;
+			const typeLabel = addr.address_type ? " <span class=\"badge badge-light\">" + addr.address_type + "</span>" : "";
+			const escName = frappe.utils.escape_html(addr.name);
+			const escFssai = frappe.utils.escape_html(addr.fssai_license_no || "");
+			html += '<tr class="' + rowClass + '" data-address="' + escName + '">';
+			html += '<td>';
+			html += '<a href="/app/address/' + encodeURIComponent(addr.name) + '" target="_blank" class="food-address-name">' + frappe.utils.escape_html(displayName) + '</a>' + typeLabel;
+			html += '<div class="food-address-full mt-1">' + (addr.full_address || "-") + '</div>';
+			html += "</td>";
+			html += '<td>';
+			if (addr.has_fssai) {
+				html += '<span class="badge badge-success fssai-badge"><i class="fa fa-check"></i> ' + __("Present") + "</span>";
+			} else {
+				html += '<span class="badge badge-danger fssai-badge"><i class="fa fa-times"></i> ' + __("Missing") + "</span>";
+			}
+			html += "</td>";
+			html += '<td>';
+			html += '<div class="d-flex align-items-center" style="gap: 6px;">';
+			html += '<input type="text" class="form-control form-control-sm fssai-input" ';
+			html += 'value="' + escFssai + '" ';
+			html += 'placeholder="' + __("FSSAI No.") + '" style="min-width: 100px; font-size: 0.8rem;">';
+			html += '<button class="btn btn-primary btn-xs btn-set-fssai">' + __("Set") + '</button>';
+			html += '</div>';
+			html += '</td>';
+			html += "</tr>";
+		});
+
+		html += "</tbody></table>";
+		container.html(html);
+
+		container.find(".btn-set-fssai").on("click", function () {
+			const row = $(this).closest("tr");
+			const addressName = row.data("address");
+			const value = row.find(".fssai-input").val() ? row.find(".fssai-input").val().trim() : "";
+			self.set_address_fssai(addressName, value, $(this));
+		});
+	}
+
+	async set_address_fssai(addressName, fssaiValue, btn) {
+		btn.prop("disabled", true).text(__("..."));
+
+		try {
+			await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.set_address_fssai",
+				args: {
+					address_name: addressName,
+					fssai_license_no: fssaiValue,
+				},
+			});
+
+			frappe.show_alert({ message: __("FSSAI updated"), indicator: "green" });
+			this.load_food_company_addresses();
+		} catch (e) {
+			frappe.msgprint(__("Failed: {0}", [e.message || e]));
+		} finally {
+			btn.prop("disabled", false).text(__("Set"));
 		}
 	}
 

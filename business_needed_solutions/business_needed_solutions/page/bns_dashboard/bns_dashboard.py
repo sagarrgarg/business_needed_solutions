@@ -805,6 +805,89 @@ def trigger_mismatch_report_preparation(company=None, from_date=None, to_date=No
 
 
 @frappe.whitelist()
+def get_food_company_addresses(company=None):
+	"""
+	Get all company addresses with FSSAI license info when company is a food company.
+
+	Args:
+		company: Optional company filter; defaults to user default.
+
+	Returns:
+		dict with is_food_company, addresses list
+	"""
+	if not company:
+		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
+
+	if not company:
+		return {"is_food_company": False, "addresses": []}
+
+	is_food_company = frappe.db.get_value("Company", company, "bns_is_food_company")
+	if not is_food_company:
+		return {"is_food_company": False, "addresses": []}
+
+	from frappe.contacts.doctype.address.address import get_address_display
+
+	addresses = frappe.db.sql("""
+		SELECT a.name, a.address_title, a.address_type,
+			a.address_line1, a.address_line2, a.city, a.county, a.state, a.country, a.pincode,
+			a.bns_fssai_license_no
+		FROM `tabAddress` a
+		INNER JOIN `tabDynamic Link` dl ON dl.parent = a.name AND dl.parenttype = 'Address'
+			AND dl.link_doctype = 'Company' AND dl.link_name = %(company)s
+		WHERE a.disabled = 0
+		ORDER BY a.address_title, a.address_type
+	""", {"company": company}, as_dict=True)
+
+	result = []
+	for addr in addresses:
+		full_address = get_address_display(addr)
+		fssai = (addr.get("bns_fssai_license_no") or "").strip()
+		result.append({
+			"name": addr.name,
+			"address_title": addr.address_title or addr.name,
+			"address_type": addr.address_type,
+			"full_address": full_address or "",
+			"fssai_license_no": fssai,
+			"has_fssai": bool(fssai),
+		})
+
+	return {
+		"is_food_company": True,
+		"addresses": result,
+		"company": company,
+	}
+
+
+@frappe.whitelist()
+def set_address_fssai(address_name, fssai_license_no):
+	"""
+	Set FSSAI License No. on an Address from the dashboard.
+
+	Args:
+		address_name: The Address document name
+		fssai_license_no: The FSSAI license number to set (can be empty to clear)
+
+	Returns:
+		dict with success status
+	"""
+	if not address_name:
+		frappe.throw(_("Address is required"))
+
+	if not frappe.db.exists("Address", address_name):
+		frappe.throw(_("Address {0} not found").format(address_name))
+
+	frappe.db.set_value(
+		"Address",
+		address_name,
+		"bns_fssai_license_no",
+		(fssai_license_no or "").strip(),
+		update_modified=True,
+	)
+
+	return {"success": True, "message": _("FSSAI license updated")}
+
+
+@frappe.whitelist()
 def get_prepared_report_status(prepared_report_name):
 	"""
 	Check the status of a specific Prepared Report.

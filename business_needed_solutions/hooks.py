@@ -26,12 +26,12 @@ app_license = "Commercial"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
-app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=114",
-                  "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=211",
-                  "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=44",
-                  "/assets/business_needed_solutions/js/delivery_note.js?v=130",
-                  "/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=34",
-                  "/assets/business_needed_solutions/js/direct_print.js?v=45",
+app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=120",
+                  "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=215",
+                  "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=48",
+                  "/assets/business_needed_solutions/js/delivery_note.js?v=135",
+                  "/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=38",
+                  "/assets/business_needed_solutions/js/direct_print.js?v=49",
                   "/assets/business_needed_solutions/js/item.js",
                 ]
 
@@ -52,6 +52,8 @@ app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 doctype_js = {
+              # Address (FSSAI visibility for food companies)
+              "Address": "public/js/address.js",
               # Stock Transactions
               "Stock Entry" : "public/js/doctype_item_grid_controls.js",
               
@@ -178,6 +180,9 @@ override_doctype_class = {
 # }
 
 doc_events = {
+    "Address": {
+        "before_save": "business_needed_solutions.business_needed_solutions.overrides.address_preferred_flags.enforce_suppress_preferred_address"
+    },
     "Customer": {
         "validate": "business_needed_solutions.business_needed_solutions.overrides.pan_validation.validate_pan_uniqueness"
     },
