@@ -46,31 +46,42 @@ def validate_purchase_invoice_same_gstin(doc, method: Optional[str] = None) -> N
         if not _is_same_gstin_validation_enabled():
             logger.debug("Same GSTIN validation is disabled in BNS Settings")
             return
-        
-        # Only validate on submit (docstatus changing to 1)
-        if doc.docstatus != 1:
-            return
-        
+
         # Get GSTINs from the document
-        company_gstin = doc.get("company_gstin")
-        supplier_gstin = doc.get("supplier_gstin")
-        
+        company_gstin = (doc.get("company_gstin") or "").strip()
+        supplier_gstin = (doc.get("supplier_gstin") or "").strip()
+
+        # Fetch from addresses if not on doc (India Compliance populates these from addresses)
+        if not company_gstin and doc.get("company_address"):
+            company_gstin = (
+                frappe.db.get_value("Address", doc.company_address, "gstin") or ""
+            ).strip()
+        if not supplier_gstin and doc.get("supplier_address"):
+            supplier_gstin = (
+                frappe.db.get_value("Address", doc.supplier_address, "gstin") or ""
+            ).strip()
+
         # Skip if either GSTIN is missing
         if not company_gstin or not supplier_gstin:
-            logger.debug(f"Skipping GSTIN validation - company_gstin: {company_gstin}, supplier_gstin: {supplier_gstin}")
+            logger.debug(
+                f"Skipping GSTIN validation - company_gstin: {company_gstin!r}, "
+                f"supplier_gstin: {supplier_gstin!r}"
+            )
             return
-        
-        # Compare GSTINs
-        if company_gstin.strip().upper() == supplier_gstin.strip().upper():
+
+        # Compare GSTINs (case-insensitive)
+        if company_gstin.upper() == supplier_gstin.upper():
             logger.warning(f"Purchase Invoice {doc.name} blocked - same GSTIN: {company_gstin}")
             frappe.throw(
-                _("Purchase Invoice cannot be submitted when Supplier GSTIN ({0}) is the same as Company GSTIN ({1}). "
-                  "This is not allowed under GST regulations.").format(supplier_gstin, company_gstin),
-                title=_("Same GSTIN Validation Error")
+                _(
+                    "Purchase Invoice cannot be submitted when Supplier GSTIN ({0}) is the same "
+                    "as Company GSTIN ({1}). This is not allowed under GST regulations."
+                ).format(supplier_gstin, company_gstin),
+                title=_("Same GSTIN Validation Error"),
             )
-        
+
         logger.debug(f"GSTIN validation passed for Purchase Invoice {doc.name}")
-        
+
     except Exception as e:
         if "Same GSTIN Validation Error" in str(e):
             raise
@@ -184,9 +195,9 @@ def maybe_generate_internal_dn_ewaybill(doc, method: Optional[str] = None) -> No
         method (Optional[str]): The method being called
     """
     try:
-        # Guard: Check if feature is enabled in BNS Settings
+        # Guard: Check if feature is enabled in BNS Branch Accounting Settings
         if not _is_internal_dn_ewaybill_enabled():
-            logger.debug("Internal DN e-Waybill feature is disabled in BNS Settings")
+            logger.debug("Internal DN e-Waybill feature is disabled in BNS Branch Accounting Settings")
             return
 
         # Guard: Only process on submit (docstatus == 1)
@@ -321,13 +332,15 @@ def maybe_generate_internal_dn_ewaybill(doc, method: Optional[str] = None) -> No
 
 def _is_internal_dn_ewaybill_enabled() -> bool:
     """
-    Check if internal DN e-Waybill feature is enabled in BNS Settings.
-    
+    Check if internal DN e-Waybill feature is enabled in BNS Branch Accounting Settings.
+
     Returns:
         bool: True if feature is enabled, False otherwise
     """
     try:
-        return bool(frappe.db.get_single_value("BNS Settings", "enable_internal_dn_ewaybill"))
+        return bool(
+            frappe.db.get_single_value("BNS Branch Accounting Settings", "enable_internal_dn_ewaybill")
+        )
     except Exception as e:
         logger.error(f"Error checking internal DN e-Waybill setting: {str(e)}")
         return False
@@ -378,7 +391,10 @@ def _validate_transport_details(doc) -> Optional[str]:
     """
     Validate transporter/vehicle details required for e-Waybill generation.
     
-    This mirrors the validation in India Compliance's GSTTransactionData.validate_mode_of_transport().
+    Matches India Compliance logic:
+    - When gst_transporter_id is provided: Part A only can be generated (vehicle_no not required).
+    - When only mode_of_transport is provided: full details (vehicle_no, lr_no as applicable)
+      must be filled.
     
     Args:
         doc: The document to validate
@@ -387,26 +403,27 @@ def _validate_transport_details(doc) -> Optional[str]:
         Optional[str]: Error message if validation fails, None if valid
     """
     mode_of_transport = doc.get("mode_of_transport")
-    gst_transporter_id = doc.get("gst_transporter_id")
-    
+    gst_transporter_id = (doc.get("gst_transporter_id") or "").strip()
+
     # Either mode_of_transport or gst_transporter_id is required
     if not mode_of_transport and not gst_transporter_id:
         return _("Either GST Transporter ID or Mode of Transport is required to generate e-Waybill")
-    
-    # If only gst_transporter_id is provided (Part A only), that's acceptable
-    if gst_transporter_id and not mode_of_transport:
+
+    # When gst_transporter_id is provided, India Compliance allows Part A only generation
+    # (no vehicle_no required). Same as IC's validate_applicability + set_transporter_details.
+    if gst_transporter_id:
         return None
-    
-    # Validate based on mode of transport
+
+    # Validate based on mode of transport (only when transporter_id is not provided)
     if mode_of_transport == "Road" and not doc.get("vehicle_no"):
         return _("Vehicle Number is required to generate e-Waybill for supply via Road")
-    
+
     if mode_of_transport == "Ship" and not (doc.get("vehicle_no") and doc.get("lr_no")):
         return _("Vehicle Number and L/R No is required to generate e-Waybill for supply via Ship")
-    
+
     if mode_of_transport in ("Rail", "Air") and not doc.get("lr_no"):
         return _("L/R No. is required to generate e-Waybill for supply via Rail or Air")
-    
+
     return None
 
 

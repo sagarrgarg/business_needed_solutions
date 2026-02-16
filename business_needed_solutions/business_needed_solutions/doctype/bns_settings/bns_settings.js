@@ -342,7 +342,7 @@ frappe.ui.form.on('BNS Settings', {
                 }
                 
                 frappe.call({
-                    method: 'business_needed_solutions.business_needed_solutions.utils.get_bulk_conversion_preview',
+                    method: 'business_needed_solutions.bns_branch_accounting.utils.get_bulk_conversion_preview',
                     args: {
                         from_date: values.from_date,
                         force: values.force ? 1 : 0
@@ -429,7 +429,7 @@ frappe.ui.form.on('BNS Settings', {
                             totalCount),
                         function() {
                             frappe.call({
-                                method: 'business_needed_solutions.business_needed_solutions.utils.bulk_convert_to_bns_internal',
+                                method: 'business_needed_solutions.bns_branch_accounting.utils.bulk_convert_to_bns_internal',
                                 args: {
                                     from_date: values.from_date,
                                     force: values.force ? 1 : 0

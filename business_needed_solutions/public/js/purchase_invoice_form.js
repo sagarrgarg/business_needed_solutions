@@ -55,7 +55,7 @@ frappe.ui.form.on('Purchase Invoice', {
                     frm.add_custom_button(__('Convert to BNS Internal'), function() {
                         // Check if SI exists with name matching PI's bill_no
                         frappe.call({
-                            method: 'business_needed_solutions.business_needed_solutions.utils.get_sales_invoice_by_bill_no',
+                            method: 'business_needed_solutions.bns_branch_accounting.utils.get_sales_invoice_by_bill_no',
                             args: {
                                 purchase_invoice: frm.doc.name
                             },
@@ -108,7 +108,7 @@ frappe.ui.form.on('Purchase Invoice', {
                                         if (values.sales_invoice) {
                                             // Validate items match before converting
                                             frappe.call({
-                                                method: 'business_needed_solutions.business_needed_solutions.utils.validate_si_pi_items_match',
+                                                method: 'business_needed_solutions.bns_branch_accounting.utils.validate_si_pi_items_match',
                                                 args: {
                                                     sales_invoice: values.sales_invoice,
                                                     purchase_invoice: frm.doc.name
@@ -125,7 +125,7 @@ frappe.ui.form.on('Purchase Invoice', {
                                                     
                                                     // Proceed with conversion
                                                     frappe.call({
-                                                        method: 'business_needed_solutions.business_needed_solutions.utils.convert_purchase_invoice_to_bns_internal',
+                                                        method: 'business_needed_solutions.bns_branch_accounting.utils.convert_purchase_invoice_to_bns_internal',
                                                         args: {
                                                             purchase_invoice: frm.doc.name,
                                                             sales_invoice: values.sales_invoice
@@ -148,7 +148,7 @@ frappe.ui.form.on('Purchase Invoice', {
                                         } else {
                                             // No SI provided, just convert PI
                                             frappe.call({
-                                                method: 'business_needed_solutions.business_needed_solutions.utils.convert_purchase_invoice_to_bns_internal',
+                                                method: 'business_needed_solutions.bns_branch_accounting.utils.convert_purchase_invoice_to_bns_internal',
                                                 args: {
                                                     purchase_invoice: frm.doc.name,
                                                     sales_invoice: null
@@ -187,7 +187,7 @@ frappe.ui.form.on('Purchase Invoice', {
                         __('Are you sure you want to unlink this Purchase Invoice from Sales Invoice {0}?', [frm.doc.bns_inter_company_reference]),
                         function() {
                             frappe.call({
-                                method: 'business_needed_solutions.business_needed_solutions.utils.unlink_si_pi',
+                                method: 'business_needed_solutions.bns_branch_accounting.utils.unlink_si_pi',
                                 args: {
                                     purchase_invoice: frm.doc.name
                                 },
@@ -271,7 +271,7 @@ frappe.ui.form.on('Purchase Invoice', {
                                     }
                                     
                                     frappe.call({
-                                        method: 'business_needed_solutions.business_needed_solutions.utils.link_si_pi',
+                                        method: 'business_needed_solutions.bns_branch_accounting.utils.link_si_pi',
                                         args: {
                                             sales_invoice: values.sales_invoice,
                                             purchase_invoice: frm.doc.name

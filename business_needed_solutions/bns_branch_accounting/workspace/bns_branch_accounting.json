@@ -1,0 +1,58 @@
+{
+ "charts": [],
+ "content": "[{\"id\":\"bns-branch-settings-shortcut\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"BNS Branch Accounting Settings\",\"col\":4}}]",
+ "creation": "2026-02-16 12:00:00.000000",
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "accounting",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "BNS Branch Accounting",
+ "links": [
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Configuration",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "BNS Branch Accounting Settings",
+   "link_count": 0,
+   "link_to": "BNS Branch Accounting Settings",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-02-16 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "BNS Branch Accounting",
+ "name": "BNS Branch Accounting",
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "restrict_to_domain": "",
+ "roles": [],
+ "shortcuts": [
+  {
+   "color": "Blue",
+   "doc_view": "",
+   "label": "BNS Branch Accounting Settings",
+   "link_to": "BNS Branch Accounting Settings",
+   "restrict_to_domain": "",
+   "stats_filter": "",
+   "type": "DocType"
+  }
+ ],
+ "title": "BNS Branch Accounting"
+}

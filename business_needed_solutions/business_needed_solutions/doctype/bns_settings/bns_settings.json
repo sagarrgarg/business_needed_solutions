@@ -16,7 +16,6 @@
   "gst_compliance_section",
   "block_purchase_invoice_same_gstin",
   "column_break_gst",
-  "enable_internal_dn_ewaybill",
 
   "address_section",
   "suppress_preferred_billing_shipping_address",
@@ -122,13 +121,6 @@
   {
    "fieldname": "column_break_gst",
    "fieldtype": "Column Break"
-  },
-  {
-   "default": "0",
-   "description": "Auto-generate e-Waybill for Delivery Notes when customer is BNS internal and billing GSTIN equals company GSTIN (respects GST Settings thresholds).",
-   "fieldname": "enable_internal_dn_ewaybill",
-   "fieldtype": "Check",
-   "label": "Auto e-Waybill for Internal Customer DN"
   },
   {
    "fieldname": "address_section",

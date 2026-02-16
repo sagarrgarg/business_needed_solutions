@@ -19,7 +19,7 @@ frappe.ui.form.on('Delivery Note', {
                         frm.add_custom_button(__('Convert to BNS Internal'), function() {
                             // Check if PR exists with supplier_delivery_note matching DN name
                             frappe.call({
-                                method: 'business_needed_solutions.business_needed_solutions.utils.get_purchase_receipt_by_supplier_delivery_note',
+                                method: 'business_needed_solutions.bns_branch_accounting.utils.get_purchase_receipt_by_supplier_delivery_note',
                                 args: {
                                     delivery_note: frm.doc.name
                                 },
@@ -70,7 +70,7 @@ frappe.ui.form.on('Delivery Note', {
                                         primary_action_label: __('Convert'),
                                         primary_action(values) {
                                             frappe.call({
-                                                method: 'business_needed_solutions.business_needed_solutions.utils.convert_delivery_note_to_bns_internal',
+                                                method: 'business_needed_solutions.bns_branch_accounting.utils.convert_delivery_note_to_bns_internal',
                                                 args: {
                                                     delivery_note: frm.doc.name,
                                                     purchase_receipt: values.purchase_receipt || null
@@ -114,7 +114,7 @@ frappe.ui.form.on('Delivery Note', {
                     __("BNS Internal Purchase Receipt"),
                     function() {
                         frappe.model.open_mapped_doc({
-                            method: "business_needed_solutions.business_needed_solutions.utils.make_bns_internal_purchase_receipt",
+                            method: "business_needed_solutions.bns_branch_accounting.utils.make_bns_internal_purchase_receipt",
                             frm: frm,
                         });
                     },
@@ -134,7 +134,7 @@ frappe.ui.form.on('Delivery Note', {
                         __('Are you sure you want to unlink this Delivery Note from Purchase Receipt {0}?', frm.doc.bns_inter_company_reference),
                         function() {
                             frappe.call({
-                                method: 'business_needed_solutions.business_needed_solutions.utils.unlink_dn_pr',
+                                method: 'business_needed_solutions.bns_branch_accounting.utils.unlink_dn_pr',
                                 args: {
                                     delivery_note: frm.doc.name
                                 },
@@ -200,7 +200,7 @@ frappe.ui.form.on('Delivery Note', {
                             }
                             
                             frappe.call({
-                                method: 'business_needed_solutions.business_needed_solutions.utils.link_dn_pr',
+                                method: 'business_needed_solutions.bns_branch_accounting.utils.link_dn_pr',
                                 args: {
                                     delivery_note: frm.doc.name,
                                     purchase_receipt: values.purchase_receipt

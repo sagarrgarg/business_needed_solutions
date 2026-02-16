@@ -1,0 +1,88 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-02-16 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "accounts_section",
+  "stock_in_transit_account",
+  "column_break_accounts",
+  "internal_transfer_account",
+  "internal_branch_debtor_account",
+  "tab_ewaybill",
+  "enable_internal_dn_ewaybill"
+ ],
+ "fields": [
+  {
+   "fieldname": "accounts_section",
+   "fieldtype": "Section Break",
+   "label": "BNS Branch Accounting Accounts"
+  },
+  {
+   "description": "DN debits this (outgoing stock); PR credits this (incoming stock). Used when is_bns_internal_customer/supplier.",
+   "fieldname": "stock_in_transit_account",
+   "fieldtype": "Link",
+   "label": "Stock in Transit Account",
+   "options": "Account"
+  },
+  {
+   "fieldname": "column_break_accounts",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "SI credits this instead of income account; PI debits this instead of expense account when is_bns_internal.",
+   "fieldname": "internal_transfer_account",
+   "fieldtype": "Link",
+   "label": "Internal Transfer Account",
+   "options": "Account"
+  },
+  {
+   "description": "SI debits this (receivable from branch); PI credits this (payable to branch). Net balance = inter-branch position.",
+   "fieldname": "internal_branch_debtor_account",
+   "fieldtype": "Link",
+   "label": "Internal Branch Debtor Account",
+   "options": "Account"
+  },
+  {
+   "fieldname": "tab_ewaybill",
+   "fieldtype": "Tab Break",
+   "label": "e-Waybill"
+  },
+  {
+   "default": "0",
+   "description": "Auto-generate e-Waybill for Delivery Notes when customer is BNS internal and billing GSTIN equals company GSTIN.",
+   "fieldname": "enable_internal_dn_ewaybill",
+   "fieldtype": "Check",
+   "label": "Auto e-Waybill for Internal Customer DN"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-02-16 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "BNS Branch Accounting",
+ "name": "BNS Branch Accounting Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Accounts Manager"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

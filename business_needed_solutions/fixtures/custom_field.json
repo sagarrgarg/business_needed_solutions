@@ -2905,5 +2905,61 @@
   "translatable": 0,
   "unique": 0,
   "width": null
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Sales Invoice",
+  "depends_on": "eval:doc.is_bns_internal_customer",
+  "fieldname": "billing_location",
+  "fieldtype": "Link",
+  "insert_after": "address_and_contact",
+  "label": "Billing Location",
+  "link_filters": "[[\"Location\",\"is_group\",\"=\",0]]",
+  "module": "Business Needed Solutions",
+  "name": "Sales Invoice-billing_location",
+  "options": "Location",
+  "description": "Set this to auto-fill Customer Address from Location's Linked Address on save."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Delivery Note",
+  "depends_on": "eval:doc.is_bns_internal_customer",
+  "fieldname": "billing_location",
+  "fieldtype": "Link",
+  "insert_after": "contact_info",
+  "label": "Billing Location",
+  "link_filters": "[[\"Location\",\"is_group\",\"=\",0]]",
+  "module": "Business Needed Solutions",
+  "name": "Delivery Note-billing_location",
+  "options": "Location",
+  "description": "Set this to auto-fill Customer Address from Location's Linked Address on save."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Sales Order",
+  "fetch_from": "customer.is_bns_internal_customer",
+  "fetch_if_empty": 0,
+  "fieldname": "is_bns_internal_customer",
+  "fieldtype": "Check",
+  "hidden": 0,
+  "insert_after": "represents_company",
+  "label": "Is BNS Internal Customer",
+  "module": "Business Needed Solutions",
+  "name": "Sales Order-is_bns_internal_customer",
+  "read_only": 1
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Sales Order",
+  "depends_on": "eval:doc.is_bns_internal_customer",
+  "fieldname": "billing_location",
+  "fieldtype": "Link",
+  "insert_after": "customer_address",
+  "label": "Billing Location",
+  "link_filters": "[[\"Location\",\"is_group\",\"=\",0]]",
+  "module": "Business Needed Solutions",
+  "name": "Sales Order-billing_location",
+  "options": "Location",
+  "description": "Set this to auto-fill Customer Address from Location's Linked Address on save (BNS customers only)."
  }
 ]
