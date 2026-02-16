@@ -4,6 +4,10 @@ Business Needed Solutions - Stock Update Validation System
 This module provides validation for Sales Invoice and Purchase Invoice documents,
 ensuring that when stock updates are disabled, all stock items are properly referenced
 from their respective source documents.
+
+Note: Purchase Invoice against Purchase Receipt must have Update Stock unchecked
+(ERPNext enforces this). This validation then only requires that all stock items
+have purchase_receipt / pr_detail set (standard PI Item fields).
 """
 
 import frappe
@@ -95,6 +99,9 @@ def _validate_item_references(doc) -> None:
 def _validate_purchase_invoice_references(doc) -> None:
     """
     Validate that all stock items in Purchase Invoice are referenced from Purchase Receipt.
+
+    Uses purchase_receipt (doc link) and pr_detail (Purchase Receipt Item row) - standard
+    ERPNext field names on Purchase Invoice Item.
     
     Args:
         doc: The Purchase Invoice document
@@ -102,7 +109,7 @@ def _validate_purchase_invoice_references(doc) -> None:
     Raises:
         StockUpdateValidationError: If any stock item is not referenced
     """
-    non_referenced_items = _get_non_referenced_stock_items(doc, "purchase_receipt", "purchase_receipt_item")
+    non_referenced_items = _get_non_referenced_stock_items(doc, "purchase_receipt", "pr_detail")
     
     if non_referenced_items:
         logger.warning(f"Purchase Invoice {doc.name} has non-referenced stock items: {non_referenced_items}")

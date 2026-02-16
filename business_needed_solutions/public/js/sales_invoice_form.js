@@ -309,18 +309,24 @@ frappe.ui.form.on('Sales Invoice', {
             frm.doc.status === "BNS Internally Transferred" &&
             frm.doc.docstatus == 1
         ) {
-            // Always show Purchase Invoice button if status is BNS Internally Transferred
-            // (assume PI needs to be created when SI is generated)
-            frm.add_custom_button(
-                __("BNS Internal Purchase Invoice"),
-                function() {
-                    frappe.model.open_mapped_doc({
-                        method: "business_needed_solutions.bns_branch_accounting.utils.make_bns_internal_purchase_invoice",
-                        frm: frm,
-                    });
-                },
-                __("Create")
-            );
+            // Show Purchase Invoice button only if no PR exists for this SI (PR takes precedence)
+            frappe.db.exists("Purchase Receipt", {
+                supplier_delivery_note: frm.doc.name,
+                docstatus: 1
+            }).then(function(pr_exists) {
+                if (!pr_exists) {
+                    frm.add_custom_button(
+                        __("BNS Internal Purchase Invoice"),
+                        function() {
+                            frappe.model.open_mapped_doc({
+                                method: "business_needed_solutions.bns_branch_accounting.utils.make_bns_internal_purchase_invoice",
+                                frm: frm,
+                            });
+                        },
+                        __("Create")
+                    );
+                }
+            });
             
             // Check if Purchase Receipt button should be shown
             // Show if: any item maintains stock (is_stock_item) OR if SI is made from Delivery Note

@@ -28,7 +28,7 @@ app_license = "Commercial"
 # app_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
 app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=120",
                   "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=215",
-                  "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=48",
+                  "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=49",
                   "/assets/business_needed_solutions/js/delivery_note.js?v=135",
                   "/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=38",
                   "/assets/business_needed_solutions/js/direct_print.js?v=49",
@@ -54,6 +54,9 @@ app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=
 doctype_js = {
               # Address (FSSAI visibility for food companies)
               "Address": "public/js/address.js",
+              # BNS internal: hide standard internal when BNS internal is on
+              "Customer": "public/js/bns_customer.js",
+              "Supplier": "public/js/bns_supplier.js",
               # Stock Transactions
               "Stock Entry" : "public/js/doctype_item_grid_controls.js",
               
@@ -184,10 +187,16 @@ doc_events = {
         "before_save": "business_needed_solutions.business_needed_solutions.overrides.address_preferred_flags.enforce_suppress_preferred_address"
     },
     "Customer": {
-        "validate": "business_needed_solutions.business_needed_solutions.overrides.pan_validation.validate_pan_uniqueness"
+        "validate": [
+            "business_needed_solutions.business_needed_solutions.overrides.pan_validation.validate_pan_uniqueness",
+            "business_needed_solutions.business_needed_solutions.overrides.bns_internal_party.enforce_bns_over_standard_internal_customer",
+        ]
     },
     "Supplier": {
-        "validate": "business_needed_solutions.business_needed_solutions.overrides.pan_validation.validate_pan_uniqueness"
+        "validate": [
+            "business_needed_solutions.business_needed_solutions.overrides.pan_validation.validate_pan_uniqueness",
+            "business_needed_solutions.business_needed_solutions.overrides.bns_internal_party.enforce_bns_over_standard_internal_supplier",
+        ]
     },
     "Item": {
         "validate": "business_needed_solutions.business_needed_solutions.overrides.item_validation.validate_expense_account_for_non_stock_items"
@@ -200,14 +209,14 @@ doc_events = {
     },
     "Delivery Note": {
         "validate": [
-            "business_needed_solutions.business_needed_solutions.overrides.billing_location.set_customer_address_from_billing_location",
+            "business_needed_solutions.bns_branch_accounting.overrides.billing_location.set_customer_address_from_billing_location",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_delivery_note_return"
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
-            "business_needed_solutions.business_needed_solutions.overrides.gst_compliance.validate_internal_dn_vehicle_no",
+            "business_needed_solutions.bns_branch_accounting.gst_integration.validate_internal_dn_vehicle_no",
             "business_needed_solutions.bns_branch_accounting.utils.update_delivery_note_status_for_bns_internal",
-            "business_needed_solutions.business_needed_solutions.overrides.gst_compliance.maybe_generate_internal_dn_ewaybill"
+            "business_needed_solutions.bns_branch_accounting.gst_integration.maybe_generate_internal_dn_ewaybill"
         ],
         "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.validate_delivery_note_cancellation"
     },
@@ -222,7 +231,7 @@ doc_events = {
     },
     "Sales Invoice": {
         "validate": [
-            "business_needed_solutions.business_needed_solutions.overrides.billing_location.set_customer_address_from_billing_location",
+            "business_needed_solutions.bns_branch_accounting.overrides.billing_location.set_customer_address_from_billing_location",
             "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_customer_return"
         ],
@@ -248,7 +257,7 @@ doc_events = {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Sales Order": {
-        "validate": "business_needed_solutions.business_needed_solutions.overrides.billing_location.set_customer_address_from_billing_location",
+        "validate": "business_needed_solutions.bns_branch_accounting.overrides.billing_location.set_customer_address_from_billing_location",
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Purchase Order": {

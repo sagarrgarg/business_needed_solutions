@@ -30,10 +30,19 @@ def after_migrate():
         
         # Add linked documents for BNS Internal Transfers
         add_bns_internal_transfer_links()
-        
+
+        # Ensure bns_purchase_receipt_reference exists on Sales Invoice (for SI↔PR connections)
+        ensure_si_pr_reference_field()
+
+        # Ensure sales_invoice_item exists on Purchase Receipt Item (for SI->PR partial receipt tracking)
+        ensure_pr_item_sales_invoice_item_field()
+
         # Remove old is_bns_internal_customer field from Purchase Receipt
         remove_old_pr_internal_customer_field()
-        
+
+        # Disable custom script that forces "Update Stock" on PI (conflicts with PI-from-PR; BNS validates correctly)
+        disable_pi_update_stock_mandatory_script()
+
         # Apply existing BNS Settings to ensure all property setters are up to date
         if frappe.db.exists("BNS Settings"):
             bns_settings = frappe.get_doc("BNS Settings")
@@ -142,6 +151,13 @@ def add_bns_internal_transfer_links():
             "custom": 1
         },
         {
+            "parent": "Sales Invoice",
+            "link_doctype": "Purchase Receipt",
+            "link_fieldname": "supplier_delivery_note",
+            "group": "BNS Internal Transfer",
+            "custom": 1
+        },
+        {
             "parent": "Purchase Invoice",
             "link_doctype": "Sales Invoice",
             "link_fieldname": "bns_inter_company_reference",
@@ -159,6 +175,13 @@ def add_bns_internal_transfer_links():
             "parent": "Purchase Receipt",
             "link_doctype": "Delivery Note",
             "link_fieldname": "bns_inter_company_reference",
+            "group": "BNS Internal Transfer",
+            "custom": 1
+        },
+        {
+            "parent": "Purchase Receipt",
+            "link_doctype": "Sales Invoice",
+            "link_fieldname": "bns_purchase_receipt_reference",
             "group": "BNS Internal Transfer",
             "custom": 1
         }
@@ -202,6 +225,107 @@ def add_bns_internal_transfer_links():
             logger.error(f"Error creating link from {link_config.get('parent')} to {link_config.get('link_doctype')}: {str(e)}")
             frappe.db.rollback()
             # Continue with other links even if one fails
+
+
+def ensure_si_pr_reference_field():
+    """
+    Ensure Sales Invoice has bns_purchase_receipt_reference field for SI↔PR record connections.
+    """
+    field_name = "Sales Invoice-bns_purchase_receipt_reference"
+    if frappe.db.exists("Custom Field", field_name):
+        logger.info(f"Custom Field {field_name} already exists")
+        return
+    try:
+        cf = frappe.new_doc("Custom Field")
+        cf.update({
+            "dt": "Sales Invoice",
+            "fieldname": "bns_purchase_receipt_reference",
+            "label": "BNS Purchase Receipt Reference",
+            "fieldtype": "Link",
+            "options": "Purchase Receipt",
+            "insert_after": "bns_inter_company_reference",
+            "read_only": 1,
+            "hidden": 1,
+            "print_hide": 1,
+            "module": "BNS Branch Accounting",
+            "description": "Stores linked Purchase Receipt when PR is created from SI (different GSTIN flow). Used for record connections.",
+        })
+        cf.insert(ignore_permissions=True)
+        frappe.db.commit()
+        logger.info(f"Created Custom Field {field_name}")
+    except Exception as e:
+        logger.error(f"Error creating {field_name}: {str(e)}")
+        frappe.db.rollback()
+
+
+def ensure_pr_item_sales_invoice_item_field():
+    """
+    Ensure Purchase Receipt Item has sales_invoice_item field for SI->PR partial receipt tracking.
+    """
+    field_name = "Purchase Receipt Item-sales_invoice_item"
+    if frappe.db.exists("Custom Field", field_name):
+        logger.info(f"Custom Field {field_name} already exists")
+        return
+    try:
+        cf = frappe.new_doc("Custom Field")
+        cf.update({
+            "dt": "Purchase Receipt Item",
+            "fieldname": "sales_invoice_item",
+            "label": "Sales Invoice Item",
+            "fieldtype": "Data",
+            "insert_after": "delivery_note_item",
+            "read_only": 1,
+            "hidden": 1,
+            "no_copy": 1,
+            "module": "BNS Branch Accounting",
+            "description": "Stores source Sales Invoice Item name when PR is created from SI. Used for partial receipt tracking.",
+        })
+        cf.insert(ignore_permissions=True)
+        frappe.db.commit()
+        logger.info(f"Created Custom Field {field_name}")
+    except Exception as e:
+        logger.error(f"Error creating {field_name}: {str(e)}")
+        frappe.db.rollback()
+
+
+def disable_pi_update_stock_mandatory_script():
+    """
+    Disable any custom script that forces 'Update Stock' on Purchase Invoice.
+    PI against Purchase Receipt must have Update Stock unchecked (stock already updated by PR).
+    BNS enforce_stock_update_or_reference validates correctly (update_stock OR all items from PR).
+    """
+    try:
+        # Server Script: DocType Event on Purchase Invoice that throws Update Stock mandatory
+        if frappe.db.table_exists("Server Script"):
+            for name in frappe.get_all(
+                "Server Script",
+                filters={
+                    "reference_doctype": "Purchase Invoice",
+                    "disabled": 0,
+                },
+                pluck="name",
+            ):
+                script = frappe.db.get_value("Server Script", name, "script") or ""
+                if "update_stock" in script.lower() and ("mandatory" in script.lower() or "must be checked" in script.lower()):
+                    frappe.db.set_value("Server Script", name, "disabled", 1)
+                    frappe.db.commit()
+                    logger.info(f"Disabled Server Script '{name}' (conflicts with PI-from-PR Update Stock rule)")
+
+        # Client Script: Purchase Invoice with same validation
+        if frappe.db.table_exists("Client Script"):
+            for name in frappe.get_all(
+                "Client Script",
+                filters={"dt": "Purchase Invoice", "enabled": 1},
+                pluck="name",
+            ):
+                script = frappe.db.get_value("Client Script", name, "script") or ""
+                if "update_stock" in script.lower() and ("mandatory" in script.lower() or "must be checked" in script.lower()):
+                    frappe.db.set_value("Client Script", name, "enabled", 0)
+                    frappe.db.commit()
+                    logger.info(f"Disabled Client Script '{name}' (conflicts with PI-from-PR Update Stock rule)")
+    except Exception as e:
+        logger.warning(f"Could not disable PI Update Stock mandatory script: {e}")
+        frappe.db.rollback()
 
 
 def remove_old_pr_internal_customer_field():

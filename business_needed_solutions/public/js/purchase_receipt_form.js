@@ -106,19 +106,26 @@ frappe.ui.form.on('Purchase Receipt', {
             });
         }
         
-        // Link/Unlink with Delivery Note buttons
+        // Link/Unlink with Delivery Note or Sales Invoice buttons
         if (frm.doc.docstatus == 1) {
             if (frm.doc.bns_inter_company_reference) {
-                // Show Unlink button if already linked
-                frm.add_custom_button(__('Unlink Delivery Note'), function() {
-                    frappe.confirm(
-                        __('Are you sure you want to unlink this Purchase Receipt from Delivery Note {0}?', frm.doc.bns_inter_company_reference),
-                        function() {
+                const ref = frm.doc.bns_inter_company_reference;
+                frappe.db.exists('Sales Invoice', ref).then(function(is_si) {
+                    const label = is_si ? __('Unlink Sales Invoice') : __('Unlink Delivery Note');
+                    const confirm_msg = is_si
+                        ? __('Are you sure you want to unlink this Purchase Receipt from Sales Invoice {0}?', ref)
+                        : __('Are you sure you want to unlink this Purchase Receipt from Delivery Note {0}?', ref);
+                    const method = is_si
+                        ? 'business_needed_solutions.bns_branch_accounting.utils.unlink_si_pr'
+                        : 'business_needed_solutions.bns_branch_accounting.utils.unlink_dn_pr';
+                    const args = is_si
+                        ? { sales_invoice: ref, purchase_receipt: frm.doc.name }
+                        : { purchase_receipt: frm.doc.name };
+                    frm.add_custom_button(label, function() {
+                        frappe.confirm(confirm_msg, function() {
                             frappe.call({
-                                method: 'business_needed_solutions.bns_branch_accounting.utils.unlink_dn_pr',
-                                args: {
-                                    purchase_receipt: frm.doc.name
-                                },
+                                method: method,
+                                args: args,
                                 freeze: true,
                                 freeze_message: __('Unlinking...'),
                                 callback: function(r) {
@@ -131,11 +138,12 @@ frappe.ui.form.on('Purchase Receipt', {
                                     }
                                 }
                             });
-                        }
-                    );
-                }, __('Actions'));
+                        });
+                    }, __('Actions'));
+                });
             } else {
-                // Show Link button if not linked (regardless of supplier_delivery_note)
+                // Show Link buttons if not linked
+                // Link Delivery Note: for same GSTIN (DN->PR flow)
                 frm.add_custom_button(__('Link Delivery Note'), function() {
                     const fields = [
                         {
@@ -206,6 +214,58 @@ frappe.ui.form.on('Purchase Receipt', {
                     });
                     d.show();
                 }, __('Actions'));
+
+                // Link Sales Invoice: for different GSTIN (SI->PR flow)
+                const companyGstin = frm.doc.company_gstin || '';
+                const supplierGstin = frm.doc.supplier_gstin || '';
+                const hasDifferentGstin = companyGstin && supplierGstin && companyGstin !== supplierGstin;
+                if (hasDifferentGstin) {
+                    frm.add_custom_button(__('Link Sales Invoice'), function() {
+                        const fields = [
+                            {
+                                label: __('Sales Invoice'),
+                                fieldname: 'sales_invoice',
+                                fieldtype: 'Link',
+                                options: 'Sales Invoice',
+                                reqd: 1,
+                                default: frm.doc.supplier_delivery_note && frappe.db.exists('Sales Invoice', frm.doc.supplier_delivery_note) ? frm.doc.supplier_delivery_note : null,
+                                get_filters: function() {
+                                    const filters = { docstatus: 1 };
+                                    if (frm.doc.company) {
+                                        filters['company'] = ['!=', frm.doc.company];
+                                    }
+                                    return filters;
+                                },
+                                description: __('Select Sales Invoice to link (different GSTIN flow)')
+                            }
+                        ];
+                        const d2 = new frappe.ui.Dialog({
+                            title: __('Link Sales Invoice'),
+                            fields: fields,
+                            primary_action_label: __('Link'),
+                            primary_action(values) {
+                                if (!values.sales_invoice) {
+                                    frappe.msgprint({ title: __('Validation Error'), message: __('Sales Invoice is required'), indicator: 'red' });
+                                    return;
+                                }
+                                frappe.call({
+                                    method: 'business_needed_solutions.bns_branch_accounting.utils.link_si_pr',
+                                    args: { sales_invoice: values.sales_invoice, purchase_receipt: frm.doc.name },
+                                    freeze: true,
+                                    freeze_message: __('Linking...'),
+                                    callback: function(r) {
+                                        if (!r.exc) {
+                                            frappe.show_alert({ message: r.message.message || __('Linked successfully'), indicator: 'green' });
+                                            frm.reload_doc();
+                                            d2.hide();
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                        d2.show();
+                    }, __('Actions'));
+                }
             }
         }
     }

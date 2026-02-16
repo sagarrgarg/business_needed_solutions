@@ -7,6 +7,18 @@
 
 ---
 
+### Changes Log (v1.2)
+
+| Change | Files Modified | Bug Fixed |
+|--------|---------------|-----------|
+| **PI blocked when PR exists** — SI cannot create PI if PR already exists (PR takes precedence) | `utils.py`, `sales_invoice_form.js` | — |
+| **PR unlink label fixed** — Shows "Unlink Sales Invoice" when PR from SI, "Unlink Delivery Note" when from DN | `purchase_receipt_form.js` | — |
+| **unlink_si_pr added** — Clears supplier_delivery_note + bns_inter_company_reference for SI↔PR | `utils.py` | — |
+| **unlink_dn_pr clears supplier_delivery_note** — PR's supplier_delivery_note cleared when unlinking DN-PR | `utils.py` | — |
+| **link_si_pr added** — Link PR to SI when PR has different GSTIN (SI→PR flow) | `utils.py`, `purchase_receipt_form.js` | — |
+| **Link Sales Invoice button** — Shown on PR form when company_gstin ≠ supplier_gstin | `purchase_receipt_form.js` | — |
+| **SI↔PR record connections** — DocType Links + bns_purchase_receipt_reference on SI | `migration.py`, `custom_field.json`, `utils.py` | — |
+
 ### Changes Log (v1.1)
 
 | Change | Files Modified | Bug Fixed |
@@ -156,8 +168,8 @@ PI submit → traces back to SI via bill_no or bns_inter_company_reference
 - `make_bns_internal_purchase_receipt_from_si` — SI → PR (stock items)
 - `convert_sales_invoice_to_bns_internal` / `convert_purchase_invoice_to_bns_internal`
 - `convert_delivery_note_to_bns_internal` / `convert_purchase_receipt_to_bns_internal`
-- `link_si_pi` / `unlink_si_pi` / `link_dn_pr` / `unlink_dn_pr`
-- `validate_si_pi_items_match` / `validate_dn_pr_items_match`
+- `link_si_pi` / `unlink_si_pi` / `link_dn_pr` / `unlink_dn_pr` / `link_si_pr` / `unlink_si_pr`
+- `validate_si_pi_items_match` / `validate_dn_pr_items_match` / `validate_si_pr_items_match`
 - `get_sales_invoice_by_bill_no` / `get_purchase_invoice_by_supplier_invoice`
 - `get_purchase_receipt_by_supplier_delivery_note` / `get_delivery_note_by_supplier_delivery_note`
 - `get_bulk_conversion_preview` / `bulk_convert_to_bns_internal`
@@ -176,11 +188,12 @@ PI submit → traces back to SI via bill_no or bns_inter_company_reference
 - These prevent Sales Invoice from updating billed amounts back to DN/SO, which would conflict with BNS's internal status management
 
 ### Validation Rules
-1. DN cancellation blocked if non-cancelled PR exists referencing it
-2. SI credit notes blocked for BNS internal customers
-3. DN returns blocked for BNS internal customers
-4. PR/PI quantities validated against source DN/SI quantities (with `over_delivery_receipt_allowance`)
-5. Item matching validated before linking (item_code, qty, taxable_value, taxes, grand_total)
+1. PI creation from SI blocked if submitted PR exists with `supplier_delivery_note = SI` (PR flow takes precedence)
+2. DN cancellation blocked if non-cancelled PR exists referencing it
+3. SI credit notes blocked for BNS internal customers
+4. DN returns blocked for BNS internal customers
+5. PR/PI quantities validated against source DN/SI quantities (with `over_delivery_receipt_allowance`)
+6. Item matching validated before linking (item_code, qty, taxable_value, taxes, grand_total)
 
 ### Bugs in This Area
 

@@ -52,7 +52,7 @@ frappe.query_reports["Internal Transfer Receive Mismatch"] = {
 		if (report.get_filter('company_address')) {
 			report.get_filter('company_address').df.get_query = function() {
 				return {
-					query: "business_needed_solutions.business_needed_solutions.business_needed_solutions.report.internal_transfer_receive_mismatch.internal_transfer_receive_mismatch.company_address_query",
+					query: "business_needed_solutions.bns_branch_accounting.report.internal_transfer_receive_mismatch.internal_transfer_receive_mismatch.company_address_query",
 					filters: {
 						"is_company_address": 1
 					}

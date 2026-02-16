@@ -1,5 +1,5 @@
 """
-Business Needed Solutions - Billing Location → Customer Address
+BNS Branch Accounting - Billing Location → Customer Address
 
 On validate: if billing_location is set and customer is BNS internal, resolve the
 Location's linked_address and overwrite customer_address + address_display
@@ -13,16 +13,14 @@ import frappe
 from frappe import _
 from frappe.contacts.doctype.address.address import get_address_display
 
-from business_needed_solutions.business_needed_solutions.overrides.gst_compliance import (
-    _is_bns_internal_customer,
-)
+from business_needed_solutions.bns_branch_accounting.utils import is_bns_internal_customer
 
 
 def set_customer_address_from_billing_location(doc, method=None):
     """Set customer_address and GST fields from billing_location.linked_address on save (BNS customers only)."""
     if not doc.get("billing_location"):
         return
-    if not _is_bns_internal_customer(doc):
+    if not is_bns_internal_customer(doc):
         return
 
     linked_address = frappe.db.get_value(

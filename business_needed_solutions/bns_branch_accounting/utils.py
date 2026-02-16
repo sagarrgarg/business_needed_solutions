@@ -23,6 +23,40 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def is_bns_internal_customer(doc) -> bool:
+    """
+    Check if the document's customer is a BNS internal customer.
+
+    Args:
+        doc: Document with customer field (e.g. Sales Invoice, Delivery Note).
+
+    Returns:
+        bool: True if customer is BNS internal, False otherwise.
+    """
+    if doc.get("is_bns_internal_customer"):
+        return True
+    if getattr(doc, "customer", None):
+        return bool(frappe.db.get_value("Customer", doc.customer, "is_bns_internal_customer"))
+    return False
+
+
+def is_bns_internal_supplier(doc) -> bool:
+    """
+    Check if the document's supplier is a BNS internal supplier.
+
+    Args:
+        doc: Document with supplier field (e.g. Purchase Invoice, Purchase Receipt).
+
+    Returns:
+        bool: True if supplier is BNS internal, False otherwise.
+    """
+    if doc.get("is_bns_internal_supplier"):
+        return True
+    if getattr(doc, "supplier", None):
+        return bool(frappe.db.get_value("Supplier", doc.supplier, "is_bns_internal_supplier"))
+    return False
+
+
 class BNSInternalTransferError(Exception):
     """Custom exception for BNS internal transfer operations."""
     pass
@@ -250,9 +284,9 @@ def validate_internal_transfer_qty(doc) -> None:
         item_wise_transfer_qty[key] = available_qty
     
     # Get already received quantities
-    # For PR from SI, use supplier_delivery_note to find other PRs
-    if doc.doctype == "Purchase Receipt" and supplier_delivery_note and frappe.db.exists("Sales Invoice", supplier_delivery_note):
-        # Find other PRs created from this SI
+    # For PR from SI, use supplier_delivery_note to find other PRs (requires sales_invoice_item on PR Item)
+    pr_item_has_si_item = frappe.get_meta("Purchase Receipt Item").has_field("sales_invoice_item")
+    if doc.doctype == "Purchase Receipt" and supplier_delivery_note and frappe.db.exists("Sales Invoice", supplier_delivery_note) and pr_item_has_si_item:
         received_items = {}
         pr_list = frappe.get_all(
             "Purchase Receipt",
@@ -267,7 +301,7 @@ def validate_internal_transfer_qty(doc) -> None:
                 fields=["sales_invoice_item", "item_code", "qty"]
             )
             for item in pr_items:
-                key = (item.sales_invoice_item, item.item_code)
+                key = (item.get("sales_invoice_item"), item.item_code)
                 received_items[key] = received_items.get(key, 0) + flt(item.qty)
     else:
         received_items = get_received_items(inter_company_reference, doc.doctype, reference_fieldname)
@@ -479,10 +513,6 @@ def _update_details(source_doc, target_doc, source_parent) -> None:
         target_doc.buying_price_list = source_doc.selling_price_list
         target_doc.is_internal_supplier = 1
         target_doc.bns_inter_company_reference = source_doc.name
-        # Also set ERPNext's standard inter_company_reference so that
-        # validate_inter_company_reference() does not throw
-        # "Internal Sale or Delivery Reference missing".
-        target_doc.inter_company_reference = source_doc.name
         
         # Set supplier_delivery_note = DN name (TRANSFER UNDER SAME GSTIN)
         target_doc.supplier_delivery_note = source_doc.name
@@ -490,12 +520,8 @@ def _update_details(source_doc, target_doc, source_parent) -> None:
         # Set is_bns_internal_supplier = 1 (TRANSFER UNDER SAME GSTIN)
         target_doc.is_bns_internal_supplier = 1
         
-        # Set represents_company so ERPNext's is_internal_transfer() works
-        target_doc.represents_company = source_doc.company
+        # Do NOT set standard represents_company or inter_company_reference on PR; use BNS fields only.
 
-        if getattr(source_doc, "custom_destination", None):
-            target_doc.custom_destination = source_doc.custom_destination
-        
         # Handle addresses
         _update_addresses(target_doc, source_doc)
         
@@ -513,10 +539,6 @@ def _update_details(source_doc, target_doc, source_parent) -> None:
         target_doc.buying_price_list = source_doc.selling_price_list
         target_doc.is_internal_supplier = 1
         target_doc.bns_inter_company_reference = source_doc.name
-        # Also set ERPNext's standard inter_company_reference so that
-        # validate_inter_company_reference() does not throw
-        # "Internal Sale or Delivery Reference missing".
-        target_doc.inter_company_reference = source_doc.name
         
         # Set supplier_delivery_note = DN name (TRANSFER UNDER SAME GSTIN)
         target_doc.supplier_delivery_note = source_doc.name
@@ -524,12 +546,8 @@ def _update_details(source_doc, target_doc, source_parent) -> None:
         # Set is_bns_internal_supplier = 1 (TRANSFER UNDER SAME GSTIN)
         target_doc.is_bns_internal_supplier = 1
         
-        # Set represents_company so ERPNext's is_internal_transfer() works
-        target_doc.represents_company = source_doc.company
+        # Do NOT set standard represents_company or inter_company_reference on PR; use BNS fields only.
 
-        if getattr(source_doc, "custom_destination", None):
-            target_doc.custom_destination = source_doc.custom_destination
-        
         # Update delivery note with reference
         _update_delivery_note_reference(source_doc.name, target_doc.name)
         
@@ -781,11 +799,8 @@ def update_delivery_note_status_for_bns_internal(doc, method: Optional[str] = No
         return
     
     # Check if customer is BNS internal
-    is_bns_internal = doc.get("is_bns_internal_customer") or False
-    if not is_bns_internal:
-        customer_internal = frappe.db.get_value("Customer", doc.customer, "is_bns_internal_customer")
-        if not customer_internal:
-            return
+    if not is_bns_internal_customer(doc):
+        return
 
     try:
         # Check GSTIN match
@@ -840,8 +855,8 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
     try:
         # Check if PR is from DN (same GSTIN) or SI (different GSTIN)
         # Check supplier_delivery_note to determine source
-        is_bns_internal = doc.get("is_bns_internal_supplier") or False
-        
+        is_bns_internal = is_bns_internal_supplier(doc)
+
         # If supplier_delivery_note exists, check if it's a DN or SI
         if doc.supplier_delivery_note:
             # Check if supplier_delivery_note is a DN
@@ -849,24 +864,13 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
             if dn_exists:
                 # From DN - same GSTIN
                 is_bns_internal = True
-                # Ensure represents_company is set
-                dn_customer = frappe.db.get_value("Delivery Note", doc.supplier_delivery_note, "customer")
-                if dn_customer:
-                    represents_company = frappe.db.get_value("Customer", dn_customer, "bns_represents_company")
-                    if represents_company:
-                        doc.represents_company = represents_company
+                # Do not set standard represents_company on PR; use BNS fields only.
             else:
                 # Check if it's a Sales Invoice
                 si_exists = frappe.db.exists("Sales Invoice", doc.supplier_delivery_note)
                 if si_exists:
                     # From SI - different GSTIN
                     is_bns_internal = False
-                    # Ensure represents_company is set from SI's customer
-                    si_customer = frappe.db.get_value("Sales Invoice", doc.supplier_delivery_note, "customer")
-                    if si_customer:
-                        represents_company = frappe.db.get_value("Customer", si_customer, "bns_represents_company")
-                        if represents_company:
-                            doc.represents_company = represents_company
         
         # Update is_bns_internal_supplier field
         if is_bns_internal != doc.get("is_bns_internal_supplier"):
@@ -878,8 +882,10 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
             doc.db_set("status", "BNS Internally Transferred", update_modified=False)
             doc.db_set("per_billed", per_billed, update_modified=False)
             doc.db_set("is_bns_internal_supplier", 1, update_modified=False)
-            if doc.represents_company:
-                doc.db_set("represents_company", doc.represents_company, update_modified=False)
+            # Ensure Delivery Note is updated with linked PR (bidirectional link)
+            if doc.supplier_delivery_note and frappe.db.exists("Delivery Note", doc.supplier_delivery_note):
+                _update_delivery_note_reference(doc.supplier_delivery_note, doc.name)
+                frappe.clear_cache(doctype="Delivery Note")
             frappe.clear_cache(doctype="Purchase Receipt")
             logger.info(f"Updated Purchase Receipt {doc.name} status to BNS Internally Transferred (from DN)")
         else:
@@ -955,6 +961,18 @@ def make_bns_internal_purchase_invoice(source_name: str, target_doc: Optional[Di
         
         # Validate sales invoice for internal customer
         _validate_internal_sales_invoice(si)
+        
+        # Block PI creation when PR already exists from this SI (SI->PR flow takes precedence)
+        pr_name = frappe.db.get_value(
+            "Purchase Receipt",
+            {"supplier_delivery_note": si.name, "docstatus": 1},
+            "name"
+        )
+        if pr_name:
+            frappe.throw(
+                _("A Purchase Receipt ({0}) already exists for this Sales Invoice. Purchase Invoice cannot be created when a Purchase Receipt exists. Use the existing Purchase Receipt or unlink it first.").format(pr_name),
+                title=_("Cannot Create Purchase Invoice")
+            )
         
         # Get representing company
         represents_company = _get_representing_company_from_customer(si.customer)
@@ -1118,9 +1136,6 @@ def _update_details_pi(source_doc, target_doc, source_parent) -> None:
         # Set supplier_invoice_number (bill_no) = SI name (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.bill_no = source_doc.name
 
-        if getattr(source_doc, "custom_destination", None):
-            target_doc.custom_destination = source_doc.custom_destination
-        
         # Handle addresses
         _update_addresses_pi(target_doc, source_doc)
         
@@ -1143,9 +1158,6 @@ def _update_details_pi(source_doc, target_doc, source_parent) -> None:
         # Set is_bns_internal_supplier = 1 (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.is_bns_internal_supplier = 1
 
-        if getattr(source_doc, "custom_destination", None):
-            target_doc.custom_destination = source_doc.custom_destination
-        
         # Set supplier_invoice_number (bill_no) = SI name (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.bill_no = source_doc.name
         
@@ -1307,19 +1319,17 @@ def make_bns_internal_purchase_receipt_from_si(source_name: str, target_doc: Opt
                 {"inter_company_invoice_reference": si.name, "docstatus": 1},
                 "name"
             )
-            raise BNSValidationError(
-                _("Purchase Invoice {0} already exists for Sales Invoice {1}. Purchase Receipt cannot be created when Purchase Invoice exists.").format(
-                    get_link_to_form("Purchase Invoice", pi_name) if pi_name else "",
-                    get_link_to_form("Sales Invoice", si.name)
-                )
+            frappe.throw(
+                _("A Purchase Invoice ({0}) already exists for this Sales Invoice. Purchase Receipt cannot be created when a Purchase Invoice exists. Use the existing Purchase Invoice or unlink it first.").format(pi_name or ""),
+                title=_("Cannot Create Purchase Receipt")
             )
-        
+
         # Get representing company
         represents_company = _get_representing_company_from_customer(si.customer)
-        
+
         # Validate inter-company party
         validate_inter_company_party("Purchase Receipt", si.customer, represents_company)
-        
+
         # Create mapped document
         doclist = get_mapped_doc(
             "Sales Invoice",
@@ -1362,6 +1372,7 @@ def _get_sales_invoice_to_pr_mapping() -> Dict[str, Any]:
         "Sales Invoice Item": {
             "doctype": "Purchase Receipt Item",
             "field_map": {
+                "name": "sales_invoice_item",
                 "warehouse": "from_warehouse",
                 "serial_no": "serial_no",
                 "batch_no": "batch_no",
@@ -1378,10 +1389,10 @@ def _set_missing_values_pr_from_si(source, target) -> None:
     target.run_method("set_missing_values")
     
     # Get received items to track partial receipts (using supplier_delivery_note as reference)
-    # For SI->PR, we track via supplier_delivery_note field
+    # For SI->PR, we track via supplier_delivery_note field; requires sales_invoice_item on Purchase Receipt Item
     received_items = {}
-    if source.name:
-        # Find PRs created from this SI
+    pr_item_meta = frappe.get_meta("Purchase Receipt Item")
+    if source.name and pr_item_meta.has_field("sales_invoice_item"):
         pr_list = frappe.get_all(
             "Purchase Receipt",
             filters={"supplier_delivery_note": source.name, "docstatus": 1},
@@ -1395,7 +1406,7 @@ def _set_missing_values_pr_from_si(source, target) -> None:
                 fields=["sales_invoice_item", "item_code", "qty"]
             )
             for item in pr_items:
-                key = (item.sales_invoice_item, item.item_code)
+                key = (item.get("sales_invoice_item"), item.item_code)
                 received_items[key] = received_items.get(key, 0) + flt(item.qty)
     
     # Filter items that have already been fully received
@@ -1429,14 +1440,15 @@ def _set_missing_values_pr_from_si(source, target) -> None:
         )
         
         if pi_name:
-            raise BNSValidationError(
-                _("Purchase Invoice {0} already exists for Sales Invoice {1}. Purchase Receipt cannot be created when Purchase Invoice exists.").format(
-                    get_link_to_form("Purchase Invoice", pi_name),
-                    get_link_to_form("Sales Invoice", source.name)
-                )
+            frappe.throw(
+                _("A Purchase Invoice ({0}) already exists for this Sales Invoice. Purchase Receipt cannot be created when a Purchase Invoice exists.").format(pi_name),
+                title=_("Cannot Create Purchase Receipt")
             )
         else:
-            raise BNSValidationError(_("All items have already been received"))
+            frappe.throw(
+                _("All items have already been received. Purchase Receipt cannot be created."),
+                title=_("Cannot Create Purchase Receipt")
+            )
     
     # Clear document level warehouses and accounting dimensions
     _clear_document_level_fields(target)
@@ -1465,9 +1477,6 @@ def _update_details_pr_from_si(source_doc, target_doc, source_parent) -> None:
         # Set supplier_delivery_note = SI name (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.supplier_delivery_note = source_doc.name
 
-        if getattr(source_doc, "custom_destination", None):
-            target_doc.custom_destination = source_doc.custom_destination
-        
         # Set is_bns_internal_customer = 0 (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.is_bns_internal_customer = 0
         
@@ -1485,9 +1494,6 @@ def _update_details_pr_from_si(source_doc, target_doc, source_parent) -> None:
         # Set supplier_delivery_note = SI name (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.supplier_delivery_note = source_doc.name
 
-        if getattr(source_doc, "custom_destination", None):
-            target_doc.custom_destination = source_doc.custom_destination
-        
         # Set is_bns_internal_customer = 0 (TRANSFER UNDER DIFFERENT GSTIN)
         target_doc.is_bns_internal_customer = 0
         
@@ -1522,11 +1528,16 @@ def _update_item_pr_from_si(source, target, source_parent) -> None:
 
 
 def _update_sales_invoice_pr_reference(si_name: str, pr_name: str) -> None:
-    """Update sales invoice with purchase receipt reference."""
-    # Note: Sales Invoice doesn't have a direct PR reference field like DN does
-    # Do NOT update status here - it's handled by on_submit hook
-    # Status will be updated automatically when SI is submitted
-    pass
+    """
+    Update Sales Invoice with Purchase Receipt reference for record connections.
+
+    Sets bns_purchase_receipt_reference so SI shows PR in Connections and vice versa.
+    """
+    if frappe.db.exists("Sales Invoice", si_name):
+        si = frappe.get_doc("Sales Invoice", si_name)
+        if si.meta.has_field("bns_purchase_receipt_reference"):
+            si.db_set("bns_purchase_receipt_reference", pr_name, update_modified=False)
+        frappe.clear_cache(doctype="Sales Invoice")
 
 
 def update_sales_invoice_status_for_bns_internal(doc, method: Optional[str] = None) -> None:
@@ -1613,9 +1624,9 @@ def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] =
         return
     
     # Check if it's a BNS internal transfer
-    is_bns_internal = doc.get("is_bns_internal_supplier") or False
+    is_bns_internal = is_bns_internal_supplier(doc)
     is_from_si = False
-    
+
     if is_bns_internal:
         is_from_si = True
     elif doc.bns_inter_company_reference:
@@ -1656,20 +1667,12 @@ def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] =
         if not doc.get("is_bns_internal_supplier"):
             doc.is_bns_internal_supplier = 1
         
-        # Ensure represents_company is set from supplier
-        if not doc.represents_company and doc.supplier:
-            represents_company = frappe.db.get_value("Supplier", doc.supplier, "bns_represents_company")
-            if not represents_company:
-                represents_company = frappe.db.get_value("Supplier", doc.supplier, "represents_company")
-            if represents_company:
-                doc.represents_company = represents_company
+        # Do not set standard represents_company on PI; use BNS fields only.
         
         # Update status immediately on document and in database using db_set
         doc.status = "BNS Internally Transferred"
         doc.db_set("status", "BNS Internally Transferred", update_modified=False)
         doc.db_set("is_bns_internal_supplier", 1, update_modified=False)
-        if doc.represents_company:
-            doc.db_set("represents_company", doc.represents_company, update_modified=False)
         
         # Set bidirectional bns_inter_company_reference
         si_name = None
@@ -1714,14 +1717,10 @@ def _should_update_sales_invoice_status(doc) -> bool:
     if doc.docstatus != 1:
         return False
     
-    # Check if customer is BNS internal (only check is_bns_internal_customer)
-    is_bns_internal = doc.get("is_bns_internal_customer") or False
-    if not is_bns_internal:
-        # Check customer's is_bns_internal_customer field
-        customer_internal = frappe.db.get_value("Customer", doc.customer, "is_bns_internal_customer")
-        if not customer_internal:
-            return False
-    
+    # Check if customer is BNS internal
+    if not is_bns_internal_customer(doc):
+        return False
+
     # Check GST mismatch condition (different GST)
     billing_address_gstin = getattr(doc, 'billing_address_gstin', None)
     company_gstin = getattr(doc, 'company_gstin', None)
@@ -2938,6 +2937,80 @@ def validate_dn_pr_items_match(delivery_note: str, purchase_receipt: str) -> Dic
 
 
 @frappe.whitelist()
+def validate_si_pr_items_match(sales_invoice: str, purchase_receipt: str) -> Dict:
+    """
+    Validate that Sales Invoice and Purchase Receipt items match.
+
+    Args:
+        sales_invoice (str): Sales Invoice name
+        purchase_receipt (str): Purchase Receipt name
+
+    Returns:
+        Dict: Validation result with match status and details
+    """
+    try:
+        si = frappe.get_doc("Sales Invoice", sales_invoice)
+        pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
+
+        si_items = {}
+        for item in si.items:
+            item_code = item.item_code
+            qty = flt(item.qty or 0)
+            stock_qty = flt(item.stock_qty or qty)
+            if item_code not in si_items:
+                si_items[item_code] = {"qty": 0, "stock_qty": 0}
+            si_items[item_code]["qty"] += qty
+            si_items[item_code]["stock_qty"] += stock_qty
+
+        pr_items = {}
+        for item in pr.items:
+            item_code = item.item_code
+            qty = flt(item.qty or 0)
+            stock_qty = flt(item.stock_qty or qty)
+            if item_code not in pr_items:
+                pr_items[item_code] = {"qty": 0, "stock_qty": 0}
+            pr_items[item_code]["qty"] += qty
+            pr_items[item_code]["stock_qty"] += stock_qty
+
+        missing_items = []
+        qty_mismatches = []
+        for item_code, si_data in si_items.items():
+            if item_code not in pr_items:
+                missing_items.append({"item_code": item_code, "si_qty": si_data["qty"], "pr_qty": 0})
+            elif flt(si_data["qty"]) != flt(pr_items[item_code]["qty"]):
+                qty_mismatches.append({
+                    "item_code": item_code,
+                    "si_qty": si_data["qty"],
+                    "pr_qty": pr_items[item_code]["qty"]
+                })
+
+        extra_items = []
+        for item_code in pr_items:
+            if item_code not in si_items:
+                extra_items.append({"item_code": item_code, "si_qty": 0, "pr_qty": pr_items[item_code]["qty"]})
+
+        if missing_items or qty_mismatches or extra_items:
+            error_msg = _("Item mismatches found:\n")
+            if missing_items:
+                error_msg += _("\nMissing items in Purchase Receipt:\n")
+                for item in missing_items:
+                    error_msg += _("  - {0}: SI qty = {1}, PR qty = {2}\n").format(item["item_code"], item["si_qty"], item["pr_qty"])
+            if qty_mismatches:
+                error_msg += _("\nQuantity mismatches:\n")
+                for item in qty_mismatches:
+                    error_msg += _("  - {0}: SI qty = {1}, PR qty = {2}\n").format(item["item_code"], item["si_qty"], item["pr_qty"])
+            if extra_items:
+                error_msg += _("\nExtra items in Purchase Receipt:\n")
+                for item in extra_items:
+                    error_msg += _("  - {0}: SI qty = {1}, PR qty = {2}\n").format(item["item_code"], item["si_qty"], item["pr_qty"])
+            return {"match": False, "error": error_msg}
+        return {"match": True, "message": _("All items match successfully")}
+    except Exception as e:
+        logger.error(f"Error validating SI-PR items match: {str(e)}")
+        frappe.throw(_("Error validating items: {0}").format(str(e)))
+
+
+@frappe.whitelist()
 def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
     """
     Link a Delivery Note with a Purchase Receipt for BNS Internal transfer.
@@ -3115,6 +3188,8 @@ def unlink_dn_pr(delivery_note: str = None, purchase_receipt: str = None) -> Dic
                 pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
                 if pr.get("bns_inter_company_reference"):
                     pr.db_set("bns_inter_company_reference", "", update_modified=False)
+                if pr.get("supplier_delivery_note") == delivery_note:
+                    pr.db_set("supplier_delivery_note", "", update_modified=False)
                 pr_cleared = True
             else:
                 logger.warning(f"Purchase Receipt {purchase_receipt} does not exist — skipping its side of unlink")
@@ -3134,6 +3209,133 @@ def unlink_dn_pr(delivery_note: str = None, purchase_receipt: str = None) -> Dic
         
     except Exception as e:
         logger.error(f"Error unlinking DN-PR: {str(e)}")
+        frappe.throw(str(e))
+
+
+@frappe.whitelist()
+def link_si_pr(sales_invoice: str, purchase_receipt: str) -> Dict:
+    """
+    Link a Sales Invoice with a Purchase Receipt for BNS Internal transfer (different GSTIN flow).
+
+    Args:
+        sales_invoice (str): Sales Invoice name
+        purchase_receipt (str): Purchase Receipt name
+
+    Returns:
+        Dict: Result with success message
+    """
+    try:
+        si = frappe.get_doc("Sales Invoice", sales_invoice)
+        pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
+
+        if si.docstatus != 1:
+            raise BNSValidationError(_("Sales Invoice must be submitted before linking"))
+        if pr.docstatus != 1:
+            raise BNSValidationError(_("Purchase Receipt must be submitted before linking"))
+
+        # Validate different GSTIN only (SI->PR flow)
+        si_billing_gstin = getattr(si, 'billing_address_gstin', None)
+        si_company_gstin = getattr(si, 'company_gstin', None)
+        if not si_billing_gstin or not si_company_gstin:
+            raise BNSValidationError(_("Sales Invoice GSTIN information is missing"))
+        if si_billing_gstin == si_company_gstin:
+            raise BNSValidationError(
+                _("GSTIN match: Only different GSTIN transfers can be linked. Use Link Delivery Note for same GSTIN.")
+            )
+
+        customer_internal = frappe.db.get_value("Customer", si.customer, "is_bns_internal_customer")
+        if not customer_internal:
+            raise BNSValidationError(_("Customer {0} is not marked as BNS Internal Customer").format(si.customer))
+
+        if si.get("bns_inter_company_reference") == pr.name and pr.get("bns_inter_company_reference") == si.name:
+            return {"success": True, "message": _("Already linked")}
+        if pr.get("bns_inter_company_reference") and pr.get("bns_inter_company_reference") != si.name:
+            raise BNSValidationError(
+                _("Purchase Receipt {0} is already linked to {1}").format(purchase_receipt, pr.get("bns_inter_company_reference"))
+            )
+
+        items_validation = validate_si_pr_items_match(sales_invoice, purchase_receipt)
+        if not items_validation.get("match"):
+            raise BNSValidationError(_("Items do not match: {0}").format(items_validation.get("error")))
+
+        pr.db_set("bns_inter_company_reference", si.name, update_modified=False)
+        pr.db_set("supplier_delivery_note", si.name, update_modified=False)
+        if not pr.get("is_bns_internal_supplier"):
+            pr.db_set("is_bns_internal_supplier", 1, update_modified=False)
+        if pr.status != "BNS Internally Transferred":
+            pr.db_set("status", "BNS Internally Transferred", update_modified=False)
+        if pr.per_billed != 100:
+            pr.db_set("per_billed", 100, update_modified=False)
+
+        if si.meta.has_field("bns_purchase_receipt_reference"):
+            si.db_set("bns_purchase_receipt_reference", pr.name, update_modified=False)
+        frappe.clear_cache(doctype="Sales Invoice")
+        frappe.clear_cache(doctype="Purchase Receipt")
+
+        logger.info(f"Linked Sales Invoice {sales_invoice} with Purchase Receipt {purchase_receipt}")
+        return {"success": True, "message": _("Sales Invoice and Purchase Receipt linked successfully")}
+    except Exception as e:
+        logger.error(f"Error linking SI-PR: {str(e)}")
+        frappe.throw(str(e))
+
+
+@frappe.whitelist()
+def unlink_si_pr(sales_invoice: str = None, purchase_receipt: str = None) -> Dict:
+    """
+    Unlink a Sales Invoice and Purchase Receipt (when PR was created from SI).
+
+    Clears supplier_delivery_note and bns_inter_company_reference on both sides.
+
+    Args:
+        sales_invoice (str): Sales Invoice name (optional if purchase_receipt provided)
+        purchase_receipt (str): Purchase Receipt name (optional if sales_invoice provided)
+
+    Returns:
+        Dict: Result with success message
+    """
+    try:
+        if not sales_invoice and not purchase_receipt:
+            raise BNSValidationError(_("Either sales_invoice or purchase_receipt must be provided"))
+
+        if purchase_receipt and not sales_invoice:
+            pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
+            ref = pr.get("bns_inter_company_reference") or pr.get("supplier_delivery_note")
+            if ref and frappe.db.exists("Sales Invoice", ref):
+                sales_invoice = ref
+
+        if sales_invoice and not purchase_receipt:
+            pr_name = frappe.db.get_value(
+                "Purchase Receipt",
+                {"supplier_delivery_note": sales_invoice, "docstatus": 1},
+                "name"
+            )
+            if pr_name:
+                purchase_receipt = pr_name
+
+        if not purchase_receipt:
+            return {"success": True, "message": _("No linked Purchase Receipt found")}
+
+        pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
+        if pr.get("bns_inter_company_reference"):
+            pr.db_set("bns_inter_company_reference", "", update_modified=False)
+        if pr.get("supplier_delivery_note") == sales_invoice:
+            pr.db_set("supplier_delivery_note", "", update_modified=False)
+        frappe.clear_cache(doctype="Purchase Receipt")
+
+        # Clear SI's bns_purchase_receipt_reference if set
+        if frappe.db.exists("Sales Invoice", sales_invoice):
+            si = frappe.get_doc("Sales Invoice", sales_invoice)
+            if si.meta.has_field("bns_purchase_receipt_reference") and si.get("bns_purchase_receipt_reference") == purchase_receipt:
+                si.db_set("bns_purchase_receipt_reference", "", update_modified=False)
+            frappe.clear_cache(doctype="Sales Invoice")
+
+        logger.info(f"Unlinked Sales Invoice {sales_invoice} from Purchase Receipt {purchase_receipt}")
+        return {
+            "success": True,
+            "message": _("Sales Invoice and Purchase Receipt unlinked successfully")
+        }
+    except Exception as e:
+        logger.error(f"Error unlinking SI-PR: {str(e)}")
         frappe.throw(str(e))
 
 
