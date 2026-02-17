@@ -389,52 +389,128 @@ function updateClosingBalance(report) {
 
 /**
  * Download Statement as PDF.
- * Ensures meta data is loaded before triggering PDF generation.
+ * Shows dialog to pick columns (like standard report PDF), then generates PDF.
  */
 async function downloadStatementPDF(report) {
 	var filters = report.get_filter_values();
-	
+
 	if (!filters.party || !filters.party.length) {
 		frappe.msgprint(__("Please select a Party first"));
 		return;
 	}
-	
+
 	if (!report.data || !report.data.length) {
 		frappe.msgprint(__("Please run the report first"));
 		return;
 	}
-	
-	// Ensure meta is loaded (synchronous call)
+
 	if (!window._party_gl_statement_meta) {
 		loadStatementMeta(report);
 	}
-	
-	// Store original get_filter_values function
+
+	frappe.prompt(
+		[
+			{
+				fieldtype: "Select",
+				fieldname: "orientation",
+				label: __("Orientation"),
+				options: [
+					{ value: "Portrait", label: __("Portrait") },
+					{ value: "Landscape", label: __("Landscape") },
+				],
+				default: "Portrait",
+			},
+			{
+				fieldtype: "Check",
+				fieldname: "pick_columns",
+				label: __("Pick Columns"),
+				description: __("Select specific columns to include. If unchecked, all columns are included."),
+				default: 0,
+			},
+			{
+				fieldtype: "Section Break",
+				fieldname: "columns_section",
+				label: __("Select Columns"),
+				depends_on: "eval:doc.pick_columns",
+			},
+			{
+				fieldtype: "Check",
+				fieldname: "col_posting_date",
+				label: __("Date"),
+				default: 1,
+				depends_on: "eval:doc.pick_columns",
+			},
+			{
+				fieldtype: "Check",
+				fieldname: "col_reference",
+				label: __("Reference"),
+				default: 1,
+				depends_on: "eval:doc.pick_columns",
+			},
+			{
+				fieldtype: "Check",
+				fieldname: "col_debit",
+				label: __("Debit"),
+				default: 1,
+				depends_on: "eval:doc.pick_columns",
+			},
+			{
+				fieldtype: "Check",
+				fieldname: "col_credit",
+				label: __("Credit"),
+				default: 1,
+				depends_on: "eval:doc.pick_columns",
+			},
+			{
+				fieldtype: "Check",
+				fieldname: "col_balance",
+				label: __("Balance"),
+				default: 1,
+				depends_on: "eval:doc.pick_columns",
+			},
+		],
+		function (values) {
+			var print_settings = {
+				orientation: values.orientation || "Portrait",
+			};
+			if (values.pick_columns) {
+				var columns = [];
+				if (values.col_posting_date) columns.push("posting_date");
+				if (values.col_reference) columns.push("reference");
+				if (values.col_debit) columns.push("debit");
+				if (values.col_credit) columns.push("credit");
+				if (values.col_balance) columns.push("balance");
+				if (columns.length) {
+					print_settings.columns = columns;
+				}
+			}
+			runStatementPDFReport(report, print_settings);
+		},
+		__("Download Statement")
+	);
+}
+
+/**
+ * Run PDF generation with given print_settings (used after dialog submit).
+ */
+async function runStatementPDFReport(report, print_settings) {
 	var original_get_filter_values = frappe.query_report.get_filter_values;
-	
-	// Override temporarily to return clean filter values (fixes toString() error on undefined)
-	frappe.query_report.get_filter_values = function() {
+	frappe.query_report.get_filter_values = function () {
 		var vals = original_get_filter_values.call(frappe.query_report);
-		Object.keys(vals).forEach(function(key) {
+		Object.keys(vals).forEach(function (key) {
 			if (vals[key] === undefined || vals[key] === null) {
 				vals[key] = "";
 			}
 		});
 		return vals;
 	};
-	
-	// Trigger PDF generation
-	var print_settings = {
-		orientation: "Portrait"
-	};
-	
+
 	try {
 		await frappe.query_report.pdf_report(print_settings);
-	} catch(e) {
+	} catch (e) {
 		console.error("PDF generation error:", e);
 		frappe.msgprint(__("Error generating PDF: ") + e.message);
 	} finally {
-		// Restore original function
 		frappe.query_report.get_filter_values = original_get_filter_values;
 	}
 }

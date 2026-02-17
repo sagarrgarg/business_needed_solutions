@@ -391,16 +391,22 @@
     </div>
     {% } %}
 
-    <!-- Transactions Table -->
+    <!-- Transactions Table: columns shown based on print_settings.columns (from Download Statement dialog) -->
+    {% var sc = (print_settings && print_settings.columns); %}
+    {% var show_all = !sc || !sc.length; %}
+    {% var show_date = show_all || (sc && sc.indexOf('posting_date') !== -1); %}
+    {% var show_ref = show_all || (sc && sc.indexOf('reference') !== -1); %}
+    {% var show_debit = show_all || (sc && sc.indexOf('debit') !== -1); %}
+    {% var show_credit = show_all || (sc && sc.indexOf('credit') !== -1); %}
+    {% var show_balance = show_all || (sc && sc.indexOf('balance') !== -1); %}
     <table class="statement-table">
         <thead>
             <tr>
-                <th style="width: 10%">{%= __("Date") %}</th>
-                <th style="width: 24%">{%= __("Reference") %}</th>
-                <th style="width: 20%">{%= __("Remarks") %}</th>
-                <th class="text-right" style="width: 14%">{%= __("Debit") %}</th>
-                <th class="text-right" style="width: 14%">{%= __("Credit") %}</th>
-                <th class="text-right" style="width: 18%">{%= __("Balance") %}</th>
+                {% if (show_date) { %}<th style="width: 10%">{%= __("Date") %}</th>{% } %}
+                {% if (show_ref) { %}<th style="width: 44%">{%= __("Reference") %}</th>{% } %}
+                {% if (show_debit) { %}<th class="text-right" style="width: 14%">{%= __("Debit") %}</th>{% } %}
+                {% if (show_credit) { %}<th class="text-right" style="width: 14%">{%= __("Credit") %}</th>{% } %}
+                {% if (show_balance) { %}<th class="text-right" style="width: 18%">{%= __("Balance") %}</th>{% } %}
             </tr>
         </thead>
         <tbody>
@@ -417,7 +423,8 @@
             {% } %}
             <tr class="{%= rowClass %}" {% if (isClosing) { %}data-closing-balance="{%= row.balance || '' %}"{% } %}>
                 {% if (row.posting_date) { %}
-                    <td>{%= frappe.datetime.str_to_user(row.posting_date) %}</td>
+                    {% if (show_date) { %}<td>{%= frappe.datetime.str_to_user(row.posting_date) %}</td>{% } %}
+                    {% if (show_ref) { %}
                     <td>
                         <div class="ref-cell-wrapper">
                             <div class="ref-cell-left">
@@ -440,26 +447,21 @@
                                 {% } %}
                             </div>
                             {% } %}
+                            {% if (row.against_voucher) { %}
+                            <div class="ref-text">Against: {%= row.against_voucher %}</div>
+                            {% } %}
                         </div>
                     </td>
-                    <td>
-                        {% if (row.remarks) { %}
-                            <span class="remarks-text">{%= row.remarks %}</span>
-                        {% } %}
-                        {% if (row.against_voucher) { %}
-                            <br><span class="bill-text">Against: {%= row.against_voucher %}</span>
-                        {% } %}
-                    </td>
-                    <td class="text-right">{%= format_currency(row.debit || 0, filters.presentation_currency || row.account_currency) %}</td>
-                    <td class="text-right">{%= format_currency(row.credit || 0, filters.presentation_currency || row.account_currency) %}</td>
-                    <td class="text-right" style="font-weight: 600;">{%= row.balance || '' %}</td>
+                    {% } %}
+                    {% if (show_debit) { %}<td class="text-right">{%= format_currency(row.debit || 0, filters.presentation_currency || row.account_currency) %}</td>{% } %}
+                    {% if (show_credit) { %}<td class="text-right">{%= format_currency(row.credit || 0, filters.presentation_currency || row.account_currency) %}</td>{% } %}
+                    {% if (show_balance) { %}<td class="text-right" style="font-weight: 600;">{%= row.balance || '' %}</td>{% } %}
                 {% } else { %}
-                    <td></td>
-                    <td><strong>{%= acct ? frappe.format(acct, {fieldtype: "Link"}) : '' %}</strong></td>
-                    <td></td>
-                    <td class="text-right">{%= acct ? format_currency(row.debit || 0, filters.presentation_currency || row.account_currency) : '' %}</td>
-                    <td class="text-right">{%= acct ? format_currency(row.credit || 0, filters.presentation_currency || row.account_currency) : '' %}</td>
-                    <td class="text-right" style="font-weight: 600;">{%= row.balance || '' %}</td>
+                    {% if (show_date) { %}<td></td>{% } %}
+                    {% if (show_ref) { %}<td><strong>{%= acct ? frappe.format(acct, {fieldtype: "Link"}) : '' %}</strong></td>{% } %}
+                    {% if (show_debit) { %}<td class="text-right">{%= acct ? format_currency(row.debit || 0, filters.presentation_currency || row.account_currency) : '' %}</td>{% } %}
+                    {% if (show_credit) { %}<td class="text-right">{%= acct ? format_currency(row.credit || 0, filters.presentation_currency || row.account_currency) : '' %}</td>{% } %}
+                    {% if (show_balance) { %}<td class="text-right" style="font-weight: 600;">{%= row.balance || '' %}</td>{% } %}
                 {% } %}
             </tr>
             {% } %}
