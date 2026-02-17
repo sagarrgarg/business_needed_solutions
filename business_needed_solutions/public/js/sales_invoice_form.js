@@ -310,10 +310,11 @@ frappe.ui.form.on('Sales Invoice', {
             frm.doc.docstatus == 1
         ) {
             // Show Purchase Invoice button only if no PR exists for this SI (PR takes precedence)
-            frappe.db.exists("Purchase Receipt", {
+            frappe.db.get_value("Purchase Receipt", {
                 supplier_delivery_note: frm.doc.name,
                 docstatus: 1
-            }).then(function(pr_exists) {
+            }, "name").then(function(r) {
+                var pr_exists = !!(r && r.message && r.message.name);
                 if (!pr_exists) {
                     frm.add_custom_button(
                         __("BNS Internal Purchase Invoice"),

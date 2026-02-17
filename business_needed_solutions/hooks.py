@@ -26,7 +26,7 @@ app_license = "Commercial"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
-app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=120",
+app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=121",
                   "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=215",
                   "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=49",
                   "/assets/business_needed_solutions/js/delivery_note.js?v=135",
@@ -378,6 +378,9 @@ fixtures = [
 # Migration hook to ensure BNS settings are applied after migrations
 after_migrate = "business_needed_solutions.business_needed_solutions.migration.after_migrate"
 
-# Apply warehouse negative stock restriction patches on app initialization
-after_app_init = "business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.apply_patches"
+# Apply patches on app initialization
+after_app_init = [
+	"business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.apply_patches",
+	"business_needed_solutions.business_needed_solutions.overrides.get_value_filters_fix.apply_patch",
+]
 
