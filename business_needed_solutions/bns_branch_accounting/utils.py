@@ -22,6 +22,116 @@ import logging
 # Configure logging
 logger = logging.getLogger(__name__)
 
+_BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED = False
+
+
+def _get_bns_transfer_rate_for_pr_sle(sle) -> float:
+    """
+    Resolve bns_transfer_rate for a Purchase Receipt SLE row.
+
+    Scope:
+    - Purchase Receipt only
+    - Submitted PR only
+    - BNS internal supplier only
+    - DN-linked (same GSTIN DN->PR flow)
+    """
+    if not sle or getattr(sle, "voucher_type", None) != "Purchase Receipt":
+        return 0.0
+    if not getattr(sle, "voucher_detail_no", None):
+        return 0.0
+    if flt(getattr(sle, "actual_qty", 0)) <= 0:
+        # PR incoming side only
+        return 0.0
+
+    pri_meta = frappe.get_meta("Purchase Receipt Item")
+    if not pri_meta.has_field("bns_transfer_rate"):
+        return 0.0
+
+    pr_item = frappe.db.get_value(
+        "Purchase Receipt Item",
+        sle.voucher_detail_no,
+        ["parent", "bns_transfer_rate"],
+        as_dict=True,
+    )
+    if not pr_item:
+        return 0.0
+
+    transfer_rate = flt(pr_item.get("bns_transfer_rate") or 0)
+    if transfer_rate <= 0:
+        return 0.0
+
+    pr = frappe.db.get_value(
+        "Purchase Receipt",
+        pr_item.get("parent"),
+        ["docstatus", "is_bns_internal_supplier", "supplier_delivery_note"],
+        as_dict=True,
+    )
+    if not pr or pr.docstatus != 1:
+        return 0.0
+    if not pr.get("is_bns_internal_supplier"):
+        return 0.0
+    if not pr.get("supplier_delivery_note") or not frappe.db.exists("Delivery Note", pr.get("supplier_delivery_note")):
+        return 0.0
+
+    return transfer_rate
+
+
+def _apply_bns_transfer_rate_stock_ledger_patch() -> None:
+    """
+    Phase-2 surgical patch:
+    Force PR repost valuation path to use PR Item.bns_transfer_rate when present.
+    """
+    global _BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED
+    if _BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED:
+        return
+
+    try:
+        from erpnext.stock.stock_ledger import update_entries_after
+
+        original_method = update_entries_after.get_incoming_outgoing_rate_from_transaction
+        original_process_sle = update_entries_after.process_sle
+        if getattr(original_method, "_bns_transfer_rate_patched", False):
+            _BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED = True
+            return
+
+        def patched_get_incoming_outgoing_rate_from_transaction(self, sle):
+            # Keep ERPNext behavior as base.
+            rate = original_method(self, sle)
+
+            # Override only for PR incoming rows when bns_transfer_rate is valid.
+            transfer_rate = _get_bns_transfer_rate_for_pr_sle(sle)
+            if transfer_rate > 0:
+                sle.incoming_rate = transfer_rate
+                return transfer_rate
+
+            return rate
+
+        def patched_process_sle(self, sle):
+            # Force PR incoming valuation source to bns_transfer_rate early, so both
+            # transaction-based and item-based reposting paths use it even when
+            # ERPNext dynamic rate resolver would otherwise be skipped.
+            transfer_rate = _get_bns_transfer_rate_for_pr_sle(sle)
+            if transfer_rate > 0:
+                sle.incoming_rate = transfer_rate
+                sle.recalculate_rate = 1
+
+            return original_process_sle(self, sle)
+
+        patched_get_incoming_outgoing_rate_from_transaction._bns_transfer_rate_patched = True
+        patched_process_sle._bns_transfer_rate_patched = True
+        update_entries_after.get_incoming_outgoing_rate_from_transaction = (
+            patched_get_incoming_outgoing_rate_from_transaction
+        )
+        update_entries_after.process_sle = patched_process_sle
+        _BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED = True
+        logger.info("Applied BNS stock-ledger patch: PR repost valuation uses bns_transfer_rate")
+    except Exception as e:
+        logger.error(f"Failed to apply BNS transfer-rate stock-ledger patch: {str(e)}")
+
+
+# Best-effort eager patch on module import (safe no-op if already patched).
+_apply_bns_transfer_rate_stock_ledger_patch()
+
 
 def is_bns_internal_customer(doc) -> bool:
     """
@@ -438,7 +548,11 @@ def _get_delivery_note_mapping() -> Dict[str, Any]:
             # "Incorrect value: Supplier must be equal to …".
             "field_no_map": ["warehouse", "rejected_warehouse", "expense_account", "cost_center", "project", "location",
                              "purchase_order", "purchase_order_item"],
-            "condition": lambda item: flt(item.qty) + flt(item.returned_qty or 0) - flt(item.received_qty or 0) > 0,
+            # Do not depend on DN item.received_qty here; it can drift from
+            # actual submitted PR linkage in amendment/relink scenarios.
+            # Remaining qty is finalized in _set_missing_values() via
+            # get_received_items() against submitted PR documents.
+            "condition": lambda item: flt(item.qty) + flt(item.returned_qty or 0) > 0,
             "postprocess": _update_item,
         },
     }
@@ -738,6 +852,11 @@ def _update_item(source, target, source_parent) -> None:
         target.net_rate = flt(source.net_rate)
     if source.get("base_net_rate"):
         target.base_net_rate = flt(source.base_net_rate)
+
+    # BNS transfer rate is the source DN item's outgoing valuation mirror (incoming_rate on DN Item).
+    # Keep this separate from billing/net rate.
+    if getattr(target, "meta", None) and target.meta.has_field("bns_transfer_rate"):
+        target.bns_transfer_rate = _get_dn_item_transfer_rate(source)
     
     target.received_qty = 0
 
@@ -753,6 +872,20 @@ def _update_item(source, target, source_parent) -> None:
     
     if source.get("use_serial_batch_fields"):
         target.set("use_serial_batch_fields", 1)
+
+
+def _get_dn_item_transfer_rate(dn_item) -> float:
+    """Get outgoing valuation mirror for a Delivery Note Item."""
+    rate = flt(dn_item.get("incoming_rate") or 0)
+    if rate:
+        return rate
+
+    # Fallback to DB in case mapper source did not carry incoming_rate.
+    if dn_item.get("name"):
+        return flt(
+            frappe.db.get_value("Delivery Note Item", dn_item.get("name"), "incoming_rate") or 0
+        )
+    return 0.0
 
 
 def _clear_item_level_fields(target) -> None:
@@ -882,6 +1015,10 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
             doc.db_set("status", "BNS Internally Transferred", update_modified=False)
             doc.db_set("per_billed", per_billed, update_modified=False)
             doc.db_set("is_bns_internal_supplier", 1, update_modified=False)
+            # Keep item-level BNS transfer rates aligned with DN item incoming_rate.
+            if doc.supplier_delivery_note and frappe.db.exists("Delivery Note", doc.supplier_delivery_note):
+                _sync_pr_item_transfer_rate_from_dn(doc.supplier_delivery_note, pr_name=doc.name)
+                _mirror_pr_item_valuation_from_transfer_rate(doc.name)
             # Ensure Delivery Note is updated with linked PR (bidirectional link)
             if doc.supplier_delivery_note and frappe.db.exists("Delivery Note", doc.supplier_delivery_note):
                 _update_delivery_note_reference(doc.supplier_delivery_note, doc.name)
@@ -911,6 +1048,254 @@ def _should_update_internal_status(doc, field_name: str, check_reference: bool =
         return bool(doc.bns_inter_company_reference or getattr(doc, field_name, False))
     
     return bool(getattr(doc, field_name, False))
+
+
+def _get_submitted_prs_for_dn(dn_name: str) -> list[str]:
+    """Get submitted Purchase Receipts linked to a Delivery Note for DN->PR flow."""
+    pr_names = set(
+        frappe.get_all(
+            "Purchase Receipt",
+            filters={"supplier_delivery_note": dn_name, "docstatus": 1},
+            pluck="name",
+        )
+    )
+
+    # Defensive fallback for records linked only via BNS inter-company field.
+    pr_names.update(
+        frappe.get_all(
+            "Purchase Receipt",
+            filters={"bns_inter_company_reference": dn_name, "docstatus": 1},
+            pluck="name",
+        )
+    )
+    return list(pr_names)
+
+
+def _mirror_pr_item_valuation_from_transfer_rate(pr_name: str) -> int:
+    """
+    Mirror PR item valuation_rate from bns_transfer_rate.
+
+    Scope: submitted DN->PR same GSTIN flow only. This intentionally does not
+    touch billing rate/net_rate fields.
+    """
+    if not pr_name or not frappe.db.exists("Purchase Receipt", pr_name):
+        return 0
+
+    pr_meta = frappe.get_meta("Purchase Receipt Item")
+    if not pr_meta.has_field("bns_transfer_rate"):
+        return 0
+
+    pr = frappe.get_doc("Purchase Receipt", pr_name)
+    if pr.docstatus != 1 or not pr.get("is_bns_internal_supplier"):
+        return 0
+    if not pr.get("supplier_delivery_note") or not frappe.db.exists("Delivery Note", pr.get("supplier_delivery_note")):
+        return 0
+
+    updated_count = 0
+    pr_items = frappe.get_all(
+        "Purchase Receipt Item",
+        filters={"parent": pr_name},
+        fields=["name", "bns_transfer_rate", "valuation_rate"],
+    )
+    for item in pr_items:
+        transfer_rate = flt(item.get("bns_transfer_rate") or 0)
+        if transfer_rate <= 0:
+            continue
+        if flt(item.get("valuation_rate") or 0) != transfer_rate:
+            frappe.db.set_value(
+                "Purchase Receipt Item",
+                item.get("name"),
+                "valuation_rate",
+                transfer_rate,
+                update_modified=False,
+            )
+            updated_count += 1
+
+    if updated_count:
+        frappe.clear_cache(doctype="Purchase Receipt")
+        logger.info(
+            f"Mirrored valuation_rate from bns_transfer_rate for {updated_count} PR item rows in {pr_name}"
+        )
+
+    return updated_count
+
+
+def _sync_pr_item_transfer_rate_from_dn(dn_name: str, pr_name: Optional[str] = None) -> int:
+    """
+    Sync Purchase Receipt Item.bns_transfer_rate from Delivery Note Item.incoming_rate.
+
+    This is scoped to DN->PR (same GSTIN) flow only.
+    """
+    if not dn_name or not frappe.db.exists("Delivery Note", dn_name):
+        return 0
+
+    pr_item_meta = frappe.get_meta("Purchase Receipt Item")
+    if not pr_item_meta.has_field("bns_transfer_rate"):
+        return 0
+
+    dn_items = frappe.get_all(
+        "Delivery Note Item",
+        filters={"parent": dn_name},
+        fields=["name", "incoming_rate"],
+    )
+    if not dn_items:
+        return 0
+
+    dn_rate_by_item = {d.name: flt(d.incoming_rate or 0) for d in dn_items}
+
+    if pr_name:
+        pr_names = [pr_name] if frappe.db.exists("Purchase Receipt", pr_name) else []
+    else:
+        pr_names = _get_submitted_prs_for_dn(dn_name)
+
+    if not pr_names:
+        return 0
+
+    updated_count = 0
+    for current_pr in pr_names:
+        pr_items = frappe.get_all(
+            "Purchase Receipt Item",
+            filters={"parent": current_pr},
+            fields=["name", "delivery_note_item", "bns_transfer_rate"],
+        )
+        for item in pr_items:
+            source_dn_item = item.get("delivery_note_item")
+            if not source_dn_item:
+                continue
+
+            source_rate = dn_rate_by_item.get(source_dn_item)
+            if source_rate is None:
+                continue
+
+            if flt(item.get("bns_transfer_rate") or 0) != flt(source_rate):
+                frappe.db.set_value(
+                    "Purchase Receipt Item",
+                    item.get("name"),
+                    "bns_transfer_rate",
+                    flt(source_rate),
+                    update_modified=False,
+                )
+                updated_count += 1
+
+    if updated_count:
+        frappe.clear_cache(doctype="Purchase Receipt")
+        logger.info(
+            f"Synced bns_transfer_rate for {updated_count} Purchase Receipt Item rows from Delivery Note {dn_name}"
+        )
+
+    return updated_count
+
+
+def _trigger_pr_repost_for_transfer_rate(pr_name: str, source_repost_name: str) -> bool:
+    """
+    Trigger PR repost after transfer-rate driven valuation mirror.
+
+    Uses cache guards to avoid repeated triggers and repost storms.
+    """
+    if not pr_name or not frappe.db.exists("Purchase Receipt", pr_name):
+        return False
+
+    # Guard 1: this PR already triggered for current source repost.
+    per_repost_key = f"bns_transfer_rate_pr_repost::{source_repost_name}::{pr_name}"
+    if frappe.cache().get_value(per_repost_key):
+        return False
+
+    # Guard 2: short lock to avoid cascaded repeats from nested repost docs.
+    lock_key = f"bns_transfer_rate_pr_repost_lock::{pr_name}"
+    if frappe.cache().get_value(lock_key):
+        return False
+
+    pr = frappe.get_doc("Purchase Receipt", pr_name)
+    if pr.docstatus != 1:
+        return False
+    if not pr.get("is_bns_internal_supplier"):
+        return False
+    if not pr.get("supplier_delivery_note") or not frappe.db.exists("Delivery Note", pr.get("supplier_delivery_note")):
+        return False
+
+    # Ensure patch is active before creating PR repost entries.
+    _apply_bns_transfer_rate_stock_ledger_patch()
+
+    pr.repost_future_sle_and_gle(force=True)
+    frappe.cache().set_value(per_repost_key, 1, expires_in_sec=6 * 60 * 60)
+    frappe.cache().set_value(lock_key, 1, expires_in_sec=10 * 60)
+    logger.info(f"Triggered PR repost for transfer-rate sync: {pr_name} (source repost: {source_repost_name})")
+    return True
+
+
+def refresh_pr_transfer_rate_after_repost(doc, method: Optional[str] = None) -> None:
+    """
+    Refresh PR item bns_transfer_rate after valuation repost completes.
+
+    Hook target: Repost Item Valuation.on_change.
+    Scope: Delivery Note affected vouchers only (DN->PR same GSTIN path).
+    """
+    if doc.doctype != "Repost Item Valuation":
+        return
+    if doc.docstatus != 1 or doc.status != "Completed":
+        return
+
+    # Make sure patch is active in this worker process before any PR repost trigger.
+    _apply_bns_transfer_rate_stock_ledger_patch()
+
+    cache_key = f"bns_transfer_rate_repost_done::{doc.name}"
+    if frappe.cache().get_value(cache_key):
+        return
+
+    dn_names = set()
+
+    # Direct repost against a Delivery Note transaction.
+    if doc.get("based_on") == "Transaction" and doc.get("voucher_type") == "Delivery Note" and doc.get("voucher_no"):
+        dn_names.add(doc.get("voucher_no"))
+
+    # Also include all affected Delivery Notes captured by repost.
+    try:
+        from erpnext.stock.stock_ledger import get_affected_transactions
+
+        affected = get_affected_transactions(doc)
+    except Exception:
+        affected = set()
+
+    for voucher_type, voucher_no in affected:
+        if voucher_type == "Delivery Note" and voucher_no:
+            dn_names.add(voucher_no)
+
+    # Guard: only run this flow when Delivery Notes are actually involved.
+    if not dn_names:
+        frappe.cache().set_value(cache_key, 1, expires_in_sec=6 * 60 * 60)
+        return
+
+    total_updated = 0
+    total_mirrored = 0
+    affected_prs = set()
+    for dn_name in dn_names:
+        for pr_name in _get_submitted_prs_for_dn(dn_name):
+            updated = _sync_pr_item_transfer_rate_from_dn(dn_name, pr_name=pr_name)
+            mirrored = _mirror_pr_item_valuation_from_transfer_rate(pr_name)
+            total_updated += updated
+            total_mirrored += mirrored
+            if updated or mirrored:
+                affected_prs.add(pr_name)
+
+    triggered_count = 0
+    for pr_name in sorted(affected_prs):
+        if _trigger_pr_repost_for_transfer_rate(pr_name, source_repost_name=doc.name):
+            triggered_count += 1
+
+    if total_updated or total_mirrored or triggered_count:
+        logger.info(
+            "Repost %s: transfer-rate sync=%s, valuation mirror=%s, PR repost triggered=%s "
+            "for %s Delivery Notes and %s PRs",
+            doc.name,
+            total_updated,
+            total_mirrored,
+            triggered_count,
+            len(dn_names),
+            len(affected_prs),
+        )
+
+    # Prevent duplicate work when Repost Item Valuation does multiple db_set updates post completion.
+    frappe.cache().set_value(cache_key, 1, expires_in_sec=6 * 60 * 60)
 
 
 def _calculate_per_billed(doc) -> int:
