@@ -265,9 +265,6 @@ doc_events = {
     },
     "Payment Request": {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
-    },
-    "Repost Item Valuation": {
-        "on_change": "business_needed_solutions.bns_branch_accounting.utils.refresh_pr_transfer_rate_after_repost"
     }
 }
 

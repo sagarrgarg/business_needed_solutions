@@ -58,10 +58,6 @@
 20. [Master Bug Registry](#20-master-bug-registry)
 21. [File Reference Index](#21-file-reference-index)
 
-**Related documentation (same folder):**
-
-- [Backdated Stock Valuation and GL Flow](BACKDATED_STOCK_VALUATION_AND_GL_FLOW.md) — What happens when a backdated stock document is submitted; how SLE and GL repost work; how Delivery Note/Sales Invoice manage item-wise valuation (incoming_rate, auto-update); BNS internal transfer note.
-
 ---
 
 ## 1. App Architecture Overview

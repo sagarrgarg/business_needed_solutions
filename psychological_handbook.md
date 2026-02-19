@@ -35,9 +35,6 @@ The app is designed to be **configurable via settings** – most features can be
 - Correct GL: Stock in Transit, Internal Transfer Account, Internal Branch Debtor Account
 
 **Constraint:** `is_bns_internal_customer` and `is_bns_internal_supplier` are the source of truth. Do not introduce parallel flags.
-**Constraint:** DN→PR remaining quantity must be computed from submitted linked PR documents (via BNS linkage), not from potentially stale `Delivery Note Item.received_qty` counters.
-
-**Transfer rate rule:** Item `bns_transfer_rate` (when used) must represent stock valuation transfer cost, not billing rate. For DN→PR pairing, source it from Delivery Note Item `incoming_rate`. For valuation-driven stock updates, mirror PR Item `valuation_rate` from `bns_transfer_rate` (without touching billing rates) and use guarded repost triggers to avoid repost storms.
 
 ### 2.2a Billing Location → Customer Address
 

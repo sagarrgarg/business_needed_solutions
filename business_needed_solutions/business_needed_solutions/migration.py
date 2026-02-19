@@ -37,10 +37,6 @@ def after_migrate():
         # Ensure sales_invoice_item exists on Purchase Receipt Item (for SI->PR partial receipt tracking)
         ensure_pr_item_sales_invoice_item_field()
 
-        # Ensure bns_transfer_rate exists on PR/PI Item (valuation mirror from source DN/SI item)
-        ensure_pr_item_bns_transfer_rate_field()
-        ensure_pi_item_bns_transfer_rate_field()
-
         # Remove old is_bns_internal_customer field from Purchase Receipt
         remove_old_pr_internal_customer_field()
 
@@ -283,71 +279,6 @@ def ensure_pr_item_sales_invoice_item_field():
             "no_copy": 1,
             "module": "BNS Branch Accounting",
             "description": "Stores source Sales Invoice Item name when PR is created from SI. Used for partial receipt tracking.",
-        })
-        cf.insert(ignore_permissions=True)
-        frappe.db.commit()
-        logger.info(f"Created Custom Field {field_name}")
-    except Exception as e:
-        logger.error(f"Error creating {field_name}: {str(e)}")
-        frappe.db.rollback()
-
-
-def ensure_pr_item_bns_transfer_rate_field():
-    """
-    Ensure Purchase Receipt Item has bns_transfer_rate.
-
-    This field stores source outgoing cost (incoming_rate) for BNS internal
-    DN -> PR flow and is intentionally separate from billing rate.
-    """
-    field_name = "Purchase Receipt Item-bns_transfer_rate"
-    if frappe.db.exists("Custom Field", field_name):
-        logger.info(f"Custom Field {field_name} already exists")
-        return
-
-    try:
-        cf = frappe.new_doc("Custom Field")
-        cf.update({
-            "dt": "Purchase Receipt Item",
-            "fieldname": "bns_transfer_rate",
-            "label": "BNS Transfer Rate",
-            "fieldtype": "Float",
-            "insert_after": "valuation_rate",
-            "read_only": 1,
-            "no_copy": 1,
-            "module": "BNS Branch Accounting",
-            "description": "Source outgoing valuation from linked Delivery Note/Sales Invoice item. Separate from billing rate.",
-        })
-        cf.insert(ignore_permissions=True)
-        frappe.db.commit()
-        logger.info(f"Created Custom Field {field_name}")
-    except Exception as e:
-        logger.error(f"Error creating {field_name}: {str(e)}")
-        frappe.db.rollback()
-
-
-def ensure_pi_item_bns_transfer_rate_field():
-    """
-    Ensure Purchase Invoice Item has bns_transfer_rate.
-
-    This is used for stock-updating PI internal transfer valuation tracking.
-    """
-    field_name = "Purchase Invoice Item-bns_transfer_rate"
-    if frappe.db.exists("Custom Field", field_name):
-        logger.info(f"Custom Field {field_name} already exists")
-        return
-
-    try:
-        cf = frappe.new_doc("Custom Field")
-        cf.update({
-            "dt": "Purchase Invoice Item",
-            "fieldname": "bns_transfer_rate",
-            "label": "BNS Transfer Rate",
-            "fieldtype": "Float",
-            "insert_after": "valuation_rate",
-            "read_only": 1,
-            "no_copy": 1,
-            "module": "BNS Branch Accounting",
-            "description": "Source outgoing valuation from linked Sales Invoice/Delivery Note item. Separate from billing rate.",
         })
         cf.insert(ignore_permissions=True)
         frappe.db.commit()

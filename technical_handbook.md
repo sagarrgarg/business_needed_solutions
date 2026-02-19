@@ -48,8 +48,6 @@ BNS extends ERPNext with:
 - **Impacted:** DN, PR, SI, PI (client JS + doc_events).
 - **Settings:** BNS Branch Accounting Settings – `stock_in_transit_account`, `internal_transfer_account`, `internal_branch_debtor_account`, `enable_internal_dn_ewaybill`.
 - **PR/PI standard fields:** BNS does **not** set standard ERPNext fields `represents_company` or `inter_company_reference` / `inter_company_invoice_reference` on Purchase Receipt or Purchase Invoice. Only BNS fields are used: `bns_inter_company_reference`, `supplier_delivery_note`, `is_bns_internal_supplier`, etc. Representing-company logic uses Customer/Supplier `bns_represents_company` (with fallback read of `represents_company` for validation only).
-- **Transfer-rate valuation chain (DN→PR):** Added item-level `bns_transfer_rate` plumbing for Purchase Receipt/Purchase Invoice items via migration helpers; DN→PR mapper sets PR item `bns_transfer_rate` from source DN item `incoming_rate`; PR submit mirrors `valuation_rate <- bns_transfer_rate` (billing rates unchanged); repost completion hook now syncs `bns_transfer_rate`, mirrors PR item valuation, and triggers guarded PR `repost_future_sle_and_gle(force=True)` so backdated DN valuation changes propagate into PR SLE/stock valuation.
-- **DN→PR pending-qty source:** DN item mapper condition no longer uses `Delivery Note Item.received_qty` to decide eligibility. Remaining qty is now determined from submitted linked Purchase Receipts via `get_received_items(...)` in `_set_missing_values`, avoiding false "already received" errors when DN item counters are stale or mismatched.
 
 ### 3.3 GST Compliance (`overrides/gst_compliance.py`)
 

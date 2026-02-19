@@ -10,6 +10,8 @@
   "column_break_accounts",
   "internal_transfer_account",
   "internal_branch_debtor_account",
+  "internal_branch_creditor_account",
+  "force_bns_internal_gl_rewrite",
   "tab_transfer_rate",
   "enable_bns_transfer_rate_sle_patch",
   "strict_bns_transfer_rate_scope",
@@ -46,6 +48,20 @@
    "fieldtype": "Link",
    "label": "Internal Branch Debtor Account",
    "options": "Account"
+  },
+  {
+   "description": "PR debits this (payable from source branch) when BNS internal DN->PR GL rewrite is applied.",
+   "fieldname": "internal_branch_creditor_account",
+   "fieldtype": "Link",
+   "label": "Internal Branch Creditor Account",
+   "options": "Account"
+  },
+  {
+   "default": "0",
+   "description": "Force BNS internal GL rewrite even when strict source checks are partially missing. Use only for controlled recovery.",
+   "fieldname": "force_bns_internal_gl_rewrite",
+   "fieldtype": "Check",
+   "label": "Force BNS Internal GL Rewrite"
   },
   {
    "fieldname": "tab_transfer_rate",
