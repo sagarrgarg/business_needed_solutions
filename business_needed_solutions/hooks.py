@@ -396,5 +396,9 @@ after_migrate = "business_needed_solutions.bns_branch_accounting.migration.after
 after_app_init = [
 	"business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.apply_patches",
 	"business_needed_solutions.business_needed_solutions.overrides.get_value_filters_fix.apply_patch",
+	"business_needed_solutions.bns_branch_accounting.utils.apply_bns_branch_accounting_runtime_patches",
 ]
+
+# Ensure DN/PR stay covered in Repost Accounting Ledger execution path.
+repost_allowed_doctypes = ["Delivery Note", "Purchase Receipt"]
 

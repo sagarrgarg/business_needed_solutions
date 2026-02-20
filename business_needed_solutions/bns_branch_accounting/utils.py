@@ -1421,11 +1421,20 @@ def _trigger_bns_internal_gl_repost(doc, source: str) -> bool:
         return False
 
 
+def apply_bns_branch_accounting_runtime_patches() -> None:
+    """
+    Ensure BNS runtime monkey-patches are applied in the current worker.
+
+    This is safe to call multiple times because each patch routine has its own idempotency guard.
+    """
+    _apply_bns_transfer_rate_stock_ledger_patch()
+    _apply_bns_internal_gl_rewrite_patch()
+    _apply_bns_repost_gl_failsafe_patch()
+    _apply_bns_repost_accounting_ledger_patch()
+
+
 # Best-effort eager patching on module import.
-_apply_bns_transfer_rate_stock_ledger_patch()
-_apply_bns_internal_gl_rewrite_patch()
-_apply_bns_repost_gl_failsafe_patch()
-_apply_bns_repost_accounting_ledger_patch()
+apply_bns_branch_accounting_runtime_patches()
 
 
 def is_bns_internal_customer(doc) -> bool:
