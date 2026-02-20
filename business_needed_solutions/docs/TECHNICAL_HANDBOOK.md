@@ -18,6 +18,7 @@
 | **link_si_pr added** — Link PR to SI when PR has different GSTIN (SI→PR flow) | `utils.py`, `purchase_receipt_form.js` | — |
 | **Link Sales Invoice button** — Shown on PR form when company_gstin ≠ supplier_gstin | `purchase_receipt_form.js` | — |
 | **SI↔PR record connections** — DocType Links + bns_purchase_receipt_reference on SI | `migration.py`, `custom_field.json`, `utils.py` | — |
+| **`bns_transfer_rate` fixtures added** — ensures PR/PI item transfer-rate fields are created on production sites via fixture import | `fixtures/custom_field.json` | Production setup missing field |
 
 ### Changes Log (v1.1)
 

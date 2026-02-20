@@ -2904,5 +2904,29 @@
   "name": "Sales Order-billing_location",
   "options": "Location",
   "description": "Set this to auto-fill Customer Address from Location's Linked Address on save (BNS customers only)."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Receipt Item",
+  "fieldname": "bns_transfer_rate",
+  "fieldtype": "Float",
+  "insert_after": "delivery_note_item",
+  "label": "BNS Transfer Rate",
+  "module": "BNS Branch Accounting",
+  "name": "Purchase Receipt Item-bns_transfer_rate",
+  "read_only": 1,
+  "description": "Internal transfer valuation rate mirrored from source Delivery Note Item incoming_rate."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Invoice Item",
+  "fieldname": "bns_transfer_rate",
+  "fieldtype": "Float",
+  "insert_after": "sales_invoice_item",
+  "label": "BNS Transfer Rate",
+  "module": "BNS Branch Accounting",
+  "name": "Purchase Invoice Item-bns_transfer_rate",
+  "read_only": 1,
+  "description": "Internal transfer valuation rate mirrored from source Sales Invoice Item for BNS internal flows."
  }
 ]
