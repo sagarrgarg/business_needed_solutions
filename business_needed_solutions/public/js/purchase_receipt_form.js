@@ -108,40 +108,7 @@ frappe.ui.form.on('Purchase Receipt', {
         
         // Link/Unlink with Delivery Note or Sales Invoice buttons
         if (frm.doc.docstatus == 1) {
-            if (frm.doc.bns_inter_company_reference) {
-                const ref = frm.doc.bns_inter_company_reference;
-                frappe.db.exists('Sales Invoice', ref).then(function(is_si) {
-                    const label = is_si ? __('Unlink Sales Invoice') : __('Unlink Delivery Note');
-                    const confirm_msg = is_si
-                        ? __('Are you sure you want to unlink this Purchase Receipt from Sales Invoice {0}?', ref)
-                        : __('Are you sure you want to unlink this Purchase Receipt from Delivery Note {0}?', ref);
-                    const method = is_si
-                        ? 'business_needed_solutions.bns_branch_accounting.utils.unlink_si_pr'
-                        : 'business_needed_solutions.bns_branch_accounting.utils.unlink_dn_pr';
-                    const args = is_si
-                        ? { sales_invoice: ref, purchase_receipt: frm.doc.name }
-                        : { purchase_receipt: frm.doc.name };
-                    frm.add_custom_button(label, function() {
-                        frappe.confirm(confirm_msg, function() {
-                            frappe.call({
-                                method: method,
-                                args: args,
-                                freeze: true,
-                                freeze_message: __('Unlinking...'),
-                                callback: function(r) {
-                                    if (!r.exc) {
-                                        frappe.show_alert({
-                                            message: r.message.message || __('Unlinked successfully'),
-                                            indicator: 'green'
-                                        });
-                                        frm.reload_doc();
-                                    }
-                                }
-                            });
-                        });
-                    }, __('Actions'));
-                });
-            } else {
+            if (!frm.doc.bns_inter_company_reference) {
                 // Show Link buttons if not linked
                 // Link Delivery Note: for same GSTIN (DN->PR flow)
                 frm.add_custom_button(__('Link Delivery Note'), function() {

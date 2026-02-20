@@ -14,6 +14,10 @@ import frappe
 from frappe import _
 from typing import Optional, List
 import logging
+from business_needed_solutions.bns_branch_accounting.utils import (
+    is_after_internal_validation_cutoff,
+    validate_internal_purchase_invoice_linkage,
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -114,6 +118,11 @@ def _validate_purchase_invoice_references(doc) -> None:
     if non_referenced_items:
         logger.warning(f"Purchase Invoice {doc.name} has non-referenced stock items: {non_referenced_items}")
         _raise_purchase_invoice_reference_error()
+
+    # Additional BNS interstate guard after cutoff:
+    # internal PI must be SI-linked or PR(SI-linked)-based; standalone PI is blocked.
+    if is_after_internal_validation_cutoff(doc.get("posting_date")):
+        validate_internal_purchase_invoice_linkage(doc)
 
 
 def _validate_sales_invoice_references(doc) -> None:

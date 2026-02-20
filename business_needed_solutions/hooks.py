@@ -71,7 +71,10 @@ doctype_js = {
               "Purchase Receipt" : ["public/js/purchase_receipt_form.js", "public/js/doctype_item_grid_controls.js"],
               
               # Warehouse
-              "Warehouse" : "public/js/warehouse.js"
+              "Warehouse" : "public/js/warehouse.js",
+
+              # BNS Branch Accounting Settings
+              "BNS Branch Accounting Settings": "bns_branch_accounting/doctype/bns_branch_accounting_settings/bns_branch_accounting_settings.js"
 }
 
 
@@ -189,13 +192,13 @@ doc_events = {
     "Customer": {
         "validate": [
             "business_needed_solutions.business_needed_solutions.overrides.pan_validation.validate_pan_uniqueness",
-            "business_needed_solutions.business_needed_solutions.overrides.bns_internal_party.enforce_bns_over_standard_internal_customer",
+            "business_needed_solutions.bns_branch_accounting.overrides.internal_party.enforce_bns_over_standard_internal_customer",
         ]
     },
     "Supplier": {
         "validate": [
             "business_needed_solutions.business_needed_solutions.overrides.pan_validation.validate_pan_uniqueness",
-            "business_needed_solutions.business_needed_solutions.overrides.bns_internal_party.enforce_bns_over_standard_internal_supplier",
+            "business_needed_solutions.bns_branch_accounting.overrides.internal_party.enforce_bns_over_standard_internal_supplier",
         ]
     },
     "Item": {
@@ -212,6 +215,7 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.overrides.billing_location.set_customer_address_from_billing_location",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_delivery_note_return"
         ],
+        "before_submit": "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.bns_branch_accounting.gst_integration.validate_internal_dn_vehicle_no",
@@ -221,10 +225,17 @@ doc_events = {
         "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.validate_delivery_note_cancellation"
     },
     "Purchase Receipt": {
+        "validate": "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
+        "before_submit": [
+            "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
+            "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage"
+        ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.bns_branch_accounting.utils.update_purchase_receipt_status_for_bns_internal"
-        ]
+        ],
+        "before_cancel": "business_needed_solutions.bns_branch_accounting.utils.ignore_parent_cancellation_links_for_bns_internal",
+        "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.unlink_references_on_purchase_cancel"
     },
     "Stock Reconciliation": {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
@@ -238,7 +249,8 @@ doc_events = {
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.bns_branch_accounting.utils.update_sales_invoice_status_for_bns_internal"
-        ]
+        ],
+        "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.cancel_linked_purchase_docs_for_sales_invoice"
     },
     "Purchase Invoice": {
         "on_submit": [
@@ -248,7 +260,9 @@ doc_events = {
         "validate": [
             "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference",
             "business_needed_solutions.business_needed_solutions.overrides.gst_compliance.validate_purchase_invoice_same_gstin"
-        ]
+        ],
+        "before_cancel": "business_needed_solutions.bns_branch_accounting.utils.ignore_parent_cancellation_links_for_bns_internal",
+        "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.unlink_references_on_purchase_cancel"
     },
     "Journal Entry": {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
@@ -307,9 +321,9 @@ fixtures = [
 # Overriding Methods
 # ------------------------------
 #
-# override_whitelisted_methods = {
-# 	"frappe.desk.doctype.event.event.get_events": "business_needed_solutions.event.get_events"
-# }
+override_whitelisted_methods = {
+	"frappe.desk.form.linked_with.get_submitted_linked_docs": "business_needed_solutions.bns_branch_accounting.overrides.cancel_dialog.get_submitted_linked_docs",
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
@@ -375,8 +389,8 @@ fixtures = [
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
 
-# Migration hook to ensure BNS settings are applied after migrations
-after_migrate = "business_needed_solutions.business_needed_solutions.migration.after_migrate"
+# Migration hook to ensure BNS branch-accounting setup is applied after migrations
+after_migrate = "business_needed_solutions.bns_branch_accounting.migration.after_migrate"
 
 # Apply patches on app initialization
 after_app_init = [

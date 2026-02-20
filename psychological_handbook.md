@@ -75,6 +75,7 @@ The app is designed to be **configurable via settings** – most features can be
 3. **Single source of truth:** BNS internal logic lives in `bns_branch_accounting/utils.py`. Re-exports from `business_needed_solutions.utils` for backward compatibility only.
 4. **India Compliance integration:** Use India Compliance APIs and address GSTIN when available. Do not duplicate GST logic.
 5. **Graceful degradation:** If a setting is off or data is missing, skip validation rather than fail. Log at debug level.
+6. **Avoid broad auto-financial writes:** Automated mass reconciliation logic was intentionally removed to reduce risk from high-impact background updates and broad whitelisted entry points.
 
 ---
 

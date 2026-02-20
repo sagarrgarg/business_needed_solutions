@@ -15,14 +15,14 @@ Matching Logic:
 
 2. SI to PI (Different GSTIN):
    - Shows Sales Invoices where Company GSTIN differs from Customer GSTIN
-   - Checks if Purchase Invoice exists via inter_company_invoice_reference
+   - Checks if Purchase Invoice exists via bns_inter_company_reference
    - Checks if quantities match between SI and PI items
 
 """
 
 import frappe
 from frappe import _
-from frappe.utils import today, flt
+from frappe.utils import today, flt, getdate
 
 # No tolerance: compare rounded values so matching SI-PI (e.g. after link_si_pi) are not falsely reported as mismatch.
 # Amounts: round to 2 decimals; qty: round to 6 decimals. This avoids float representation noise without allowing any business tolerance.
@@ -86,6 +86,8 @@ def execute(filters=None):
 	"""
 	if not filters:
 		filters = {}
+
+	filters = _apply_cutoff_filters(filters)
 	
 	columns = get_columns()
 	data = get_data(filters)
@@ -185,12 +187,199 @@ def get_data(filters=None):
 	# Get Sales Invoices with internal customers that are missing Purchase Invoices or Purchase Receipts
 	si_data = get_sales_invoice_mismatches(filters)
 	data.extend(si_data)
+
+	# Include orphan/invalid internal PR/PI rows based on linkage rules.
+	internal_purchase_mismatch_data = get_internal_purchase_doc_linkage_mismatches(filters)
+	data.extend(internal_purchase_mismatch_data)
 	
 	# Sort by posting date descending (handle None values)
 	if data:
 		data.sort(key=lambda x: x.get("posting_date") or today(), reverse=True)
 	
 	return data or []
+
+
+def _get_internal_validation_cutoff_date():
+	"""Read global posting-date cutoff from BNS Branch Accounting Settings."""
+	cutoff = frappe.db.get_single_value(
+		"BNS Branch Accounting Settings",
+		"internal_validation_cutoff_date",
+	)
+	if not cutoff:
+		return None
+	try:
+		return getdate(cutoff)
+	except Exception:
+		return None
+
+
+def _apply_cutoff_filters(filters):
+	"""Apply cutoff as default from_date when user has not provided one."""
+	filters = frappe._dict(filters or {})
+	if filters.get("from_date"):
+		return filters
+	cutoff = _get_internal_validation_cutoff_date()
+	if cutoff:
+		filters["from_date"] = cutoff
+	return filters
+
+
+def _link_flags_from_refs(*refs):
+	"""Return link flags for DN/SI from given reference values."""
+	seen = set()
+	values = []
+	for ref in refs:
+		ref = (ref or "").strip()
+		if ref and ref not in seen:
+			seen.add(ref)
+			values.append(ref)
+
+	has_dn = any(frappe.db.exists("Delivery Note", ref) for ref in values)
+	has_si = any(frappe.db.exists("Sales Invoice", ref) for ref in values)
+	return has_dn, has_si
+
+
+def _resolve_scope(company_gstin, billing_gstin, has_dn, has_si):
+	company_gstin = (company_gstin or "").strip()
+	billing_gstin = (billing_gstin or "").strip()
+	if company_gstin and billing_gstin:
+		return "same" if company_gstin == billing_gstin else "different"
+	if has_dn and not has_si:
+		return "same"
+	if has_si and not has_dn:
+		return "different"
+	return None
+
+
+def get_internal_purchase_doc_linkage_mismatches(filters=None):
+	"""Find submitted internal PR/PI rows violating PR/PI linkage rules."""
+	filters = frappe._dict(filters or {})
+	data = []
+
+	common_conditions = ["docstatus = 1", "is_bns_internal_supplier = 1"]
+	common_values = []
+	if filters.get("company"):
+		common_conditions.append("company = %s")
+		common_values.append(filters.get("company"))
+	if filters.get("from_date"):
+		common_conditions.append("posting_date >= %s")
+		common_values.append(filters.get("from_date"))
+	if filters.get("to_date"):
+		common_conditions.append("posting_date <= %s")
+		common_values.append(filters.get("to_date"))
+
+	pr_rows = frappe.db.sql(
+		f"""
+		SELECT
+			name, posting_date, grand_total, company, company_gstin, billing_address_gstin,
+			bns_inter_company_reference
+		FROM `tabPurchase Receipt`
+		WHERE {" AND ".join(common_conditions)}
+		""",
+		tuple(common_values),
+		as_dict=True,
+	) or []
+
+	for pr in pr_rows:
+		has_dn, has_si = _link_flags_from_refs(
+			pr.get("bns_inter_company_reference"),
+		)
+		scope = _resolve_scope(
+			pr.get("company_gstin"),
+			pr.get("billing_address_gstin"),
+			has_dn,
+			has_si,
+		)
+
+		reason = None
+		if has_dn and has_si:
+			reason = "PR linked to both DN and SI; only one source link is allowed."
+		elif scope == "same" and (not has_dn or has_si):
+			reason = "Same GSTIN internal PR must be linked to DN only."
+		elif scope == "different" and (has_dn or not has_si):
+			reason = "Different GSTIN internal PR must be linked to SI only (DN link not allowed)."
+		elif scope is None and not has_dn and not has_si:
+			reason = "PR has no source link; expected DN (same GSTIN) or SI (different GSTIN)."
+
+		if reason:
+			data.append(
+				{
+					"posting_date": pr.get("posting_date") or None,
+					"document_type": "Purchase Receipt",
+					"document_name": pr.get("name"),
+					"grand_total": pr.get("grand_total") or 0.0,
+					"company_address_name": "",
+					"customer_address_name": "",
+					"missing_document": "Source Link (DN/SI)",
+					"mismatch_reason": reason,
+					"purchase_receipt": pr.get("name"),
+					"purchase_invoice": None,
+				}
+			)
+
+	pi_rows = frappe.db.sql(
+		f"""
+		SELECT
+			name, posting_date, grand_total, company, company_gstin, billing_address_gstin,
+			bns_inter_company_reference
+		FROM `tabPurchase Invoice`
+		WHERE {" AND ".join(common_conditions)}
+		""",
+		tuple(common_values),
+		as_dict=True,
+	) or []
+
+	for pi in pi_rows:
+		company_gstin = (pi.get("company_gstin") or "").strip()
+		billing_gstin = (pi.get("billing_address_gstin") or "").strip()
+		if not (company_gstin and billing_gstin and company_gstin != billing_gstin):
+			continue
+
+		_, has_si_direct = _link_flags_from_refs(pi.get("bns_inter_company_reference"))
+
+		pr_names = frappe.get_all(
+			"Purchase Invoice Item",
+			filters={"parent": pi.get("name")},
+			pluck="purchase_receipt",
+		) or []
+		pr_names = sorted({(name or "").strip() for name in pr_names if name})
+
+		has_valid_pr_link = False
+		for pr_name in pr_names:
+			pr_link = frappe.db.get_value(
+				"Purchase Receipt",
+				pr_name,
+				["bns_inter_company_reference"],
+				as_dict=True,
+			)
+			if not pr_link:
+				continue
+			pr_has_dn, pr_has_si = _link_flags_from_refs(
+				pr_link.get("bns_inter_company_reference"),
+			)
+			if pr_has_si and not pr_has_dn:
+				has_valid_pr_link = True
+				break
+
+		if has_si_direct or has_valid_pr_link:
+			continue
+
+		data.append(
+			{
+				"posting_date": pi.get("posting_date") or None,
+				"document_type": "Purchase Invoice",
+				"document_name": pi.get("name"),
+				"grand_total": pi.get("grand_total") or 0.0,
+				"company_address_name": "",
+				"customer_address_name": "",
+				"missing_document": "Sales Invoice / SI-linked PR",
+				"mismatch_reason": "Different GSTIN internal PI is standalone/unlinked; must link to SI directly or via SI-linked PR.",
+				"purchase_receipt": None,
+				"purchase_invoice": pi.get("name"),
+			}
+		)
+
+	return data
 
 
 def get_delivery_note_mismatches(filters=None):
@@ -660,10 +849,6 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 	"""
 	# Check if PI exists via bns_inter_company_reference (BNS internal transfers use this field)
 	pi_name = frappe.db.get_value("Purchase Invoice", {"bns_inter_company_reference": si_name, "docstatus": 1}, "name")
-	
-	# Also check inter_company_invoice_reference for backward compatibility
-	if not pi_name:
-		pi_name = frappe.db.get_value("Purchase Invoice", {"inter_company_invoice_reference": si_name, "docstatus": 1}, "name")
 	
 	if not pi_name:
 		return {

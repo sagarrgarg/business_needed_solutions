@@ -131,7 +131,7 @@ BNS extends ERPNext with:
 
 | DocType | Purpose |
 |---------|---------|
-| BNS Settings | Global app settings (PAN, GST, stock, submission, print, reconciliation, etc.) |
+| BNS Settings | Global app settings (PAN, GST, stock, submission, print, etc.) |
 | BNS Branch Accounting Settings | Internal transfer accounts, internal DN e-Waybill |
 
 ---
@@ -149,6 +149,7 @@ BNS extends ERPNext with:
 - **test_bns_settings.py:** Tests for `warehouse_validation`, `auto_transit_validation`, `warehouse_filtering` removed — those modules never existed. Replaced with minimal `test_bns_settings_loads` test.
 - **BNS Settings:** `enable_internal_dn_ewaybill` field removed from field_order — migrated to BNS Branch Accounting Settings.
 - **PR/PI standard inter-company fields:** BNS no longer sets `represents_company` or `inter_company_reference` (PR) / `inter_company_invoice_reference` (PI) on Purchase Receipt or Purchase Invoice. All internal-transfer linking uses BNS fields only (`bns_inter_company_reference`, `supplier_delivery_note`, etc.). Removed from: DN→PR mapping, PR status update on_submit, PI status update on_submit.
+- **FIFO auto payment reconciliation system:** Removed end-to-end from BNS Settings and backend service. Deleted `auto_payment_reconcile.py`, removed manual "Run FIFO Reconciliation" action from `doctype/bns_settings/bns_settings.js`, and removed reconciliation fields from `doctype/bns_settings/bns_settings.json` (`enable_auto_fifo_reconciliation`, `include_future_payments_in_reconciliation`, `reconciliation_batch_size`, `last_reconciliation_run`, `last_reconciliation_status`).
 
 ---
 

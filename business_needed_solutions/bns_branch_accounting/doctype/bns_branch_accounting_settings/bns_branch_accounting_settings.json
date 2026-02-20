@@ -12,9 +12,7 @@
   "internal_branch_debtor_account",
   "internal_branch_creditor_account",
   "force_bns_internal_gl_rewrite",
-  "tab_transfer_rate",
-  "enable_bns_transfer_rate_sle_patch",
-  "strict_bns_transfer_rate_scope",
+  "internal_validation_cutoff_date",
   "tab_ewaybill",
   "enable_internal_dn_ewaybill"
  ],
@@ -64,23 +62,10 @@
    "label": "Force BNS Internal GL Rewrite"
   },
   {
-   "fieldname": "tab_transfer_rate",
-   "fieldtype": "Tab Break",
-   "label": "Transfer Rate"
-  },
-  {
-   "default": "1",
-   "description": "Enable BNS patch to use PR Item bns_transfer_rate for valuation during repost and SLE recalculation in DN->PR same GSTIN internal flow.",
-   "fieldname": "enable_bns_transfer_rate_sle_patch",
-   "fieldtype": "Check",
-   "label": "Enable BNS Transfer Rate SLE Patch"
-  },
-  {
-   "default": "1",
-   "description": "When enabled, patch applies only under strict scope: PR + DN-linked + internal supplier + same GSTIN + valid item linkage.",
-   "fieldname": "strict_bns_transfer_rate_scope",
-   "fieldtype": "Check",
-   "label": "Strict Transfer Rate Scope Guard"
+   "description": "Apply internal linkage validations and mismatch checks only on or after this posting date. Legacy data before this date is ignored.",
+   "fieldname": "internal_validation_cutoff_date",
+   "fieldtype": "Date",
+   "label": "Internal Validation Cutoff Date"
   },
   {
    "fieldname": "tab_ewaybill",

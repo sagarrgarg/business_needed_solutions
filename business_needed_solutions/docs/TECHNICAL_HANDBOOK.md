@@ -19,6 +19,10 @@
 | **Link Sales Invoice button** — Shown on PR form when company_gstin ≠ supplier_gstin | `purchase_receipt_form.js` | — |
 | **SI↔PR record connections** — DocType Links + bns_purchase_receipt_reference on SI | `migration.py`, `custom_field.json`, `utils.py` | — |
 | **`bns_transfer_rate` fixtures added** — ensures PR/PI item transfer-rate fields are created on production sites via fixture import | `fixtures/custom_field.json` | Production setup missing field |
+| **Asymmetric cancellation policy enforced** — PR/PI cancel only unlinks references; SI/DN cancel cascades and cancels linked purchase docs | `hooks.py`, `utils.py` | Linked-doc cancellation direction mismatch |
+| **Cancel popup filtering override** — hides DN/SI from PR/PI "Cancel All Documents" dialog using whitelisted method override | `hooks.py`, `bns_branch_accounting/overrides/cancel_dialog.py` | PR/PI still prompting to cancel parent docs |
+| **Branch-accounting module boundary cleanup** — moved internal-transfer migration hook and internal party exclusivity enforcement into `bns_branch_accounting`; moved bulk-convert UI action from `BNS Settings` to `BNS Branch Accounting Settings` | `hooks.py`, `bns_branch_accounting/migration.py`, `bns_branch_accounting/overrides/internal_party.py`, `bns_branch_accounting/doctype/bns_branch_accounting_settings/bns_branch_accounting_settings.js`, `doctype/bns_settings/bns_settings.js` | Internal-transfer logic scattered outside branch-accounting module |
+| **FIFO auto payment reconciliation removed** — deleted backend reconcile service and removed BNS Settings UI/config fields for FIFO reconcile | `auto_payment_reconcile.py` (deleted), `doctype/bns_settings/bns_settings.js`, `doctype/bns_settings/bns_settings.json` | Removed high-risk broad reconciliation surface |
 
 ### Changes Log (v1.1)
 
@@ -48,7 +52,6 @@
 9. [Functional Area 8: Item Validation](#9-item-validation)
 10. [Functional Area 9: Stock Update/Reference Validation](#10-stock-updatereference-validation)
 11. [Functional Area 10: BOM Component Qty Variance](#11-bom-component-qty-variance)
-12. [Functional Area 11: Auto Payment Reconciliation (FIFO)](#12-auto-payment-reconciliation)
 13. [Functional Area 12: Direct Print System](#13-direct-print-system)
 14. [Functional Area 13: UOM Restriction & Conversion Overlay](#14-uom-restriction--conversion-overlay)
 15. [Functional Area 14: Custom Reports (11 Reports)](#15-custom-reports)
@@ -592,40 +595,7 @@ When purpose is "Manufacture" and enforcement is on, `bom_no` and `from_bom` are
 
 ## 12. Auto Payment Reconciliation
 
-### Purpose
-Automatically reconciles outstanding invoices with unallocated payments using FIFO (First-In-First-Out) matching — oldest invoices matched with oldest payments first.
-
-### How It Works
-```
-Trigger: Scheduled job OR manual @frappe.whitelist() call
-├── For each company:
-│   ├── For each party_type (Customer, Supplier):
-│   │   ├── Find parties with unreconciled balances
-│   │   ├── For each party:
-│   │   │   ├── Gather: unallocated payment entries + journal entries + DR/CR notes
-│   │   │   ├── Gather: outstanding invoices
-│   │   │   ├── Run FIFO allocation
-│   │   │   ├── Apply: reconcile_against_document() for payments
-│   │   │   └── Apply: reconcile_dr_cr_note() for returns
-```
-
-### Files Involved
-- `auto_payment_reconcile.py` (687 lines)
-- `BNS Settings` — toggle + configuration fields
-
-### Settings
-- `enable_auto_fifo_reconciliation` — master toggle
-- `include_future_payments_in_reconciliation` — include post-dated payments
-- `reconciliation_batch_size` — max allocations per party
-
-### Bugs in This Area
-
-| ID | Severity | Description |
-|----|----------|-------------|
-| BNS-REC-001 | **HIGH** | `reconcile_all_parties` is `@frappe.whitelist()` but has no permission check. Any authenticated user can trigger mass reconciliation across all parties. |
-| BNS-REC-002 | **HIGH** | `allocate_fifo` mutates input invoice dicts in-place (`inv["outstanding_amount"] = inv_outstanding - allocated`). The `get_reconciliation_preview` function does `list(invoices)` which creates a new list but shares the same dict objects — preview mutates the same data that actual reconciliation would use. |
-| BNS-REC-003 | **MEDIUM** | Hardcoded `limit=1000` on multiple queries — businesses with >1000 outstanding invoices or payments will have some silently skipped. |
-| BNS-REC-004 | **LOW** | No idempotency guard per-party — `is_job_enqueued` check is per-company, not per-party. Overlapping scheduled runs could double-reconcile. |
+Removed from the app. FIFO auto payment reconciliation backend, BNS Settings fields, and the manual run action were intentionally deleted.
 
 ---
 
@@ -764,9 +734,6 @@ Central configuration hub for all BNS features. Single DocType (singleton) that 
 | `enable_bns_variance_qty` | Check | BOM variance tolerance (±% instead of strict equality) |
 | `bns_default_variance_qty` | Percent | Default variance % when per-item variance not set |
 | `enable_custom_update_items_po_so` | Check | Custom Update Items on SO/PO |
-| `enable_auto_fifo_reconciliation` | Check | Auto payment reconciliation |
-| `include_future_payments_in_reconciliation` | Check | Include future payments in reconciliation |
-| `reconciliation_batch_size` | Int | Max allocations per party |
 
 ### Controller: `bns_settings.py`
 - `on_update()` — calls `apply_settings()` when `discount_type` changes
@@ -853,7 +820,7 @@ When `discount_type = "Triple"`:
 | ~~BNS-BOM-001~~ | ~~BOM Variance~~ | **FIXED** — `override_doctype_class` was commented out. Now active with BOM enforcement + `from_bom` mandatory + client-side red highlighting |
 | BNS-INT-001 | Internal Transfer | `utils.py` lines 213-217 unreachable dead code — `parent_doctype` null-guard never runs |
 
-### Severity: HIGH (10)
+### Severity: HIGH (9)
 
 | ID | Area | Description |
 |----|------|-------------|
@@ -864,12 +831,11 @@ When `discount_type = "Triple"`:
 | BNS-NEG-002 | Negative Stock | `actual_qty` double-counted in patched validate_negative_stock |
 | BNS-UPD-002 | Update Items | No database lock — concurrent calls cause race conditions |
 | BNS-SUB-001 | Submission | Three categories share same toggle/roles — category system is non-functional |
-| BNS-REC-001 | Reconciliation | `reconcile_all_parties` has no permission check |
 | BNS-RPT-001 | Reports | 9 redundant `NOT IN` subqueries in Negative Episodes report |
 | BNS-RPT-002 | Reports | Duplicate `remarks` column in Bank GL / Party GL |
 | BNS-RPT-003 | Reports | Bank GL 4x DB queries per GL entry for party detection |
 
-### Severity: MEDIUM (14)
+### Severity: MEDIUM (12)
 
 | ID | Area | Description |
 |----|------|-------------|
@@ -883,8 +849,6 @@ When `discount_type = "Triple"`:
 | BNS-STOCK-001 | Stock Validation | Error messages don't identify which items |
 | BNS-STOCK-002 | Stock Validation | N+1 query per item row |
 | BNS-NEG-003 | Negative Stock | Triple-redundant validation per transaction |
-| BNS-REC-002 | Reconciliation | FIFO allocator mutates input dicts |
-| BNS-REC-003 | Reconciliation | Hardcoded 1000 limit |
 | BNS-RPT-004 | Reports | Hardcoded fallback fiscal year 2023-24 |
 | BNS-RPT-005 | Reports | Account query inside loop |
 | BNS-RPT-006 | Reports | Zero-balance episodes skipped + infinity display |
@@ -892,7 +856,7 @@ When `discount_type = "Triple"`:
 | BNS-GST-003 | GST | E-Waybill failures silently swallowed |
 | BNS-SUB-002 | Submission | Module-level translations |
 
-### Severity: LOW (16)
+### Severity: LOW (15)
 
 | ID | Area | Description |
 |----|------|-------------|
@@ -908,7 +872,6 @@ When `discount_type = "Triple"`:
 | BNS-SUB-003 | Submission | Dead custom exception class |
 | BNS-SUB-004 | Submission | Unused legacy wrappers |
 | BNS-NEG-004 | Negative Stock | `get_or_make_bin` side effect |
-| BNS-REC-004 | Reconciliation | No per-party idempotency |
 | BNS-RPT-007 | Reports | Set literal for fields |
 | BNS-RPT-008 | Reports | XSS in unlinked report buttons |
 | BNS-RPT-009 | Reports | False episode detection |
@@ -937,7 +900,6 @@ When `discount_type = "Triple"`:
 | Stock | `overrides/warehouse_negative_stock.py` | 376 | Per-warehouse negative stock |
 | BOM | `overrides/stock_entry_component_qty_variance.py` | 336 | BOM enforcement + variance tolerance (active via `override_doctype_class`) |
 | Update Items | `overrides/update_items.py` | 635 | Custom SO/PO update items |
-| Reconciliation | `auto_payment_reconcile.py` | 687 | FIFO auto-reconciliation |
 | Migration | `migration.py` | 239 | Post-migration setup |
 | Patch | `patch/stock_entry_patch.py` | ~50 | Stock entry data migration |
 | Test | `test_submission_restriction.py` | 271 | Manual test script |
