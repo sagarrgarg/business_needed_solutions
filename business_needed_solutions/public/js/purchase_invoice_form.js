@@ -23,10 +23,7 @@ frappe.ui.form.on('Purchase Invoice', {
         // Pre-populate link title cache SYNCHRONOUSLY so Link controls never request missing docs.
         if (!frappe._link_titles) frappe._link_titles = {};
 
-        var siRefs = [
-            frm.doc.bns_inter_company_reference,
-            frm.doc.inter_company_invoice_reference
-        ].filter(Boolean);
+        var siRefs = [frm.doc.bns_inter_company_reference].filter(Boolean);
         siRefs.forEach(function(siName) {
             frappe._link_titles['Sales Invoice::' + siName] = siName;
         });

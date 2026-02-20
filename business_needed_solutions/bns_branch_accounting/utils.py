@@ -2376,24 +2376,28 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
         return
 
     try:
-        # Check if PR is from DN (same GSTIN) or SI (different GSTIN)
-        # Check supplier_delivery_note to determine source
-        is_bns_internal = is_bns_internal_supplier(doc)
+        # Canonical-first source resolution:
+        # 1) bns_inter_company_reference (authoritative)
+        # 2) supplier_delivery_note (legacy fallback only when canonical ref is absent)
+        source_dn = None
+        source_si = None
+        canonical_ref = (doc.get("bns_inter_company_reference") or "").strip()
+        legacy_ref = (doc.get("supplier_delivery_note") or "").strip()
 
-        # If supplier_delivery_note exists, check if it's a DN or SI
-        if doc.supplier_delivery_note:
-            # Check if supplier_delivery_note is a DN
-            dn_exists = frappe.db.exists("Delivery Note", doc.supplier_delivery_note)
-            if dn_exists:
-                # From DN - same GSTIN
-                is_bns_internal = True
-                # Do not set standard represents_company on PR; use BNS fields only.
-            else:
-                # Check if it's a Sales Invoice
-                si_exists = frappe.db.exists("Sales Invoice", doc.supplier_delivery_note)
-                if si_exists:
-                    # From SI - different GSTIN
-                    is_bns_internal = False
+        if canonical_ref:
+            if frappe.db.exists("Delivery Note", canonical_ref):
+                source_dn = canonical_ref
+            elif frappe.db.exists("Sales Invoice", canonical_ref):
+                source_si = canonical_ref
+        elif legacy_ref:
+            if frappe.db.exists("Delivery Note", legacy_ref):
+                source_dn = legacy_ref
+            elif frappe.db.exists("Sales Invoice", legacy_ref):
+                source_si = legacy_ref
+
+        # Same GSTIN/DN source => internal supplier flag on PR.
+        # Different GSTIN/SI source => not internal supplier for PR.
+        is_bns_internal = bool(source_dn)
         
         # Update is_bns_internal_supplier field
         if is_bns_internal != doc.get("is_bns_internal_supplier"):
@@ -2406,15 +2410,15 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
             doc.db_set("per_billed", per_billed, update_modified=False)
             doc.db_set("is_bns_internal_supplier", 1, update_modified=False)
             # Keep item-level BNS transfer rates aligned with DN item incoming_rate.
-            if doc.supplier_delivery_note and frappe.db.exists("Delivery Note", doc.supplier_delivery_note):
-                _sync_pr_item_transfer_rate_from_dn(doc.supplier_delivery_note, pr_name=doc.name)
+            if source_dn:
+                _sync_pr_item_transfer_rate_from_dn(source_dn, pr_name=doc.name)
                 _mirror_pr_item_valuation_from_transfer_rate(doc.name)
             # Ensure GL gets rebuilt with BNS rewrite even if initial submit happened
             # before patch load in this process.
             _trigger_bns_internal_gl_repost(doc, source="pr_on_submit_status_update")
             # Ensure Delivery Note is updated with linked PR (bidirectional link)
-            if doc.supplier_delivery_note and frappe.db.exists("Delivery Note", doc.supplier_delivery_note):
-                _update_delivery_note_reference(doc.supplier_delivery_note, doc.name)
+            if source_dn:
+                _update_delivery_note_reference(source_dn, doc.name)
                 frappe.clear_cache(doctype="Delivery Note")
             frappe.clear_cache(doctype="Purchase Receipt")
             logger.info(f"Updated Purchase Receipt {doc.name} status to BNS Internally Transferred (from DN)")
@@ -4421,9 +4425,27 @@ def ignore_parent_cancellation_links_for_bns_internal(doc, method: Optional[str]
     - Cancelling DN/SI should still be allowed to cancel linked PR/PI.
     """
     if doc.doctype == "Purchase Receipt":
-        ignore_linked_doctypes = ["Delivery Note", "Sales Invoice"]
+        ignore_linked_doctypes = [
+            # Keep core PR cancel ignores
+            "GL Entry",
+            "Stock Ledger Entry",
+            "Repost Item Valuation",
+            "Serial and Batch Bundle",
+            # BNS parent-link policy
+            "Delivery Note",
+            "Sales Invoice",
+            # Payment-ledger link safety
+            "Payment Ledger Entry",
+            "Advance Payment Ledger Entry",
+        ]
     elif doc.doctype == "Purchase Invoice":
-        ignore_linked_doctypes = ["Sales Invoice"]
+        ignore_linked_doctypes = [
+            # Keep accounting-link safety consistent
+            "GL Entry",
+            "Sales Invoice",
+            "Payment Ledger Entry",
+            "Advance Payment Ledger Entry",
+        ]
     else:
         return
 
@@ -4439,6 +4461,10 @@ def unlink_references_on_purchase_cancel(doc, method: Optional[str] = None) -> N
     - Cancel PR/PI -> unlink references on both sides.
     - Cancel SI/DN -> handled by dedicated parent-side cascade methods.
     """
+    # Re-apply ignore list after core on_cancel execution.
+    # ERPNext checks backlinks after all on_cancel handlers, so this must be set here too.
+    ignore_parent_cancellation_links_for_bns_internal(doc, method=method)
+
     if doc.docstatus != 2:
         return
 
