@@ -32,7 +32,7 @@ The app is designed to be **configurable via settings** – most features can be
 
 - DN → PR (stock movement)
 - SI → PI (invoice flow)
-- Correct GL: Stock in Transit, Internal Transfer Account, Internal Branch Debtor Account
+- Correct GL: Stock in Transit, Internal Sales Transfer Account (DN), Internal Purchase Transfer Account (PR), Internal Branch Debtor/Creditor Accounts
 
 **Constraint:** `is_bns_internal_customer` and `is_bns_internal_supplier` are the source of truth. Do not introduce parallel flags.
 

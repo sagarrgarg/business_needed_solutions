@@ -31,11 +31,76 @@ def after_migrate() -> None:
         ensure_pr_item_sales_invoice_item_field()
         remove_old_pr_internal_customer_field()
         disable_pi_update_stock_mandatory_script()
+        initialize_bns_repost_tracking_state()
+        migrate_split_internal_transfer_accounts()
 
         logger.info("BNS Branch Accounting post-migration setup completed successfully")
 
     except Exception as e:
         logger.error("Error in BNS Branch Accounting post-migration setup: %s", str(e))
+
+
+def initialize_bns_repost_tracking_state() -> None:
+    """Normalize stale lock rows in BNS Repost Tracking after migration."""
+    doctype = "BNS Repost Tracking"
+    if not frappe.db.exists("DocType", doctype) or not frappe.db.table_exists(doctype):
+        return
+    try:
+        stale_rows = frappe.get_all(
+            doctype,
+            filters={"status": "In Progress", "lock_expires_at": ["<", frappe.utils.now_datetime()]},
+            fields=["name"],
+            limit_page_length=0,
+        )
+        for row in stale_rows:
+            frappe.db.set_value(
+                doctype,
+                row.name,
+                {
+                    "status": "Failed",
+                    "last_error": "Marked failed during migration init due to expired lock.",
+                    "lock_expires_at": None,
+                },
+                update_modified=True,
+            )
+    except Exception as e:
+        logger.warning("Could not initialize BNS Repost Tracking state: %s", str(e))
+
+
+def migrate_split_internal_transfer_accounts() -> None:
+    """Backfill split DN/PR transfer accounts from legacy shared field."""
+    try:
+        settings_doctype = "BNS Branch Accounting Settings"
+        legacy_value = (frappe.db.get_single_value(settings_doctype, "internal_transfer_account") or "").strip()
+        if not legacy_value:
+            return
+
+        sales_value = (
+            frappe.db.get_single_value(settings_doctype, "internal_sales_transfer_account") or ""
+        ).strip()
+        purchase_value = (
+            frappe.db.get_single_value(settings_doctype, "internal_purchase_transfer_account") or ""
+        ).strip()
+
+        updates = {}
+        if not sales_value:
+            updates["internal_sales_transfer_account"] = legacy_value
+        if not purchase_value:
+            updates["internal_purchase_transfer_account"] = legacy_value
+
+        if not updates:
+            return
+
+        for fieldname, value in updates.items():
+            frappe.db.set_single_value(settings_doctype, fieldname, value)
+        frappe.db.commit()
+        logger.info(
+            "Backfilled split transfer account settings from legacy field: %s",
+            ", ".join(sorted(updates.keys())),
+        )
+    except Exception as e:
+        logger.warning("Could not backfill split transfer accounts: %s", str(e))
+        frappe.db.rollback()
 
 
 def add_bns_status_option() -> None:

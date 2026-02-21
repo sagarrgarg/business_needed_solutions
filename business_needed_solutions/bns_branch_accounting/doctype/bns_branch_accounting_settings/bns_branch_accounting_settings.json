@@ -8,6 +8,8 @@
   "accounts_section",
   "stock_in_transit_account",
   "column_break_accounts",
+  "internal_sales_transfer_account",
+  "internal_purchase_transfer_account",
   "internal_transfer_account",
   "internal_branch_debtor_account",
   "internal_branch_creditor_account",
@@ -34,9 +36,24 @@
    "fieldtype": "Column Break"
   },
   {
+   "description": "DN uses this account for same-GSTIN internal transfer GL rewrite (sales side).",
+   "fieldname": "internal_sales_transfer_account",
+   "fieldtype": "Link",
+   "label": "Internal Sales Transfer Account",
+   "options": "Account"
+  },
+  {
+   "description": "PR uses this account for same-GSTIN internal transfer GL rewrite (purchase side).",
+   "fieldname": "internal_purchase_transfer_account",
+   "fieldtype": "Link",
+   "label": "Internal Purchase Transfer Account",
+   "options": "Account"
+  },
+  {
    "description": "SI credits this instead of income account; PI debits this instead of expense account when is_bns_internal.",
    "fieldname": "internal_transfer_account",
    "fieldtype": "Link",
+   "hidden": 1,
    "label": "Internal Transfer Account",
    "options": "Account"
   },

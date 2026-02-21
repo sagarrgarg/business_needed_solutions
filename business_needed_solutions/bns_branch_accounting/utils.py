@@ -13,19 +13,42 @@ from frappe import _
 from frappe.model.mapper import get_mapped_doc
 from frappe.contacts.doctype.address.address import get_company_address
 from erpnext.accounts.doctype.sales_invoice.sales_invoice import update_address, update_taxes
-from frappe.utils import flt, cint, get_link_to_form, getdate
+from frappe.utils import flt, cint, get_link_to_form, getdate, add_to_date, now_datetime
 from frappe import bold
 from typing import Optional, Dict, Any, List, Tuple, Set
 from collections import defaultdict
 import logging
+import json
+import time
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+
+def _bns_debug_log(hypothesis_id: str, location: str, message: str, data: Optional[Dict[str, Any]] = None) -> None:
+    """Append one NDJSON debug line for runtime investigation."""
+    try:
+        payload = {
+            "runId": "run1",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data or {},
+            "timestamp": int(time.time() * 1000),
+        }
+        with open("/home/ubuntu/frappe-bench-new/.cursor/debug.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
 
 _BNS_INTERNAL_GL_PATCHED = False
 _BNS_REPOST_GL_FAILSAFE_PATCHED = False
 _BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED = False
 _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = False
+_BNS_REPOST_TRACKING_DTYPE = "BNS Repost Tracking"
+_BNS_REPOST_STATUS_IN_PROGRESS = "In Progress"
+_BNS_REPOST_STATUS_PROCESSED = "Processed"
+_BNS_REPOST_STATUS_FAILED = "Failed"
 
 
 def _get_bns_transfer_rate_for_pr_sle(sle) -> float:
@@ -124,13 +147,27 @@ def _apply_bns_transfer_rate_stock_ledger_patch() -> None:
 
 def _get_bns_branch_accounting_accounts() -> Dict[str, Any]:
     """Get BNS Branch Accounting account settings required for GL rewrite."""
+    legacy_internal_transfer_account = (
+        frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_transfer_account") or ""
+    ).strip()
     settings = {
         "stock_in_transit_account": frappe.db.get_single_value(
             "BNS Branch Accounting Settings", "stock_in_transit_account"
         ),
-        "internal_transfer_account": frappe.db.get_single_value(
-            "BNS Branch Accounting Settings", "internal_transfer_account"
+        "internal_sales_transfer_account": (
+            frappe.db.get_single_value(
+                "BNS Branch Accounting Settings", "internal_sales_transfer_account"
+            )
+            or legacy_internal_transfer_account
         ),
+        "internal_purchase_transfer_account": (
+            frappe.db.get_single_value(
+                "BNS Branch Accounting Settings", "internal_purchase_transfer_account"
+            )
+            or legacy_internal_transfer_account
+        ),
+        # Keep legacy field readable during transition only.
+        "internal_transfer_account": legacy_internal_transfer_account,
         "internal_branch_debtor_account": frappe.db.get_single_value(
             "BNS Branch Accounting Settings", "internal_branch_debtor_account"
         ),
@@ -144,7 +181,6 @@ def _get_bns_branch_accounting_accounts() -> Dict[str, Any]:
 
     required = (
         "stock_in_transit_account",
-        "internal_transfer_account",
         "internal_branch_debtor_account",
         "internal_branch_creditor_account",
     )
@@ -186,17 +222,29 @@ def validate_bns_internal_accounting_settings_for_dn_pr(
     if not _is_bns_internal_dn_pr_scope(doc):
         return
 
+    legacy_internal_transfer_account = (
+        frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_transfer_account") or ""
+    ).strip()
+
     required_fields = {
-        "internal_transfer_account": _("Internal Transfer Account"),
         "stock_in_transit_account": _("Stock in Transit Account"),
         "internal_branch_debtor_account": _("Internal Branch Debtor Account"),
         "internal_branch_creditor_account": _("Internal Branch Creditor Account"),
     }
+    if doc.doctype == "Delivery Note":
+        required_fields["internal_sales_transfer_account"] = _("Internal Sales Transfer Account")
+    elif doc.doctype == "Purchase Receipt":
+        required_fields["internal_purchase_transfer_account"] = _("Internal Purchase Transfer Account")
 
     configured = {
         fieldname: (frappe.db.get_single_value("BNS Branch Accounting Settings", fieldname) or "").strip()
         for fieldname in required_fields
     }
+    # Transition fallback: if new split fields are empty, allow legacy field value.
+    if "internal_sales_transfer_account" in configured and not configured["internal_sales_transfer_account"]:
+        configured["internal_sales_transfer_account"] = legacy_internal_transfer_account
+    if "internal_purchase_transfer_account" in configured and not configured["internal_purchase_transfer_account"]:
+        configured["internal_purchase_transfer_account"] = legacy_internal_transfer_account
     missing = [required_fields[f] for f, value in configured.items() if not value]
 
     invalid_messages = []
@@ -778,6 +826,9 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     settings = _get_bns_branch_accounting_accounts()
     if not settings:
         return gl_entries
+    if not settings.get("internal_sales_transfer_account"):
+        logger.warning("Skipping DN GL rewrite for %s due to missing internal_sales_transfer_account", doc.name)
+        return gl_entries
 
     force_mode = bool(settings.get("force_bns_internal_gl_rewrite"))
     transfer_amount, transfer_reason = _resolve_dn_transfer_amount(doc, force_mode=force_mode)
@@ -801,9 +852,9 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         return gl_entries
 
     rewritten = [
-        _make_bns_gl_entry(doc, settings["internal_branch_debtor_account"], debit=transfer_amount, against=settings["internal_transfer_account"], template=template),
+        _make_bns_gl_entry(doc, settings["internal_branch_debtor_account"], debit=transfer_amount, against=settings["internal_sales_transfer_account"], template=template),
         _make_bns_gl_entry(doc, settings["stock_in_transit_account"], debit=valuation_amount, against=stock_account, template=template),
-        _make_bns_gl_entry(doc, settings["internal_transfer_account"], credit=transfer_amount, against=settings["internal_branch_debtor_account"], template=template),
+        _make_bns_gl_entry(doc, settings["internal_sales_transfer_account"], credit=transfer_amount, against=settings["internal_branch_debtor_account"], template=template),
         _make_bns_gl_entry(doc, stock_account, credit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
     ]
 
@@ -823,6 +874,9 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
 
     settings = _get_bns_branch_accounting_accounts()
     if not settings:
+        return gl_entries
+    if not settings.get("internal_purchase_transfer_account"):
+        logger.warning("Skipping PR GL rewrite for %s due to missing internal_purchase_transfer_account", doc.name)
         return gl_entries
 
     force_mode = bool(settings.get("force_bns_internal_gl_rewrite"))
@@ -847,9 +901,9 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         return gl_entries
 
     rewritten = [
-        _make_bns_gl_entry(doc, settings["internal_transfer_account"], debit=transfer_amount, against=settings["internal_branch_creditor_account"], template=template),
+        _make_bns_gl_entry(doc, settings["internal_purchase_transfer_account"], debit=transfer_amount, against=settings["internal_branch_creditor_account"], template=template),
         _make_bns_gl_entry(doc, stock_account, debit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
-        _make_bns_gl_entry(doc, settings["internal_branch_creditor_account"], credit=transfer_amount, against=settings["internal_transfer_account"], template=template),
+        _make_bns_gl_entry(doc, settings["internal_branch_creditor_account"], credit=transfer_amount, against=settings["internal_purchase_transfer_account"], template=template),
         _make_bns_gl_entry(doc, settings["stock_in_transit_account"], credit=valuation_amount, against=stock_account, template=template),
     ]
 
@@ -904,6 +958,14 @@ def _run_bns_gl_repost_correction(doc, force_override: bool = False) -> None:
     """Re-run repost GLE only for scoped DN/PR vouchers as failsafe."""
     cache_key = f"bns_gl_repost_correction::{doc.name}"
     if not force_override and frappe.cache().get_value(cache_key):
+        # region agent log
+        _bns_debug_log(
+            "H3",
+            "utils.py:_run_bns_gl_repost_correction",
+            "Skipped by repost_item_valuation cache key",
+            {"doc": doc.name, "cache_key": cache_key},
+        )
+        # endregion
         return
 
     scoped_vouchers: Set[Tuple[str, str]] = set()
@@ -931,61 +993,75 @@ def _run_bns_gl_repost_correction(doc, force_override: bool = False) -> None:
         ):
             continue
         voucher_doc = frappe.get_doc(voucher_type, voucher_no)
-        if voucher_type == "Delivery Note" and _is_bns_internal_same_gstin_delivery_note(voucher_doc):
+        if voucher_type == "Delivery Note":
+            is_scope = _is_bns_internal_same_gstin_delivery_note(voucher_doc)
+            # region agent log
+            _bns_debug_log(
+                "H2",
+                "utils.py:_run_bns_gl_repost_correction",
+                "Evaluated DN scope for repost_item_valuation",
+                {"doc": doc.name, "voucher_no": voucher_no, "is_scope": is_scope},
+            )
+            # endregion
+            if is_scope:
+                filtered_vouchers.append((voucher_type, voucher_no))
+        elif voucher_type == "Purchase Receipt" and _is_bns_internal_same_gstin_purchase_receipt(
+            voucher_doc
+        ):
             filtered_vouchers.append((voucher_type, voucher_no))
-        elif voucher_type == "Purchase Receipt" and _is_bns_internal_same_gstin_purchase_receipt(voucher_doc):
-            filtered_vouchers.append((voucher_type, voucher_no))
+    # region agent log
+    _bns_debug_log(
+        "H4",
+        "utils.py:_run_bns_gl_repost_correction",
+        "Repost item valuation correction prepared voucher lists",
+        {
+            "doc": doc.name,
+            "scoped_count": len(scoped_vouchers),
+            "filtered_count": len(filtered_vouchers),
+            "force_override": bool(force_override),
+        },
+    )
+    # endregion
 
     if filtered_vouchers:
-        _apply_bns_internal_gl_rewrite_patch()
-        settings = _get_bns_branch_accounting_accounts()
-        force_mode = bool(settings and settings.get("force_bns_internal_gl_rewrite")) or bool(force_override)
-        if force_mode:
-            rebuilt = 0
-            for voucher_type, voucher_no in filtered_vouchers:
-                if _force_rebuild_bns_gl_for_voucher(
-                    voucher_type, voucher_no, context="repost_item_valuation"
-                ):
-                    rebuilt += 1
-                    if not force_override:
-                        _mark_bns_repost_voucher_processed(
-                            "repost_item_valuation", doc.name, voucher_type, voucher_no
-                        )
-            logger.info(
-                "BNS repost GL force-rebuild applied for repost %s on %s/%s vouchers",
-                doc.name,
-                rebuilt,
-                len(filtered_vouchers),
-            )
-        else:
-            from erpnext.accounts.utils import repost_gle_for_stock_vouchers
-
-            before_counts = {
-                (voucher_type, voucher_no): _get_ledger_row_counts_for_voucher(voucher_type, voucher_no)
-                for voucher_type, voucher_no in filtered_vouchers
-            }
-            repost_gle_for_stock_vouchers(filtered_vouchers, doc.posting_date, doc.company, repost_doc=doc)
-            for voucher_type, voucher_no in filtered_vouchers:
-                after_counts = _get_ledger_row_counts_for_voucher(voucher_type, voucher_no)
-                logger.info(
-                    "BNS repost audit %s",
-                    frappe.as_json(
-                        {
-                            "scope": "repost_item_valuation",
-                            "mode": "repost_gle_for_stock_vouchers",
-                            "repost_doc": doc.name,
-                            "voucher_type": voucher_type,
-                            "voucher_no": voucher_no,
-                            "before_count": before_counts[(voucher_type, voucher_no)],
-                            "after_count": after_counts,
-                        }
-                    ),
-                )
-                if not force_override:
-                    _mark_bns_repost_voucher_processed(
-                        "repost_item_valuation", doc.name, voucher_type, voucher_no
-                    )
-            logger.info("BNS repost GL failsafe applied for repost %s on %s vouchers", doc.name, len(filtered_vouchers))
+        scope = "repost_item_valuation"
+        repost_doc_name = doc.name
+        claimed = []
+        for voucher_type, voucher_no in filtered_vouchers:
+            if _claim_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no):
+                claimed.append((voucher_type, voucher_no))
+        if claimed:
+            _apply_bns_internal_gl_rewrite_patch()
+            settings = _get_bns_branch_accounting_accounts()
+            force_mode = bool(settings and settings.get("force_bns_internal_gl_rewrite")) or bool(force_override)
+            try:
+                if force_mode:
+                    rebuilt = 0
+                    for voucher_type, voucher_no in claimed:
+                        if _force_rebuild_bns_gl_for_voucher(
+                            voucher_type, voucher_no, context="repost_item_valuation"
+                        ):
+                            rebuilt += 1
+                            if not force_override:
+                                _mark_bns_repost_voucher_processed(scope, repost_doc_name, voucher_type, voucher_no)
+                    logger.info("BNS repost GL force-rebuild applied for repost %s on %s/%s vouchers", doc.name, rebuilt, len(claimed))
+                else:
+                    from erpnext.accounts.utils import repost_gle_for_stock_vouchers
+                    before_counts = {(vt, vn): _get_ledger_row_counts_for_voucher(vt, vn) for vt, vn in claimed}
+                    repost_gle_for_stock_vouchers(claimed, doc.posting_date, doc.company, repost_doc=doc)
+                    for voucher_type, voucher_no in claimed:
+                        after_counts = _get_ledger_row_counts_for_voucher(voucher_type, voucher_no)
+                        logger.info("BNS repost audit %s", frappe.as_json({"scope": scope, "mode": "repost_gle_for_stock_vouchers", "repost_doc": repost_doc_name, "voucher_type": voucher_type, "voucher_no": voucher_no, "before_count": before_counts[(voucher_type, voucher_no)], "after_count": after_counts}))
+                        if not force_override:
+                            _mark_bns_repost_voucher_processed(scope, repost_doc_name, voucher_type, voucher_no)
+                    logger.info("BNS repost GL failsafe applied for repost %s on %s vouchers", doc.name, len(claimed))
+            except Exception as e:
+                for voucher_type, voucher_no in claimed:
+                    _mark_bns_repost_tracking_failed(scope, repost_doc_name, voucher_type, voucher_no, str(e))
+                raise
+            finally:
+                for voucher_type, voucher_no in claimed:
+                    _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
 
     if force_override:
         frappe.cache().delete_value(cache_key)
@@ -1018,6 +1094,190 @@ def _delete_ledger_rows_for_voucher(voucher_type: str, voucher_no: str) -> None:
     frappe.db.delete("GL Entry", filters)
 
 
+def _get_repost_doctype_for_scope(scope: str) -> str:
+    """Return the Repost doctype name for a given scope."""
+    m = {
+        "repost_item_valuation": "Repost Item Valuation",
+        "repost_accounting_ledger": "Repost Accounting Ledger",
+        "bns_internal_gl_repost": "Repost Item Valuation",
+        "pr_transfer_rate_repost": "Repost Item Valuation",
+    }
+    return m.get(scope, "Repost Item Valuation")
+
+
+def _is_bns_repost_tracking_available() -> bool:
+    """Check if BNS Repost Tracking doctype and table exist and are usable."""
+    try:
+        return bool(
+            frappe.db.exists("DocType", _BNS_REPOST_TRACKING_DTYPE)
+            and frappe.db.table_exists(_BNS_REPOST_TRACKING_DTYPE)
+        )
+    except Exception:
+        return False
+
+
+def _build_bns_repost_tracking_key(scope: str, repost_doc: str, voucher_type: str, voucher_no: str) -> str:
+    """Build the canonical tracking key for DB-backed repost tracking."""
+    return "bns_repost_voucher::" + scope + "::" + repost_doc + "::" + voucher_type + "::" + voucher_no
+
+
+def _claim_bns_repost_lock(scope, repost_doc, voucher_type, voucher_no, lock_ttl_min=10):
+    """Claim or create a DB-backed lock for repost tracking. Returns True if lock acquired."""
+    key = _build_bns_repost_tracking_key(scope, repost_doc, voucher_type, voucher_no)
+    if not _is_bns_repost_tracking_available():
+        if frappe.cache().get_value(key):
+            return False
+        frappe.cache().set_value(key, 1, expires_in_sec=max(cint(lock_ttl_min), 1) * 60)
+        return True
+
+    lock_expires = add_to_date(now_datetime(), minutes=max(cint(lock_ttl_min), 1), as_datetime=True)
+    try:
+        frappe.db.sql(
+            f"""
+            UPDATE `tab{_BNS_REPOST_TRACKING_DTYPE}`
+            SET status=%s, lock_expires_at=%s, last_error=NULL
+            WHERE tracking_key=%s
+              AND status!=%s
+              AND (status!=%s OR lock_expires_at IS NULL OR lock_expires_at < NOW())
+            """,
+            (
+                _BNS_REPOST_STATUS_IN_PROGRESS,
+                lock_expires,
+                key,
+                _BNS_REPOST_STATUS_PROCESSED,
+                _BNS_REPOST_STATUS_IN_PROGRESS,
+            ),
+        )
+        if cint(frappe.db.affected_rows()) > 0:
+            return True
+
+        if frappe.db.exists(_BNS_REPOST_TRACKING_DTYPE, {"tracking_key": key}):
+            return False
+
+        frappe.get_doc(
+            {
+                "doctype": _BNS_REPOST_TRACKING_DTYPE,
+                "tracking_key": key,
+                "scope": scope,
+                "repost_doctype": _get_repost_doctype_for_scope(scope),
+                "repost_docname": repost_doc,
+                "voucher_type": voucher_type,
+                "voucher_no": voucher_no,
+                "status": _BNS_REPOST_STATUS_IN_PROGRESS,
+                "lock_expires_at": lock_expires,
+            }
+        ).insert(ignore_permissions=True)
+        return True
+    except Exception as e:
+        logger.warning("BNS repost lock claim failed for %s: %s", key, str(e))
+        return False
+
+
+def _refresh_bns_repost_lock(scope, repost_doc, voucher_type, voucher_no, lock_ttl_min=10):
+    """Refresh the lock expiry for an active repost tracking record."""
+    key = _build_bns_repost_tracking_key(scope, repost_doc, voucher_type, voucher_no)
+    if not _is_bns_repost_tracking_available():
+        frappe.cache().set_value(key, 1, expires_in_sec=max(cint(lock_ttl_min), 1) * 60)
+        return
+    frappe.db.set_value(
+        _BNS_REPOST_TRACKING_DTYPE,
+        {"tracking_key": key, "status": _BNS_REPOST_STATUS_IN_PROGRESS},
+        {"lock_expires_at": add_to_date(now_datetime(), minutes=max(cint(lock_ttl_min), 1), as_datetime=True)},
+        update_modified=True,
+    )
+
+
+def _mark_bns_repost_tracking_processed(scope, repost_doc, voucher_type, voucher_no):
+    """Mark repost tracking as Processed in DB, with cache fallback."""
+    key = _build_bns_repost_tracking_key(scope, repost_doc, voucher_type, voucher_no)
+    if _is_bns_repost_tracking_available():
+        try:
+            if frappe.db.exists(_BNS_REPOST_TRACKING_DTYPE, key):
+                frappe.db.set_value(
+                    _BNS_REPOST_TRACKING_DTYPE,
+                    key,
+                    {
+                        "status": _BNS_REPOST_STATUS_PROCESSED,
+                        "processed_at": now_datetime(),
+                        "lock_expires_at": None,
+                        "last_error": None,
+                    },
+                    update_modified=True,
+                )
+            else:
+                rd = _get_repost_doctype_for_scope(scope)
+                frappe.get_doc(
+                    {
+                        "doctype": _BNS_REPOST_TRACKING_DTYPE,
+                        "tracking_key": key,
+                        "scope": scope,
+                        "repost_doctype": rd,
+                        "repost_docname": repost_doc,
+                        "voucher_type": voucher_type,
+                        "voucher_no": voucher_no,
+                        "status": _BNS_REPOST_STATUS_PROCESSED,
+                        "processed_at": now_datetime(),
+                    }
+                ).insert(ignore_permissions=True)
+        except Exception as e:
+            logger.warning("BNS repost mark processed failed: %s", str(e))
+    _mark_bns_repost_voucher_processed_cache(scope, repost_doc, voucher_type, voucher_no)
+
+
+def _mark_bns_repost_tracking_failed(scope, repost_doc, voucher_type, voucher_no, error):
+    """Mark repost tracking as Failed in DB, with cache fallback."""
+    if _is_bns_repost_tracking_available():
+        key = _build_bns_repost_tracking_key(scope, repost_doc, voucher_type, voucher_no)
+        try:
+            err = str(error)[:1000]
+            if frappe.db.exists(_BNS_REPOST_TRACKING_DTYPE, key):
+                frappe.db.set_value(
+                    _BNS_REPOST_TRACKING_DTYPE,
+                    key,
+                    {
+                        "status": _BNS_REPOST_STATUS_FAILED,
+                        "last_error": err,
+                        "lock_expires_at": None,
+                    },
+                    update_modified=True,
+                )
+            else:
+                rd = _get_repost_doctype_for_scope(scope)
+                frappe.get_doc(
+                    {
+                        "doctype": _BNS_REPOST_TRACKING_DTYPE,
+                        "tracking_key": key,
+                        "scope": scope,
+                        "repost_doctype": rd,
+                        "repost_docname": repost_doc,
+                        "voucher_type": voucher_type,
+                        "voucher_no": voucher_no,
+                        "status": _BNS_REPOST_STATUS_FAILED,
+                        "last_error": err,
+                    }
+                ).insert(ignore_permissions=True)
+        except Exception as e:
+            logger.warning("BNS repost mark failed: %s", str(e))
+
+
+def _release_bns_repost_lock(scope, repost_doc, voucher_type, voucher_no):
+    """Release the DB-backed lock. Defensive cleanup."""
+    key = _build_bns_repost_tracking_key(scope, repost_doc, voucher_type, voucher_no)
+    if not _is_bns_repost_tracking_available():
+        frappe.cache().delete_value(key)
+        return
+    try:
+        if frappe.db.exists(_BNS_REPOST_TRACKING_DTYPE, key):
+            frappe.db.set_value(
+                _BNS_REPOST_TRACKING_DTYPE,
+                key,
+                {"lock_expires_at": None},
+                update_modified=True,
+            )
+    except Exception as e:
+        logger.warning("BNS repost lock release failed: %s", str(e))
+
+
 def _bns_repost_voucher_marker_key(
     scope: str, repost_doc: str, voucher_type: str, voucher_no: str
 ) -> str:
@@ -1027,12 +1287,29 @@ def _bns_repost_voucher_marker_key(
 def _is_bns_repost_voucher_processed(
     scope: str, repost_doc: str, voucher_type: str, voucher_no: str
 ) -> bool:
+    """Check DB-backed tracking first (status Processed), fallback to cache."""
+    if _is_bns_repost_tracking_available():
+        key = _build_bns_repost_tracking_key(scope, repost_doc, voucher_type, voucher_no)
+        try:
+            status = frappe.db.get_value(_BNS_REPOST_TRACKING_DTYPE, key, "status")
+            if status == _BNS_REPOST_STATUS_PROCESSED:
+                return True
+        except Exception:
+            pass
     return bool(frappe.cache().get_value(_bns_repost_voucher_marker_key(scope, repost_doc, voucher_type, voucher_no)))
 
 
 def _mark_bns_repost_voucher_processed(
     scope: str, repost_doc: str, voucher_type: str, voucher_no: str
 ) -> None:
+    """Mark voucher as processed via DB-backed tracking (Processed), fallback to cache."""
+    _mark_bns_repost_tracking_processed(scope, repost_doc, voucher_type, voucher_no)
+
+
+def _mark_bns_repost_voucher_processed_cache(
+    scope: str, repost_doc: str, voucher_type: str, voucher_no: str
+) -> None:
+    """Set cache-only marker as fallback when DB tracking unavailable."""
     frappe.cache().set_value(
         _bns_repost_voucher_marker_key(scope, repost_doc, voucher_type, voucher_no),
         1,
@@ -1061,6 +1338,19 @@ def _force_rebuild_bns_gl_for_voucher(
     _apply_bns_internal_gl_rewrite_patch()
     save_point = "bns_force_rebuild_voucher"
     before_counts = _get_ledger_row_counts_for_voucher(voucher_type, voucher_no)
+    # region agent log
+    _bns_debug_log(
+        "H5",
+        "utils.py:_force_rebuild_bns_gl_for_voucher",
+        "Force rebuild entered",
+        {
+            "context": context,
+            "voucher_type": voucher_type,
+            "voucher_no": voucher_no,
+            "before_count": before_counts,
+        },
+    )
+    # endregion
 
     try:
         frappe.db.savepoint(save_point)
@@ -1082,10 +1372,36 @@ def _force_rebuild_bns_gl_for_voucher(
             ),
         )
         logger.info("Force rebuilt BNS GL for %s %s", voucher_type, voucher_no)
+        # region agent log
+        _bns_debug_log(
+            "H5",
+            "utils.py:_force_rebuild_bns_gl_for_voucher",
+            "Force rebuild succeeded",
+            {
+                "context": context,
+                "voucher_type": voucher_type,
+                "voucher_no": voucher_no,
+                "after_count": after_counts,
+            },
+        )
+        # endregion
         return True
     except Exception as e:
         frappe.db.rollback(save_point=save_point)
         logger.error("Force rebuild failed for %s %s: %s", voucher_type, voucher_no, str(e))
+        # region agent log
+        _bns_debug_log(
+            "H5",
+            "utils.py:_force_rebuild_bns_gl_for_voucher",
+            "Force rebuild failed",
+            {
+                "context": context,
+                "voucher_type": voucher_type,
+                "voucher_no": voucher_no,
+                "error": str(e),
+            },
+        )
+        # endregion
         return False
 
 
@@ -1096,6 +1412,14 @@ def _run_bns_gl_repost_accounting_correction(repost_doc_name: str, force_overrid
 
     cache_key = f"bns_gl_accounting_repost_correction::{repost_doc_name}"
     if not force_override and frappe.cache().get_value(cache_key):
+        # region agent log
+        _bns_debug_log(
+            "H3",
+            "utils.py:_run_bns_gl_repost_accounting_correction",
+            "Skipped by repost_accounting cache key",
+            {"repost_doc_name": repost_doc_name, "cache_key": cache_key},
+        )
+        # endregion
         return
 
     repost_doc = frappe.get_doc("Repost Accounting Ledger", repost_doc_name)
@@ -1118,14 +1442,66 @@ def _run_bns_gl_repost_accounting_correction(repost_doc_name: str, force_overrid
         if not force_override and _is_bns_repost_voucher_processed(
             "repost_accounting_ledger", repost_doc_name, voucher_type, voucher_no
         ):
+            # region agent log
+            _bns_debug_log(
+                "H3",
+                "utils.py:_run_bns_gl_repost_accounting_correction",
+                "Voucher skipped by per-voucher accounting marker",
+                {
+                    "repost_doc_name": repost_doc_name,
+                    "voucher_type": voucher_type,
+                    "voucher_no": voucher_no,
+                },
+            )
+            # endregion
             continue
         doc = frappe.get_doc(voucher_type, voucher_no)
-        if voucher_type == "Delivery Note" and _is_bns_internal_same_gstin_delivery_note(doc):
-            filtered.append((voucher_type, voucher_no))
+        if voucher_type == "Delivery Note":
+            is_scope = _is_bns_internal_same_gstin_delivery_note(doc)
+            # region agent log
+            _bns_debug_log(
+                "H2",
+                "utils.py:_run_bns_gl_repost_accounting_correction",
+                "Evaluated DN scope for repost_accounting",
+                {
+                    "repost_doc_name": repost_doc_name,
+                    "voucher_no": voucher_no,
+                    "is_scope": is_scope,
+                },
+            )
+            # endregion
+            if is_scope:
+                filtered.append((voucher_type, voucher_no))
         elif voucher_type == "Purchase Receipt" and _is_bns_internal_same_gstin_purchase_receipt(doc):
             filtered.append((voucher_type, voucher_no))
 
+    # region agent log
+    _bns_debug_log(
+        "H4",
+        "utils.py:_run_bns_gl_repost_accounting_correction",
+        "Repost accounting correction prepared voucher lists",
+        {
+            "repost_doc_name": repost_doc_name,
+            "input_count": len(vouchers),
+            "filtered_count": len(filtered),
+            "force_override": bool(force_override),
+        },
+    )
+    # endregion
+
     if not filtered:
+        if force_override:
+            frappe.cache().delete_value(cache_key)
+        else:
+            frappe.cache().set_value(cache_key, 1, expires_in_sec=6 * 60 * 60)
+        return
+
+    scope = "repost_accounting_ledger"
+    claimed = []
+    for voucher_type, voucher_no in filtered:
+        if _claim_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no):
+            claimed.append((voucher_type, voucher_no))
+    if not claimed:
         if force_override:
             frappe.cache().delete_value(cache_key)
         else:
@@ -1135,55 +1511,34 @@ def _run_bns_gl_repost_accounting_correction(repost_doc_name: str, force_overrid
     _apply_bns_internal_gl_rewrite_patch()
     settings = _get_bns_branch_accounting_accounts()
     force_mode = bool(settings and settings.get("force_bns_internal_gl_rewrite")) or bool(force_override)
-    if force_mode:
-        rebuilt = 0
-        for voucher_type, voucher_no in filtered:
-            if _force_rebuild_bns_gl_for_voucher(
-                voucher_type, voucher_no, context="repost_accounting_ledger"
-            ):
-                rebuilt += 1
+    try:
+        if force_mode:
+            rebuilt = 0
+            for voucher_type, voucher_no in claimed:
+                if _force_rebuild_bns_gl_for_voucher(
+                    voucher_type, voucher_no, context="repost_accounting_ledger"
+                ):
+                    rebuilt += 1
+                    if not force_override:
+                        _mark_bns_repost_voucher_processed(scope, repost_doc_name, voucher_type, voucher_no)
+            logger.info("BNS Repost Accounting Ledger force-rebuild applied for %s on %s/%s vouchers", repost_doc_name, rebuilt, len(claimed))
+        else:
+            from erpnext.accounts.utils import repost_gle_for_stock_vouchers
+            before_counts = {(vt, vn): _get_ledger_row_counts_for_voucher(vt, vn) for vt, vn in claimed}
+            repost_gle_for_stock_vouchers(claimed, repost_doc.posting_date, repost_doc.company, repost_doc=repost_doc)
+            for voucher_type, voucher_no in claimed:
+                after_counts = _get_ledger_row_counts_for_voucher(voucher_type, voucher_no)
+                logger.info("BNS repost audit %s", frappe.as_json({"scope": scope, "mode": "repost_gle_for_stock_vouchers", "repost_doc": repost_doc_name, "voucher_type": voucher_type, "voucher_no": voucher_no, "before_count": before_counts[(voucher_type, voucher_no)], "after_count": after_counts}))
                 if not force_override:
-                    _mark_bns_repost_voucher_processed(
-                        "repost_accounting_ledger", repost_doc_name, voucher_type, voucher_no
-                    )
-        logger.info(
-            "BNS Repost Accounting Ledger force-rebuild applied for %s on %s/%s vouchers",
-            repost_doc_name,
-            rebuilt,
-            len(filtered),
-        )
-    else:
-        from erpnext.accounts.utils import repost_gle_for_stock_vouchers
-        before_counts = {
-            (voucher_type, voucher_no): _get_ledger_row_counts_for_voucher(voucher_type, voucher_no)
-            for voucher_type, voucher_no in filtered
-        }
-        repost_gle_for_stock_vouchers(filtered, repost_doc.posting_date, repost_doc.company, repost_doc=repost_doc)
-        for voucher_type, voucher_no in filtered:
-            after_counts = _get_ledger_row_counts_for_voucher(voucher_type, voucher_no)
-            logger.info(
-                "BNS repost audit %s",
-                frappe.as_json(
-                    {
-                        "scope": "repost_accounting_ledger",
-                        "mode": "repost_gle_for_stock_vouchers",
-                        "repost_doc": repost_doc_name,
-                        "voucher_type": voucher_type,
-                        "voucher_no": voucher_no,
-                        "before_count": before_counts[(voucher_type, voucher_no)],
-                        "after_count": after_counts,
-                    }
-                ),
-            )
-            if not force_override:
-                _mark_bns_repost_voucher_processed(
-                    "repost_accounting_ledger", repost_doc_name, voucher_type, voucher_no
-                )
-        logger.info(
-            "BNS Repost Accounting Ledger correction applied for %s on %s vouchers",
-            repost_doc_name,
-            len(filtered),
-        )
+                    _mark_bns_repost_voucher_processed(scope, repost_doc_name, voucher_type, voucher_no)
+            logger.info("BNS Repost Accounting Ledger correction applied for %s on %s vouchers", repost_doc_name, len(claimed))
+    except Exception as e:
+        for voucher_type, voucher_no in claimed:
+            _mark_bns_repost_tracking_failed(scope, repost_doc_name, voucher_type, voucher_no, str(e))
+        raise
+    finally:
+        for voucher_type, voucher_no in claimed:
+            _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
 
     if force_override:
         frappe.cache().delete_value(cache_key)
@@ -1356,11 +1711,23 @@ def _apply_bns_repost_gl_failsafe_patch() -> None:
             return
 
         def patched_repost_gl_entries(doc):
+            doc_lock_scope = "repost_item_valuation"
+            doc_lock_repost = doc.name if doc else ""
+            doc_lock_voucher_type = "Repost Item Valuation"
+            doc_lock_voucher_no = doc.name if doc else ""
             original_repost_gl_entries(doc)
             try:
                 _run_bns_gl_repost_correction(doc)
             except Exception as e:
                 logger.error("BNS repost GL failsafe error for %s: %s", doc.name, str(e))
+            finally:
+                if doc_lock_repost:
+                    _release_bns_repost_lock(
+                        doc_lock_scope,
+                        doc_lock_repost,
+                        doc_lock_voucher_type,
+                        doc_lock_voucher_no,
+                    )
 
         patched_repost_gl_entries._bns_repost_gl_failsafe_patched = True
         riv.repost_gl_entries = patched_repost_gl_entries
@@ -1387,10 +1754,22 @@ def _apply_bns_repost_accounting_ledger_patch() -> None:
 
         def patched_start_repost(account_repost_doc=str):
             result = original_start_repost(account_repost_doc)
+            doc_lock_scope = "repost_accounting_ledger"
+            doc_lock_repost = str(account_repost_doc or "")
+            doc_lock_voucher_type = "Repost Accounting Ledger"
+            doc_lock_voucher_no = str(account_repost_doc or "")
             try:
                 _run_bns_gl_repost_accounting_correction(account_repost_doc)
             except Exception as e:
                 logger.error("BNS repost accounting correction failed for %s: %s", account_repost_doc, str(e))
+            finally:
+                if doc_lock_repost:
+                    _release_bns_repost_lock(
+                        doc_lock_scope,
+                        doc_lock_repost,
+                        doc_lock_voucher_type,
+                        doc_lock_voucher_no,
+                    )
             return result
 
         patched_start_repost._bns_repost_accounting_patched = True
@@ -1406,35 +1785,30 @@ def _trigger_bns_internal_gl_repost(doc, source: str) -> bool:
     if not doc or doc.docstatus != 1:
         return False
 
-    cache_key = f"bns_internal_gl_repost::{doc.doctype}::{doc.name}"
-    if frappe.cache().get_value(cache_key):
+    scope = "bns_internal_gl_repost"
+    repost_doc = source or "manual"
+    voucher_type = doc.doctype
+    voucher_no = doc.name
+    if not _claim_bns_repost_lock(scope, repost_doc, voucher_type, voucher_no):
         return False
 
     try:
         _apply_bns_internal_gl_rewrite_patch()
         doc.repost_future_sle_and_gle(force=True)
-        frappe.cache().set_value(cache_key, 1, expires_in_sec=10 * 60)
+        _mark_bns_repost_tracking_processed(scope, repost_doc, voucher_type, voucher_no)
         logger.info("Triggered guarded BNS GL repost for %s %s (%s)", doc.doctype, doc.name, source)
         return True
     except Exception as e:
+        _mark_bns_repost_tracking_failed(scope, repost_doc, voucher_type, voucher_no, str(e))
         logger.error("Failed guarded BNS GL repost for %s %s (%s): %s", doc.doctype, doc.name, source, str(e))
         return False
 
 
-def apply_bns_branch_accounting_runtime_patches() -> None:
-    """
-    Ensure BNS runtime monkey-patches are applied in the current worker.
-
-    This is safe to call multiple times because each patch routine has its own idempotency guard.
-    """
-    _apply_bns_transfer_rate_stock_ledger_patch()
-    _apply_bns_internal_gl_rewrite_patch()
-    _apply_bns_repost_gl_failsafe_patch()
-    _apply_bns_repost_accounting_ledger_patch()
-
-
 # Best-effort eager patching on module import.
-apply_bns_branch_accounting_runtime_patches()
+_apply_bns_transfer_rate_stock_ledger_patch()
+_apply_bns_internal_gl_rewrite_patch()
+_apply_bns_repost_gl_failsafe_patch()
+_apply_bns_repost_accounting_ledger_patch()
 
 
 def is_bns_internal_customer(doc) -> bool:
@@ -2385,28 +2759,29 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
         return
 
     try:
-        # Canonical-first source resolution:
+        # Resolve source with canonical priority:
         # 1) bns_inter_company_reference (authoritative)
-        # 2) supplier_delivery_note (legacy fallback only when canonical ref is absent)
+        # 2) supplier_delivery_note (legacy fallback only when canonical is empty)
+        is_bns_internal = is_bns_internal_supplier(doc)
+        source_ref = (doc.get("bns_inter_company_reference") or "").strip()
+        legacy_ref = (doc.get("supplier_delivery_note") or "").strip()
         source_dn = None
         source_si = None
-        canonical_ref = (doc.get("bns_inter_company_reference") or "").strip()
-        legacy_ref = (doc.get("supplier_delivery_note") or "").strip()
 
-        if canonical_ref:
-            if frappe.db.exists("Delivery Note", canonical_ref):
-                source_dn = canonical_ref
-            elif frappe.db.exists("Sales Invoice", canonical_ref):
-                source_si = canonical_ref
+        if source_ref:
+            if frappe.db.exists("Delivery Note", source_ref):
+                source_dn = source_ref
+                is_bns_internal = True
+            elif frappe.db.exists("Sales Invoice", source_ref):
+                source_si = source_ref
+                is_bns_internal = False
         elif legacy_ref:
             if frappe.db.exists("Delivery Note", legacy_ref):
                 source_dn = legacy_ref
+                is_bns_internal = True
             elif frappe.db.exists("Sales Invoice", legacy_ref):
                 source_si = legacy_ref
-
-        # Same GSTIN/DN source => internal supplier flag on PR.
-        # Different GSTIN/SI source => not internal supplier for PR.
-        is_bns_internal = bool(source_dn)
+                is_bns_internal = False
         
         # Update is_bns_internal_supplier field
         if is_bns_internal != doc.get("is_bns_internal_supplier"):
@@ -2579,32 +2954,41 @@ def _sync_pr_item_transfer_rate_from_dn(dn_name: str, pr_name: Optional[str] = N
 
 
 def _trigger_pr_repost_for_transfer_rate(pr_name: str, source_repost_name: str) -> bool:
-    """Trigger PR repost after transfer-rate mirror with cache guards."""
+    """Trigger PR repost after transfer-rate mirror with lock-first and finally cleanup."""
     if not pr_name or not frappe.db.exists("Purchase Receipt", pr_name):
         return False
-
     per_repost_key = f"bns_transfer_rate_pr_repost::{source_repost_name}::{pr_name}"
     if frappe.cache().get_value(per_repost_key):
         return False
-
-    lock_key = f"bns_transfer_rate_pr_repost_lock::{pr_name}"
-    if frappe.cache().get_value(lock_key):
+    scope = "pr_transfer_rate_repost"
+    repost_doc_name = source_repost_name
+    voucher_type = "Purchase Receipt"
+    voucher_no = pr_name
+    if not _claim_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no):
         return False
-
     pr = frappe.get_doc("Purchase Receipt", pr_name)
     if pr.docstatus != 1:
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
         return False
     if not pr.get("is_bns_internal_supplier"):
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
         return False
     if not pr.get("supplier_delivery_note") or not frappe.db.exists("Delivery Note", pr.get("supplier_delivery_note")):
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
         return False
-
-    _apply_bns_transfer_rate_stock_ledger_patch()
-    pr.repost_future_sle_and_gle(force=True)
-    frappe.cache().set_value(per_repost_key, 1, expires_in_sec=6 * 60 * 60)
-    frappe.cache().set_value(lock_key, 1, expires_in_sec=10 * 60)
-    logger.info("Triggered PR repost for transfer-rate sync: %s (source repost: %s)", pr_name, source_repost_name)
-    return True
+    try:
+        _apply_bns_transfer_rate_stock_ledger_patch()
+        pr.repost_future_sle_and_gle(force=True)
+        _mark_bns_repost_tracking_processed(scope, repost_doc_name, voucher_type, voucher_no)
+        frappe.cache().set_value(per_repost_key, 1, expires_in_sec=6 * 60 * 60)
+        logger.info("Triggered PR repost for transfer-rate sync: %s (source repost: %s)", pr_name, source_repost_name)
+        return True
+    except Exception as e:
+        _mark_bns_repost_tracking_failed(scope, repost_doc_name, voucher_type, voucher_no, str(e))
+        logger.error("PR repost for transfer-rate failed %s: %s", pr_name, str(e))
+        return False
+    finally:
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
 
 
 def refresh_pr_transfer_rate_after_repost(doc, method: Optional[str] = None) -> None:

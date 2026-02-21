@@ -46,7 +46,7 @@ BNS extends ERPNext with:
 - **What:** Internal transfer flow – DN→PR, SI→PI, SI→PR; status updates; convert/link/unlink.
 - **Why:** Support inter-branch transfers with `is_bns_internal_customer` / `is_bns_internal_supplier`.
 - **Impacted:** DN, PR, SI, PI (client JS + doc_events).
-- **Settings:** BNS Branch Accounting Settings – `stock_in_transit_account`, `internal_transfer_account`, `internal_branch_debtor_account`, `enable_internal_dn_ewaybill`.
+- **Settings:** BNS Branch Accounting Settings – `stock_in_transit_account`, `internal_sales_transfer_account`, `internal_purchase_transfer_account`, `internal_branch_debtor_account`, `internal_branch_creditor_account`, `enable_internal_dn_ewaybill`.
 - **PR/PI standard fields:** BNS does **not** set standard ERPNext fields `represents_company` or `inter_company_reference` / `inter_company_invoice_reference` on Purchase Receipt or Purchase Invoice. Only BNS fields are used: `bns_inter_company_reference`, `supplier_delivery_note`, `is_bns_internal_supplier`, etc. Representing-company logic uses Customer/Supplier `bns_represents_company` (with fallback read of `represents_company` for validation only).
 
 ### 3.3 GST Compliance (`overrides/gst_compliance.py`)
