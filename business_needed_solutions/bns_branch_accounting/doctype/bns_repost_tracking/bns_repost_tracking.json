@@ -1,0 +1,130 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:tracking_key",
+ "creation": "2026-02-21 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "tracking_key",
+  "scope",
+  "repost_doctype",
+  "repost_docname",
+  "voucher_type",
+  "voucher_no",
+  "status",
+  "lock_expires_at",
+  "processed_at",
+  "last_error"
+ ],
+ "fields": [
+  {
+   "fieldname": "tracking_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Tracking Key",
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "scope",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Scope",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "repost_doctype",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Repost DocType",
+   "options": "DocType",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "repost_docname",
+   "fieldtype": "Dynamic Link",
+   "in_list_view": 1,
+   "label": "Repost Document",
+   "options": "repost_doctype",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "voucher_type",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Voucher Type",
+   "options": "DocType",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "voucher_no",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Voucher No",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "default": "In Progress",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "In Progress\nProcessed\nFailed",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "lock_expires_at",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Lock Expires At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "processed_at",
+   "fieldtype": "Datetime",
+   "label": "Processed At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_error",
+   "fieldtype": "Small Text",
+   "label": "Last Error",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-02-21 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "BNS Branch Accounting",
+ "name": "BNS Repost Tracking",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Accounts Manager"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

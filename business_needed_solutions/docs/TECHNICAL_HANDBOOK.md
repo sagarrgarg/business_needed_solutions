@@ -23,6 +23,7 @@
 | **Cancel popup filtering override** — hides DN/SI from PR/PI "Cancel All Documents" dialog using whitelisted method override | `hooks.py`, `bns_branch_accounting/overrides/cancel_dialog.py` | PR/PI still prompting to cancel parent docs |
 | **Branch-accounting module boundary cleanup** — moved internal-transfer migration hook and internal party exclusivity enforcement into `bns_branch_accounting`; moved bulk-convert UI action from `BNS Settings` to `BNS Branch Accounting Settings` | `hooks.py`, `bns_branch_accounting/migration.py`, `bns_branch_accounting/overrides/internal_party.py`, `bns_branch_accounting/doctype/bns_branch_accounting_settings/bns_branch_accounting_settings.js`, `doctype/bns_settings/bns_settings.js` | Internal-transfer logic scattered outside branch-accounting module |
 | **FIFO auto payment reconciliation removed** — deleted backend reconcile service and removed BNS Settings UI/config fields for FIFO reconcile | `auto_payment_reconcile.py` (deleted), `doctype/bns_settings/bns_settings.js`, `doctype/bns_settings/bns_settings.json` | Removed high-risk broad reconciliation surface |
+| **Repost lock hardening + DB idempotency tracking** — lock is claimed before repost execution, lock is released in `finally`, and processed state is persisted in `BNS Repost Tracking` instead of cache-only markers | `bns_branch_accounting/utils.py`, `bns_branch_accounting/migration.py`, `bns_branch_accounting/doctype/bns_repost_tracking/*` | Duplicate repost risk on race/restart and stale lock behavior |
 
 ### Changes Log (v1.1)
 

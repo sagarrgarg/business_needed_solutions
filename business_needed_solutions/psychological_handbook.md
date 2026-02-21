@@ -29,6 +29,7 @@
 - Do not keep stale link references after cancellation.
 - Do not rely on UI-only link actions for integrity; enforce on server hooks.
 - Do not keep branch-accounting migration or internal-party guard logic in the generic app module; keep it under `bns_branch_accounting`.
+- Do not rely on cache-only idempotency for critical repost paths where worker restart or race conditions can replay side effects.
 
 ## Change log
 
@@ -40,3 +41,7 @@
   - `after_migrate` now points to `bns_branch_accounting.migration.after_migrate`.
   - Customer/Supplier internal-flag exclusivity moved to `bns_branch_accounting/overrides/internal_party.py`.
   - Bulk convert action moved from `BNS Settings` UI to `BNS Branch Accounting Settings` UI.
+- Hardened repost execution semantics:
+  - Repost lock is claimed before repost work starts.
+  - Repost lock is always released in `finally` paths.
+  - Processed state is persisted in `BNS Repost Tracking` for restart-proof idempotency.
