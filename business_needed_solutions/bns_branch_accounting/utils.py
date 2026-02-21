@@ -13,6 +13,9 @@ from frappe import _
 from frappe.model.mapper import get_mapped_doc
 from frappe.contacts.doctype.address.address import get_company_address
 from erpnext.accounts.doctype.sales_invoice.sales_invoice import update_address, update_taxes
+from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
+    get_accounting_dimensions,
+)
 from frappe.utils import flt, cint, get_link_to_form, getdate, add_to_date, now_datetime
 from frappe import bold
 from typing import Optional, Dict, Any, List, Tuple, Set
@@ -231,7 +234,7 @@ def validate_bns_internal_accounting_settings_for_dn_pr(
         "internal_branch_debtor_account": _("Internal Branch Debtor Account"),
         "internal_branch_creditor_account": _("Internal Branch Creditor Account"),
     }
-    if doc.doctype == "Delivery Note":
+    if doc.doctype == "Delivery Note" and (doc.get("billing_address_gstin") or "") == (doc.get("company_gstin") or ""):
         required_fields["internal_sales_transfer_account"] = _("Internal Sales Transfer Account")
     elif doc.doctype == "Purchase Receipt":
         required_fields["internal_purchase_transfer_account"] = _("Internal Purchase Transfer Account")
@@ -379,6 +382,33 @@ def _is_bns_internal_same_gstin_delivery_note(doc) -> bool:
         and is_bns_internal_customer(doc)
         and (doc.get("billing_address_gstin") or "") == (doc.get("company_gstin") or "")
     )
+
+
+def _is_bns_internal_delivery_note(doc) -> bool:
+    """Check DN is in scoped BNS internal flow (same/different GSTIN)."""
+    return bool(
+        doc
+        and doc.doctype == "Delivery Note"
+        and doc.docstatus == 1
+        and is_after_internal_validation_cutoff(doc.get("posting_date"))
+        and is_bns_internal_customer(doc)
+    )
+
+
+def _is_same_gstin_internal_delivery_note(doc) -> bool:
+    """Return True when internal DN has same billing/company GSTIN."""
+    return bool((doc.get("billing_address_gstin") or "") == (doc.get("company_gstin") or ""))
+
+
+def _is_bns_internal_different_gstin_sales_invoice(doc) -> bool:
+    """Check SI is in scoped BNS internal different-GSTIN flow."""
+    if not doc or getattr(doc, "doctype", "") != "Sales Invoice":
+        return False
+    if not is_bns_internal_customer(doc):
+        return False
+    company_gstin = (doc.get("company_gstin") or "").strip()
+    billing_gstin = (doc.get("billing_address_gstin") or "").strip()
+    return bool(company_gstin and billing_gstin and company_gstin != billing_gstin)
 
 
 def _get_linked_delivery_note_for_pr(doc) -> Optional[str]:
@@ -676,6 +706,301 @@ def validate_internal_purchase_invoice_linkage(doc, method: Optional[str] = None
     )
 
 
+def _throw_si_dn_mismatch(
+    source_item,
+    entered_item,
+    field_label: str,
+    expected_value,
+    entered_value,
+    precision: int = 2,
+) -> None:
+    row_no = cint(source_item.get("idx") or 0) or "-"
+    item_code = entered_item.get("item_code") or source_item.get("item_code") or entered_item.get("name")
+    expected_out = round(flt(expected_value or 0), precision) if isinstance(expected_value, (int, float)) else expected_value
+    entered_out = round(flt(entered_value or 0), precision) if isinstance(entered_value, (int, float)) else entered_value
+    frappe.throw(
+        _(
+            "Row {0} ({1}) does not match Delivery Note.\n\nField: {2}\nExpected (Delivery Note): {3}\nEntered in Sales Invoice: {4}\n\nPlease make this row exactly same as Delivery Note."
+        ).format(row_no, item_code, field_label, expected_out, entered_out),
+        title=_("One-to-One Validation Failed"),
+    )
+
+
+def _validate_single_internal_si_per_dn(doc, dn_names: List[str]) -> None:
+    """Block creating another internal SI (draft/submitted) for same DN context."""
+    if not dn_names:
+        return
+
+    si_item_rows = frappe.get_all(
+        "Sales Invoice Item",
+        filters={
+            "delivery_note": ("in", dn_names),
+            "parent": ("!=", doc.name or ""),
+            "docstatus": ("in", [0, 1]),
+        },
+        fields=["parent", "delivery_note"],
+    )
+    if not si_item_rows:
+        return
+
+    checked_parents = set()
+    for row in si_item_rows:
+        parent = row.get("parent")
+        if not parent or parent in checked_parents:
+            continue
+        checked_parents.add(parent)
+        parent_meta = frappe.db.get_value(
+            "Sales Invoice",
+            parent,
+            ["name", "docstatus", "is_return", "is_bns_internal_customer", "customer"],
+            as_dict=True,
+        )
+        if not parent_meta or cint(parent_meta.get("is_return")):
+            continue
+        parent_is_internal = bool(parent_meta.get("is_bns_internal_customer"))
+        if not parent_is_internal and parent_meta.get("customer"):
+            parent_is_internal = bool(
+                frappe.db.get_value("Customer", parent_meta.get("customer"), "is_bns_internal_customer")
+            )
+        if not parent_is_internal:
+            continue
+
+        frappe.throw(
+            _(
+                "Delivery Note {0} is already linked to Sales Invoice {1} ({2}). You cannot create another internal Sales Invoice for the same Delivery Note."
+            ).format(
+                row.get("delivery_note"),
+                parent_meta.get("name"),
+                _docstatus_label(parent_meta.get("docstatus")),
+            ),
+            title=_("Duplicate Internal Sales Invoice Not Allowed"),
+        )
+
+
+def _validate_internal_si_dn_one_to_one_parity(doc, dn_names: List[str]) -> None:
+    """Validate strict one-to-one parity for internal SI rows mapped from DN."""
+    if not dn_names:
+        return
+
+    source_dns = [frappe.get_doc("Delivery Note", dn_name) for dn_name in dn_names if frappe.db.exists("Delivery Note", dn_name)]
+    if not source_dns:
+        return
+
+    source_rows = []
+    source_row_map = {}
+    source_totals = defaultdict(float)
+    for dn in source_dns:
+        dn_rows = [d for d in (dn.get("items") or []) if flt(d.get("qty") or 0) > 0]
+        for row in dn_rows:
+            key = (dn.name, row.get("name"))
+            source_rows.append((dn.name, row))
+            source_row_map[key] = row
+        for fieldname in (
+            "total",
+            "base_total",
+            "net_total",
+            "base_net_total",
+            "grand_total",
+            "base_grand_total",
+        ):
+            source_totals[fieldname] += flt(dn.get(fieldname) or 0)
+
+    si_items = [d for d in (doc.get("items") or []) if d.get("delivery_note")]
+    if len(si_items) != len(source_rows):
+        frappe.throw(
+            _(
+                "Strict 1:1 validation failed: Sales Invoice has {0} Delivery Note-linked rows, but source Delivery Note rows are {1}. Please keep rows exactly one-to-one."
+            ).format(len(si_items), len(source_rows)),
+            title=_("One-to-One Validation Failed"),
+        )
+
+    seen_source_rows = set()
+
+    def _same_num(a, b, precision=6):
+        return round(flt(a or 0), precision) == round(flt(b or 0), precision)
+
+    for si_item in si_items:
+        dn_name = (si_item.get("delivery_note") or "").strip()
+        dn_detail = (si_item.get("dn_detail") or "").strip()
+        if not dn_detail:
+            frappe.throw(
+                _(
+                    "Row {0} ({1}) is missing Delivery Note Row reference (dn_detail). Please fetch items from Delivery Note again."
+                ).format(cint(si_item.get("idx") or 0) or "-", si_item.get("item_code") or si_item.get("name")),
+                title=_("One-to-One Validation Failed"),
+            )
+        source_item = source_row_map.get((dn_name, dn_detail))
+        if not source_item:
+            frappe.throw(
+                _(
+                    "Row {0} ({1}) is not linked to a valid Delivery Note row. Please reselect the correct Delivery Note item."
+                ).format(cint(si_item.get("idx") or 0) or "-", si_item.get("item_code") or si_item.get("name")),
+                title=_("One-to-One Validation Failed"),
+            )
+        source_key = (dn_name, dn_detail)
+        if source_key in seen_source_rows:
+            frappe.throw(
+                _(
+                    "Delivery Note row {0} is mapped more than once. Each Delivery Note row can be used only once in Sales Invoice."
+                ).format(cint(source_item.get("idx") or 0) or "-"),
+                title=_("One-to-One Validation Failed"),
+            )
+        seen_source_rows.add(source_key)
+
+        if (si_item.get("item_code") or "") != (source_item.get("item_code") or ""):
+            _throw_si_dn_mismatch(
+                source_item,
+                si_item,
+                _("Item Code"),
+                source_item.get("item_code"),
+                si_item.get("item_code"),
+                precision=0,
+            )
+
+        for fieldname, precision, label in (
+            ("conversion_factor", 6, _("UOM Conversion Factor")),
+            ("qty", 6, _("Quantity")),
+            ("stock_qty", 6, _("Stock Quantity")),
+            ("rate", 6, _("Rate")),
+            ("base_rate", 6, _("Base Rate")),
+            ("amount", 2, _("Amount")),
+            ("base_amount", 2, _("Base Amount")),
+            ("net_rate", 6, _("Taxable Rate")),
+            ("base_net_rate", 6, _("Base Taxable Rate")),
+            ("net_amount", 2, _("Taxable Amount")),
+            ("base_net_amount", 2, _("Base Taxable Amount")),
+        ):
+            if not _same_num(si_item.get(fieldname), source_item.get(fieldname), precision=precision):
+                _throw_si_dn_mismatch(
+                    source_item,
+                    si_item,
+                    label,
+                    source_item.get(fieldname),
+                    si_item.get(fieldname),
+                    precision=precision,
+                )
+
+        for fieldname, label in (("uom", _("UOM")), ("stock_uom", _("Stock UOM"))):
+            src_val = (source_item.get(fieldname) or "")
+            si_val = (si_item.get(fieldname) or "")
+            if src_val and si_val and src_val != si_val:
+                _throw_si_dn_mismatch(source_item, si_item, label, src_val, si_val, precision=0)
+
+    if len(seen_source_rows) != len(source_rows):
+        frappe.throw(
+            _(
+                "Strict 1:1 validation failed: all Delivery Note rows are not mapped in Sales Invoice. Please include every row exactly once."
+            ),
+            title=_("One-to-One Validation Failed"),
+        )
+
+    for fieldname, label in (
+        ("net_total", _("Taxable Total")),
+        ("base_net_total", _("Base Taxable Total")),
+        ("grand_total", _("Grand Total")),
+        ("base_grand_total", _("Base Grand Total")),
+    ):
+        source_val = round(flt(source_totals.get(fieldname) or 0), 2)
+        entered_val = round(flt(doc.get(fieldname) or 0), 2)
+        if source_val != entered_val:
+            frappe.throw(
+                _(
+                    "{0} does not match Delivery Note total.\n\nExpected (Delivery Notes): {1}\nEntered in Sales Invoice: {2}\n\nPlease keep taxable and grand totals exactly same as Delivery Note."
+                ).format(label, source_val, entered_val),
+                title=_("One-to-One Validation Failed"),
+            )
+
+
+def validate_internal_sales_invoice_linkage(doc, method: Optional[str] = None) -> None:
+    """Enforce internal SI different-GSTIN and DN strict parity after cutoff."""
+    if doc.doctype != "Sales Invoice":
+        return
+    if cint(doc.get("is_return")):
+        return
+    if not is_bns_internal_customer(doc):
+        return
+    if not is_after_internal_validation_cutoff(doc.get("posting_date")):
+        return
+
+    company_gstin = (doc.get("company_gstin") or "").strip()
+    billing_gstin = (doc.get("billing_address_gstin") or "").strip()
+    if not company_gstin or not billing_gstin:
+        frappe.throw(
+            _("GSTIN is missing on Sales Invoice. Internal Sales Invoice requires both Company GSTIN and Billing GSTIN."),
+            title=_("GSTIN Required"),
+        )
+    if company_gstin == billing_gstin:
+        frappe.throw(
+            _("Internal Sales Invoice is allowed only when Company GSTIN and Billing GSTIN are different."),
+            title=_("Invalid Internal Sales Invoice"),
+        )
+
+    dn_names = sorted(
+        {
+            (item.get("delivery_note") or "").strip()
+            for item in (doc.get("items") or [])
+            if (item.get("delivery_note") or "").strip()
+        }
+    )
+    if not dn_names:
+        return
+
+    _validate_single_internal_si_per_dn(doc, dn_names)
+    _validate_internal_si_dn_one_to_one_parity(doc, dn_names)
+
+
+@frappe.whitelist()
+def check_existing_internal_si_for_dn(delivery_notes: List[str], current_si: Optional[str] = None) -> Dict[str, Any]:
+    """UI helper to check duplicate internal SI existence for DN context."""
+    dn_names = sorted({(d or "").strip() for d in (delivery_notes or []) if (d or "").strip()})
+    if not dn_names:
+        return {"exists": False}
+
+    si_item_rows = frappe.get_all(
+        "Sales Invoice Item",
+        filters={
+            "delivery_note": ("in", dn_names),
+            "parent": ("!=", current_si or ""),
+            "docstatus": ("in", [0, 1]),
+        },
+        fields=["parent", "delivery_note"],
+        order_by="modified desc",
+    )
+    if not si_item_rows:
+        return {"exists": False}
+
+    seen = set()
+    for row in si_item_rows:
+        si_name = row.get("parent")
+        if not si_name or si_name in seen:
+            continue
+        seen.add(si_name)
+        si_meta = frappe.db.get_value(
+            "Sales Invoice",
+            si_name,
+            ["name", "docstatus", "is_return", "is_bns_internal_customer", "customer"],
+            as_dict=True,
+        )
+        if not si_meta or cint(si_meta.get("is_return")):
+            continue
+        si_internal = bool(si_meta.get("is_bns_internal_customer"))
+        if not si_internal and si_meta.get("customer"):
+            si_internal = bool(
+                frappe.db.get_value("Customer", si_meta.get("customer"), "is_bns_internal_customer")
+            )
+        if not si_internal:
+            continue
+        return {
+            "exists": True,
+            "sales_invoice": si_meta.get("name"),
+            "docstatus": cint(si_meta.get("docstatus")),
+            "docstatus_label": _docstatus_label(si_meta.get("docstatus")),
+            "delivery_note": row.get("delivery_note"),
+        }
+
+    return {"exists": False}
+
+
 def _get_dn_item_transfer_rate_for_gl(dn_item) -> float:
     """Get transfer rate from Delivery Note Item incoming_rate with DB fallback."""
     rate = flt(dn_item.get("incoming_rate") or 0)
@@ -765,6 +1090,18 @@ def _resolve_valuation_from_gl_entries(
             account = (row.get("account") or "").strip()
             if "stock in hand" in account.lower():
                 stock_accounts.add(account)
+    # Strong fallback: detect stock accounts from Account.account_type
+    # so custom account naming does not break BNS rewrite.
+    if not stock_accounts and gl_entries:
+        for row in gl_entries:
+            account = (row.get("account") or "").strip()
+            if not account:
+                continue
+            try:
+                if frappe.get_cached_value("Account", account, "account_type") == "Stock":
+                    stock_accounts.add(account)
+            except Exception:
+                continue
 
     if not stock_accounts:
         return 0.0, None, "no_stock_accounts"
@@ -791,17 +1128,45 @@ def _resolve_valuation_from_gl_entries(
 def _make_bns_gl_entry(doc, account: str, debit: float = 0.0, credit: float = 0.0, against: str = "", template: Optional[Dict[str, Any]] = None):
     """Build GL entry while preserving dimensions from template."""
     template = template or {}
-    party_type = template.get("party_type")
-    party = template.get("party")
+    party_type = None
+    party = None
+    cost_center = template.get("cost_center")
 
-    if not party_type or not party:
-        account_type = frappe.get_cached_value("Account", account, "account_type")
-        if account_type == "Receivable":
-            party_type = "Customer"
-            party = getattr(doc, "customer", None)
-        elif account_type == "Payable":
-            party_type = "Supplier"
-            party = getattr(doc, "supplier", None)
+    # In BNS rewrite, party fields are allowed only on internal branch debtor/creditor accounts.
+    # Non receivable/payable GL rows (e.g. internal transfer, tax, stock) must not carry party.
+    debtor_account = frappe.db.get_single_value(
+        "BNS Branch Accounting Settings", "internal_branch_debtor_account"
+    )
+    creditor_account = frappe.db.get_single_value(
+        "BNS Branch Accounting Settings", "internal_branch_creditor_account"
+    )
+    if account == debtor_account or account == creditor_account:
+        party_type = template.get("party_type")
+        party = template.get("party")
+        if not party_type or not party:
+            if account == debtor_account:
+                party_type = "Customer"
+                party = getattr(doc, "customer", None)
+            elif account == creditor_account:
+                party_type = "Supplier"
+                party = getattr(doc, "supplier", None)
+
+    # Cost center is mandatory for many P&L account entries in ERPNext.
+    # Keep template value when present; else fall back to document-level and company default.
+    if not cost_center:
+        cost_center = getattr(doc, "cost_center", None) or doc.get("cost_center")
+    if not cost_center:
+        cost_center = frappe.get_cached_value("Company", doc.company, "cost_center") if doc.get("company") else None
+
+    # Preserve ERPNext accounting dimensions on rewritten GL rows.
+    # Precedence: source GL template row value > document-level value.
+    dimension_args: Dict[str, Any] = {}
+    for dimension in get_accounting_dimensions():
+        dim_val = template.get(dimension)
+        if dim_val in (None, ""):
+            dim_val = doc.get(dimension)
+        if dim_val not in (None, ""):
+            dimension_args[dimension] = dim_val
 
     args = {
         "account": account,
@@ -810,37 +1175,33 @@ def _make_bns_gl_entry(doc, account: str, debit: float = 0.0, credit: float = 0.
         "against": against,
         "party_type": party_type,
         "party": party,
-        "cost_center": template.get("cost_center"),
+        "cost_center": cost_center,
         "project": template.get("project"),
         "finance_book": template.get("finance_book"),
         "remarks": template.get("remarks") or _("BNS internal transfer accounting rewrite"),
     }
+    args.update(dimension_args)
     return doc.get_gl_dict(args)
 
 
 def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Rewrite DN GL entries into BNS internal branch-accounting pattern."""
-    if not _is_bns_internal_same_gstin_delivery_note(doc):
+    if not _is_bns_internal_delivery_note(doc):
         return gl_entries
 
     settings = _get_bns_branch_accounting_accounts()
     if not settings:
         return gl_entries
-    if not settings.get("internal_sales_transfer_account"):
-        logger.warning("Skipping DN GL rewrite for %s due to missing internal_sales_transfer_account", doc.name)
-        return gl_entries
 
     force_mode = bool(settings.get("force_bns_internal_gl_rewrite"))
-    transfer_amount, transfer_reason = _resolve_dn_transfer_amount(doc, force_mode=force_mode)
     valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
         gl_entries, side="credit", company=doc.company
     )
 
-    if transfer_amount <= 0 or valuation_amount <= 0 or not stock_account:
+    if valuation_amount <= 0 or not stock_account:
         logger.warning(
-            "Skipping DN GL rewrite for %s due to transfer_reason=%s valuation_reason=%s",
+            "Skipping DN GL rewrite for %s due to valuation_reason=%s",
             doc.name,
-            transfer_reason or "ok",
             valuation_reason or "ok",
         )
         return gl_entries
@@ -851,12 +1212,35 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     if not template:
         return gl_entries
 
-    rewritten = [
-        _make_bns_gl_entry(doc, settings["internal_branch_debtor_account"], debit=transfer_amount, against=settings["internal_sales_transfer_account"], template=template),
-        _make_bns_gl_entry(doc, settings["stock_in_transit_account"], debit=valuation_amount, against=stock_account, template=template),
-        _make_bns_gl_entry(doc, settings["internal_sales_transfer_account"], credit=transfer_amount, against=settings["internal_branch_debtor_account"], template=template),
-        _make_bns_gl_entry(doc, stock_account, credit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
-    ]
+    if _is_same_gstin_internal_delivery_note(doc):
+        if not settings.get("internal_sales_transfer_account"):
+            logger.warning("Skipping DN GL rewrite for %s due to missing internal_sales_transfer_account", doc.name)
+            return gl_entries
+
+        transfer_amount, transfer_reason = _resolve_dn_transfer_amount(doc, force_mode=force_mode)
+        if transfer_amount <= 0:
+            logger.warning(
+                "Skipping DN GL rewrite for %s due to transfer_reason=%s",
+                doc.name,
+                transfer_reason or "ok",
+            )
+            return gl_entries
+
+        rewritten = [
+            _make_bns_gl_entry(doc, settings["internal_branch_debtor_account"], debit=transfer_amount, against=settings["internal_sales_transfer_account"], template=template),
+            _make_bns_gl_entry(doc, settings["stock_in_transit_account"], debit=valuation_amount, against=stock_account, template=template),
+            _make_bns_gl_entry(doc, settings["internal_sales_transfer_account"], credit=transfer_amount, against=settings["internal_branch_debtor_account"], template=template),
+            _make_bns_gl_entry(doc, stock_account, credit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
+        ]
+    else:
+        # Different GSTIN internal DN: keep billing flow unchanged, move valuation to stock-in-transit.
+        if not settings.get("stock_in_transit_account"):
+            logger.warning("Skipping DN GL rewrite for %s due to missing stock_in_transit_account", doc.name)
+            return gl_entries
+        rewritten = [
+            _make_bns_gl_entry(doc, settings["stock_in_transit_account"], debit=valuation_amount, against=stock_account, template=template),
+            _make_bns_gl_entry(doc, stock_account, credit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
+        ]
 
     debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
     credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
@@ -916,18 +1300,187 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     return rewritten
 
 
+def _resolve_si_tax_account_amounts(doc) -> Dict[str, float]:
+    """Aggregate SI tax/charge amounts account-wise in base currency."""
+    account_amounts: Dict[str, float] = defaultdict(float)
+    for tax in (doc.get("taxes") or []):
+        account = (tax.get("account_head") or "").strip()
+        if not account:
+            continue
+        base_amount = flt(
+            tax.get("base_tax_amount_after_discount_amount")
+            or tax.get("base_tax_amount")
+            or 0
+        )
+        if abs(base_amount) <= 0.000001:
+            continue
+        account_amounts[account] += base_amount
+    return dict(account_amounts)
+
+
+def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Rewrite SI GL entries into BNS internal different-GSTIN pattern."""
+    if not _is_bns_internal_different_gstin_sales_invoice(doc):
+        return gl_entries
+    if not is_after_internal_validation_cutoff(doc.get("posting_date")):
+        return gl_entries
+
+    settings = _get_bns_branch_accounting_accounts()
+    if not settings:
+        return gl_entries
+    if not settings.get("internal_sales_transfer_account"):
+        logger.warning("Skipping SI GL rewrite for %s due to missing internal_sales_transfer_account", doc.name)
+        return gl_entries
+
+    debtor_account = settings["internal_branch_debtor_account"]
+    transfer_account = settings["internal_sales_transfer_account"]
+    grand_total = flt(doc.get("base_grand_total") or doc.get("base_rounded_total") or 0)
+    taxable_total = flt(doc.get("base_net_total") or doc.get("base_total") or 0)
+    tax_by_account = _resolve_si_tax_account_amounts(doc)
+
+    if grand_total <= 0 or taxable_total < 0:
+        logger.warning("Skipping SI GL rewrite for %s due to invalid totals", doc.name)
+        return gl_entries
+
+    debtor_template = next(
+        (
+            row
+            for row in (gl_entries or [])
+            if row.get("account") == debtor_account and flt(row.get("debit") or 0) > 0
+        ),
+        None,
+    )
+    if not debtor_template:
+        debtor_template = next((row for row in (gl_entries or []) if flt(row.get("debit") or 0) > 0), None)
+    if not debtor_template and gl_entries:
+        debtor_template = gl_entries[0]
+    if not debtor_template:
+        return gl_entries
+
+    rewritten = [
+        _make_bns_gl_entry(
+            doc,
+            debtor_account,
+            debit=grand_total,
+            against=transfer_account,
+            template=debtor_template,
+        )
+    ]
+
+    for tax_account, tax_amount in sorted(tax_by_account.items()):
+        tax_template = next(
+            (
+                row
+                for row in (gl_entries or [])
+                if row.get("account") == tax_account
+                and (flt(row.get("debit") or 0) > 0 or flt(row.get("credit") or 0) > 0)
+            ),
+            debtor_template,
+        )
+        if tax_amount > 0:
+            rewritten.append(
+                _make_bns_gl_entry(
+                    doc,
+                    tax_account,
+                    credit=tax_amount,
+                    against=debtor_account,
+                    template=tax_template,
+                )
+            )
+        else:
+            rewritten.append(
+                _make_bns_gl_entry(
+                    doc,
+                    tax_account,
+                    debit=abs(tax_amount),
+                    against=debtor_account,
+                    template=tax_template,
+                )
+            )
+
+    rewritten.append(
+        _make_bns_gl_entry(
+            doc,
+            transfer_account,
+            credit=taxable_total,
+            against=debtor_account,
+            template=debtor_template,
+        )
+    )
+
+    if cint(doc.get("update_stock")):
+        valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
+            gl_entries, side="credit", company=doc.company
+        )
+        if valuation_amount <= 0 or not stock_account:
+            logger.warning(
+                "Skipping SI stock-leg rewrite for %s due to valuation_reason=%s",
+                doc.name,
+                valuation_reason or "ok",
+            )
+            return gl_entries
+        stock_template = next(
+            (
+                row
+                for row in (gl_entries or [])
+                if row.get("account") == stock_account and flt(row.get("credit") or 0) > 0
+            ),
+            debtor_template,
+        )
+        rewritten.append(
+            _make_bns_gl_entry(
+                doc,
+                settings["stock_in_transit_account"],
+                debit=valuation_amount,
+                against=stock_account,
+                template=stock_template,
+            )
+        )
+        rewritten.append(
+            _make_bns_gl_entry(
+                doc,
+                stock_account,
+                credit=valuation_amount,
+                against=settings["stock_in_transit_account"],
+                template=stock_template,
+            )
+        )
+
+    debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
+    credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
+    if abs(debit_total - credit_total) > 0.01:
+        logger.error(
+            "Skipping SI GL rewrite for %s due to balance mismatch %s vs %s",
+            doc.name,
+            debit_total,
+            credit_total,
+        )
+        return gl_entries
+
+    logger.info(
+        "Applied BNS SI GL rewrite for %s (update_stock=%s, grand=%s, taxable=%s)",
+        doc.name,
+        cint(doc.get("update_stock")),
+        grand_total,
+        taxable_total,
+    )
+    return rewritten
+
+
 def _apply_bns_internal_gl_rewrite_patch() -> None:
-    """Patch ERPNext GL generation for DN and PR in BNS internal same-GSTIN scope."""
+    """Patch ERPNext GL generation for DN/PR/SI in BNS internal scopes."""
     global _BNS_INTERNAL_GL_PATCHED
     if _BNS_INTERNAL_GL_PATCHED:
         return
 
     try:
+        from erpnext.accounts.doctype.sales_invoice.sales_invoice import SalesInvoice
         from erpnext.controllers.stock_controller import StockController
         from erpnext.stock.doctype.purchase_receipt.purchase_receipt import PurchaseReceipt
 
         original_stock_get_gl_entries = StockController.get_gl_entries
         original_pr_get_gl_entries = PurchaseReceipt.get_gl_entries
+        original_si_get_gl_entries = SalesInvoice.get_gl_entries
 
         if getattr(original_stock_get_gl_entries, "_bns_internal_gl_rewrite_patched", False):
             _BNS_INTERNAL_GL_PATCHED = True
@@ -943,12 +1496,18 @@ def _apply_bns_internal_gl_rewrite_patch() -> None:
             gl_entries = original_pr_get_gl_entries(self, warehouse_account, via_landed_cost_voucher)
             return _rewrite_bns_internal_pr_gl_entries(self, gl_entries)
 
+        def patched_si_get_gl_entries(self, warehouse_account=None):
+            gl_entries = original_si_get_gl_entries(self, warehouse_account)
+            return _rewrite_bns_internal_si_gl_entries(self, gl_entries)
+
         patched_stock_get_gl_entries._bns_internal_gl_rewrite_patched = True
         patched_pr_get_gl_entries._bns_internal_gl_rewrite_patched = True
+        patched_si_get_gl_entries._bns_internal_gl_rewrite_patched = True
         StockController.get_gl_entries = patched_stock_get_gl_entries
         PurchaseReceipt.get_gl_entries = patched_pr_get_gl_entries
+        SalesInvoice.get_gl_entries = patched_si_get_gl_entries
         _BNS_INTERNAL_GL_PATCHED = True
-        logger.info("Applied BNS internal GL rewrite patch for Delivery Note and Purchase Receipt")
+        logger.info("Applied BNS internal GL rewrite patch for Delivery Note, Purchase Receipt, and Sales Invoice")
 
     except Exception as e:
         logger.error("Failed to apply BNS internal GL rewrite patch: %s", str(e))
@@ -994,7 +1553,7 @@ def _run_bns_gl_repost_correction(doc, force_override: bool = False) -> None:
             continue
         voucher_doc = frappe.get_doc(voucher_type, voucher_no)
         if voucher_type == "Delivery Note":
-            is_scope = _is_bns_internal_same_gstin_delivery_note(voucher_doc)
+            is_scope = _is_bns_internal_delivery_note(voucher_doc)
             # region agent log
             _bns_debug_log(
                 "H2",
@@ -1330,7 +1889,7 @@ def _force_rebuild_bns_gl_for_voucher(
     if doc.docstatus != 1:
         return False
 
-    if voucher_type == "Delivery Note" and not _is_bns_internal_same_gstin_delivery_note(doc):
+    if voucher_type == "Delivery Note" and not _is_bns_internal_delivery_note(doc):
         return False
     if voucher_type == "Purchase Receipt" and not _is_bns_internal_same_gstin_purchase_receipt(doc):
         return False
@@ -1358,6 +1917,11 @@ def _force_rebuild_bns_gl_for_voucher(
         _delete_ledger_rows_for_voucher(voucher_type, voucher_no)
         doc.make_gl_entries(from_repost=True)
         after_counts = _get_ledger_row_counts_for_voucher(voucher_type, voucher_no)
+        # Safety: never accept a rebuild that emptied GL for a previously posted voucher.
+        if before_counts.get("gl_entry", 0) > 0 and after_counts.get("gl_entry", 0) == 0:
+            raise frappe.ValidationError(
+                f"BNS force rebuild produced zero GL rows for {voucher_type} {voucher_no}; rolling back."
+            )
         logger.info(
             "BNS repost audit %s",
             frappe.as_json(
@@ -1457,7 +2021,7 @@ def _run_bns_gl_repost_accounting_correction(repost_doc_name: str, force_overrid
             continue
         doc = frappe.get_doc(voucher_type, voucher_no)
         if voucher_type == "Delivery Note":
-            is_scope = _is_bns_internal_same_gstin_delivery_note(doc)
+            is_scope = _is_bns_internal_delivery_note(doc)
             # region agent log
             _bns_debug_log(
                 "H2",
@@ -1511,6 +2075,21 @@ def _run_bns_gl_repost_accounting_correction(repost_doc_name: str, force_overrid
     _apply_bns_internal_gl_rewrite_patch()
     settings = _get_bns_branch_accounting_accounts()
     force_mode = bool(settings and settings.get("force_bns_internal_gl_rewrite")) or bool(force_override)
+    # Different-GSTIN internal DN must not drift to default COGS/SIH on repost;
+    # force controlled rebuild for this subset.
+    if not force_mode:
+        for voucher_type, voucher_no in claimed:
+            if voucher_type != "Delivery Note":
+                continue
+            try:
+                voucher_doc = frappe.get_doc(voucher_type, voucher_no)
+            except Exception:
+                continue
+            if _is_bns_internal_delivery_note(voucher_doc) and not _is_same_gstin_internal_delivery_note(
+                voucher_doc
+            ):
+                force_mode = True
+                break
     try:
         if force_mode:
             rebuilt = 0
@@ -1612,7 +2191,8 @@ def bns_debug_internal_gl_scope(voucher_type: str, voucher_no: str) -> Dict[str,
         "voucher_no": voucher_no,
         "settings_loaded": bool(settings),
         "force_mode_setting": force_mode,
-        "is_dn_scope": _is_bns_internal_same_gstin_delivery_note(doc) if voucher_type == "Delivery Note" else None,
+        "is_dn_scope": _is_bns_internal_delivery_note(doc) if voucher_type == "Delivery Note" else None,
+        "is_dn_same_gstin_scope": _is_bns_internal_same_gstin_delivery_note(doc) if voucher_type == "Delivery Note" else None,
         "is_pr_scope": _is_bns_internal_same_gstin_purchase_receipt(doc) if voucher_type == "Purchase Receipt" else None,
         "gl_entries": gl_entries,
         "doc_get_gl_entries_qualname": getattr(getattr(doc, "get_gl_entries", None), "__qualname__", None),
@@ -1809,6 +2389,17 @@ _apply_bns_transfer_rate_stock_ledger_patch()
 _apply_bns_internal_gl_rewrite_patch()
 _apply_bns_repost_gl_failsafe_patch()
 _apply_bns_repost_accounting_ledger_patch()
+
+
+def apply_bns_runtime_patches() -> None:
+    """
+    Ensure BNS runtime monkey patches are applied in every process (web/worker).
+    Hooked from after_app_init so repost workers don't miss patch load.
+    """
+    _apply_bns_transfer_rate_stock_ledger_patch()
+    _apply_bns_internal_gl_rewrite_patch()
+    _apply_bns_repost_gl_failsafe_patch()
+    _apply_bns_repost_accounting_ledger_patch()
 
 
 def is_bns_internal_customer(doc) -> bool:

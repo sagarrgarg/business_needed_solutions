@@ -244,7 +244,8 @@ doc_events = {
         "validate": [
             "business_needed_solutions.bns_branch_accounting.overrides.billing_location.set_customer_address_from_billing_location",
             "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference",
-            "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_customer_return"
+            "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_customer_return",
+            "business_needed_solutions.bns_branch_accounting.utils.validate_internal_sales_invoice_linkage",
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
@@ -324,6 +325,9 @@ fixtures = [
 override_whitelisted_methods = {
 	"frappe.desk.form.linked_with.get_submitted_linked_docs": "business_needed_solutions.bns_branch_accounting.overrides.cancel_dialog.get_submitted_linked_docs",
 }
+
+# Allow Delivery Note in Repost Accounting Ledger processing.
+repost_allowed_doctypes = ["Delivery Note"]
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
@@ -396,5 +400,6 @@ after_migrate = "business_needed_solutions.bns_branch_accounting.migration.after
 after_app_init = [
 	"business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.apply_patches",
 	"business_needed_solutions.business_needed_solutions.overrides.get_value_filters_fix.apply_patch",
+	"business_needed_solutions.bns_branch_accounting.utils.apply_bns_runtime_patches",
 ]
 

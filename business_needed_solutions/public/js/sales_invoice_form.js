@@ -1,4 +1,42 @@
 frappe.ui.form.on('Sales Invoice', {
+    validate: function(frm) {
+        if (frm.doc.is_return || !frm.doc.is_bns_internal_customer) {
+            return;
+        }
+        const company_gstin = (frm.doc.company_gstin || '').trim();
+        const billing_gstin = (frm.doc.billing_address_gstin || '').trim();
+        if (!company_gstin || !billing_gstin || company_gstin === billing_gstin) {
+            return;
+        }
+        const dn_names = Array.from(
+            new Set((frm.doc.items || []).map(d => (d.delivery_note || '').trim()).filter(Boolean))
+        );
+        if (!dn_names.length) {
+            return;
+        }
+
+        frappe.call({
+            method: 'business_needed_solutions.bns_branch_accounting.utils.check_existing_internal_si_for_dn',
+            args: {
+                delivery_notes: dn_names,
+                current_si: frm.doc.name || null
+            },
+            async: false,
+            callback: function(r) {
+                const result = r && r.message;
+                if (!result || !result.exists) return;
+                frappe.validated = false;
+                frappe.msgprint({
+                    title: __('Duplicate Internal Sales Invoice Not Allowed'),
+                    indicator: 'red',
+                    message: __(
+                        'Delivery Note {0} is already linked to Sales Invoice {1} ({2}). You cannot create another internal Sales Invoice for the same Delivery Note.'
+                    ).format(result.delivery_note, result.sales_invoice, result.docstatus_label || __('Draft'))
+                });
+            }
+        });
+    },
+
     refresh: function(frm) {
         // Show button to convert to BNS Internal if customer is BNS internal but SI is not marked
         // OR if SI is marked but status is not "BNS Internally Transferred"
