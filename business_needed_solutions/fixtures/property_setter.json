@@ -206,5 +206,21 @@
   "property_type": null,
   "row_name": null,
   "value": "0"
+ },
+ {
+  "default_value": null,
+  "doc_type": "Sales Invoice Item",
+  "docstatus": 0,
+  "doctype": "Property Setter",
+  "doctype_or_field": "DocField",
+  "field_name": "incoming_rate",
+  "is_system_generated": 0,
+  "modified": "2026-02-22 00:00:00.000000",
+  "module": "BNS Branch Accounting",
+  "name": "Sales Invoice Item-incoming_rate-depends_on",
+  "property": "depends_on",
+  "property_type": null,
+  "row_name": null,
+  "value": ""
  }
 ]

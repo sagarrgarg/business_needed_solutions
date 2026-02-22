@@ -230,38 +230,26 @@ def _raise_restriction_error(doctype: str, category: str) -> None:
     frappe.throw(error_message, title=_("Submission Permission Error"))
 
 
-# Legacy function names for backward compatibility
-def validate_stock_modification(doc, method: Optional[str] = None) -> None:
-    """
-    Legacy function for stock modification validation.
-    Now redirects to the unified validation function.
-    
-    Args:
-        doc: The document being validated
-        method (Optional[str]): The method being called
-    """
-    validate_submission_permission(doc, method)
-
-
-def validate_transaction_modification(doc, method: Optional[str] = None) -> None:
-    """
-    Legacy function for transaction modification validation.
-    Now redirects to the unified validation function.
-    
-    Args:
-        doc: The document being validated
-        method (Optional[str]): The method being called
-    """
-    validate_submission_permission(doc, method)
-
-
-def validate_order_modification(doc, method: Optional[str] = None) -> None:
-    """
-    Legacy function for order modification validation.
-    Now redirects to the unified validation function.
-    
-    Args:
-        doc: The document being validated
-        method (Optional[str]): The method being called
-    """
-    validate_submission_permission(doc, method) 
+# Temporarily disabled unused legacy wrappers (keep commented for rollback safety).
+# def validate_stock_modification(doc, method: Optional[str] = None) -> None:
+#     """
+#     Legacy function for stock modification validation.
+#     Now redirects to the unified validation function.
+#     """
+#     validate_submission_permission(doc, method)
+#
+#
+# def validate_transaction_modification(doc, method: Optional[str] = None) -> None:
+#     """
+#     Legacy function for transaction modification validation.
+#     Now redirects to the unified validation function.
+#     """
+#     validate_submission_permission(doc, method)
+#
+#
+# def validate_order_modification(doc, method: Optional[str] = None) -> None:
+#     """
+#     Legacy function for order modification validation.
+#     Now redirects to the unified validation function.
+#     """
+#     validate_submission_permission(doc, method)

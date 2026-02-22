@@ -260,10 +260,18 @@ doc_events = {
         ],
         "validate": [
             "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference",
-            "business_needed_solutions.business_needed_solutions.overrides.gst_compliance.validate_purchase_invoice_same_gstin"
+            "business_needed_solutions.business_needed_solutions.overrides.gst_compliance.validate_purchase_invoice_same_gstin",
+            "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_invoice_transfer_rate"
         ],
         "before_cancel": "business_needed_solutions.bns_branch_accounting.utils.ignore_parent_cancellation_links_for_bns_internal",
         "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.unlink_references_on_purchase_cancel"
+    },
+    "Repost Item Valuation": {
+        "on_change": [
+            "business_needed_solutions.bns_branch_accounting.utils.refresh_pr_transfer_rate_after_repost",
+            "business_needed_solutions.bns_branch_accounting.utils.refresh_si_transfer_rate_after_repost",
+            "business_needed_solutions.bns_branch_accounting.utils.refresh_bns_internal_status_after_repost",
+        ]
     },
     "Journal Entry": {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"

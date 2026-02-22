@@ -38,6 +38,7 @@ def after_migrate() -> None:
 
     except Exception as e:
         logger.error("Error in BNS Branch Accounting post-migration setup: %s", str(e))
+        raise
 
 
 def initialize_bns_repost_tracking_state() -> None:
