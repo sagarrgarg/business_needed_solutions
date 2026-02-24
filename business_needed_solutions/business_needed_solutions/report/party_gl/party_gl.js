@@ -492,8 +492,9 @@ async function downloadStatementPDF(report) {
 
 /**
  * Run PDF generation with given print_settings (used after dialog submit).
- * Builds self-contained HTML with all CSS inlined to avoid wkhtmltopdf proxy
- * issues when the site is accessed via IP instead of configured hostname.
+ * Wraps frappe.render_pdf to inline external CSS before sending HTML to the
+ * server, preventing wkhtmltopdf proxy failures when the site is accessed
+ * via IP instead of the configured hostname.
  */
 async function runStatementPDFReport(report, print_settings) {
 	var qr = frappe.query_report;
@@ -508,75 +509,30 @@ async function runStatementPDFReport(report, print_settings) {
 		return vals;
 	};
 
-	try {
-		var landscape = print_settings.orientation === "Landscape";
-		var customFormat = await qr.get_custom_format(print_settings);
-		var columns = qr.get_columns_for_print(print_settings, customFormat);
-		var data = qr.get_data_for_print();
-		var appliedFilters = qr.get_filter_values();
-		var filtersHtml = qr.get_filters_html_for_print();
-		var template = qr.get_print_template(print_settings, customFormat);
-
-		var content = frappe.render_template(template, {
-			title: __(qr.report_name),
-			subtitle: print_settings?.include_filters ? filtersHtml : null,
-			filters: appliedFilters,
-			data: data,
-			original_data: qr.data,
-			columns: columns,
-			report: qr,
-			print_settings: print_settings,
-		});
-
-		var printBundleCss = "";
+	var _origRenderPdf = frappe.render_pdf;
+	frappe.render_pdf = async function (html, opts) {
 		try {
-			var bundleUrl = frappe.urllib.get_base_url()
-				+ frappe.assets.bundled_asset("print.bundle.css", frappe.utils.is_rtl());
-			var resp = await fetch(bundleUrl);
-			if (resp.ok) printBundleCss = await resp.text();
-		} catch (_e) {
-			// Continue without print.bundle.css; custom styles cover the layout
-		}
+			var linkMatch = html.match(/<link[^>]+href="([^"]*print\.bundle[^"]*)"[^>]*>/);
+			if (linkMatch) {
+				var cssText = "";
+				try {
+					var resp = await fetch(linkMatch[1]);
+					if (resp.ok) cssText = await resp.text();
+				} catch (_e) { /* ignore */ }
+				html = html.replace(linkMatch[0], "<style>" + cssText + "</style>");
+			}
+		} catch (_e) { /* fall through with original html */ }
+		_origRenderPdf.call(frappe, html, opts);
+	};
 
-		var html = `<!DOCTYPE html>
-<html lang="${frappe.boot.lang}" dir="${frappe.utils.is_rtl() ? "rtl" : "ltr"}">
-<head>
- <meta charset="utf-8">
- <meta http-equiv="X-UA-Compatible" content="IE=edge">
- <meta name="viewport" content="width=device-width, initial-scale=1">
- <meta name="description" content="">
- <meta name="author" content="">
- <title>${__(qr.report_name)}</title>
- <style>${printBundleCss}</style>
- <style>${frappe.boot.print_css || ""}</style>
-</head>
-<body>
- <div class="print-format-gutter">
-     <div class="print-format ${landscape ? "landscape" : ""}"
-       >
-       ${content}
-  </div>
- </div>
-</body>
-</html>`;
-
-		var filterValues = [];
-		var nameLen = 0;
-		for (var key of Object.keys(appliedFilters)) {
-			nameLen += appliedFilters[key].toString().length;
-			if (nameLen > 200) break;
-			filterValues.push(appliedFilters[key]);
-		}
-		print_settings.report_name = filterValues.length
-			? `${__(qr.report_name)}_${filterValues.join("_")}.pdf`
-			: `${__(qr.report_name)}.pdf`;
-
-		frappe.render_pdf(html, print_settings);
+	try {
+		await qr.pdf_report(print_settings);
 	} catch (e) {
 		console.error("PDF generation error:", e);
 		frappe.msgprint(__("Error generating PDF: ") + e.message);
 	} finally {
 		qr.get_filter_values = originalGetFilterValues;
+		frappe.render_pdf = _origRenderPdf;
 	}
 }
 
