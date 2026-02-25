@@ -8023,3 +8023,859 @@ def backfill_item_references(from_date: str) -> Dict:
             "Backfill complete: {0} Purchase Invoice(s) ({1} items), {2} Purchase Receipt(s) ({3} items)."
         ).format(pi_docs_fixed, pi_items_fixed, pr_docs_fixed, pr_items_fixed),
     }
+
+
+# ---------------------------------------------------------------------------
+# Bulk Linkage Verification & Repost
+# ---------------------------------------------------------------------------
+
+def _qtys_equal_bulk(a, b):
+    """Compare quantities with no tolerance; round to 6 decimals."""
+    return round(flt(a or 0), 6) == round(flt(b or 0), 6)
+
+
+def _verify_dn_pr_item_linkage(dn_name: str, pr_name: str) -> Dict[str, Any]:
+    """
+    Verify item-level linkage between DN and PR (same GSTIN).
+
+    Args:
+        dn_name: Delivery Note name
+        pr_name: Purchase Receipt name
+
+    Returns:
+        Dict with keys: linked (bool), missing_items (list), qty_mismatches (list), item_mismatches (list)
+    """
+    dn_items = frappe.get_all(
+        "Delivery Note Item",
+        filters={"parent": dn_name},
+        fields=["name", "item_code", "qty", "stock_qty"],
+    )
+    pr_items = frappe.get_all(
+        "Purchase Receipt Item",
+        filters={"parent": pr_name},
+        fields=["name", "item_code", "qty", "stock_qty", "delivery_note_item"],
+    )
+
+    pr_by_dn_item = {}
+    for pri in pr_items:
+        dni_ref = (pri.get("delivery_note_item") or "").strip()
+        if dni_ref:
+            pr_by_dn_item.setdefault(dni_ref, []).append(pri)
+
+    missing_items = []
+    qty_mismatches = []
+    item_mismatches = []
+
+    for dni in dn_items:
+        linked_prs = pr_by_dn_item.get(dni.name, [])
+        if not linked_prs:
+            missing_items.append({"item_code": dni.item_code, "dn_item": dni.name})
+            continue
+        total_pr_qty = sum(flt(p.get("stock_qty") or p.get("qty") or 0) for p in linked_prs)
+        dn_qty = flt(dni.stock_qty or dni.qty or 0)
+        if not _qtys_equal_bulk(dn_qty, total_pr_qty):
+            qty_mismatches.append({
+                "item_code": dni.item_code, "dn_qty": dn_qty, "pr_qty": total_pr_qty,
+            })
+        for pri in linked_prs:
+            if (pri.item_code or "") != (dni.item_code or ""):
+                item_mismatches.append({
+                    "dn_item_code": dni.item_code, "pr_item_code": pri.item_code,
+                    "dn_item": dni.name, "pr_item": pri.name,
+                })
+
+    fully_linked = not missing_items and not qty_mismatches and not item_mismatches
+    return {
+        "linked": fully_linked,
+        "missing_items": missing_items,
+        "qty_mismatches": qty_mismatches,
+        "item_mismatches": item_mismatches,
+    }
+
+
+def _verify_si_pi_item_linkage(si_name: str, pi_name: str) -> Dict[str, Any]:
+    """
+    Verify item-level linkage between SI and PI (different GSTIN).
+
+    Returns:
+        Dict with keys: linked (bool), missing_items, qty_mismatches, item_mismatches
+    """
+    si_items = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"parent": si_name},
+        fields=["name", "item_code", "qty", "stock_qty"],
+    )
+    pi_items = frappe.get_all(
+        "Purchase Invoice Item",
+        filters={"parent": pi_name},
+        fields=["name", "item_code", "qty", "stock_qty", "sales_invoice_item"],
+    )
+
+    pi_by_si_item = {}
+    for pii in pi_items:
+        si_ref = (pii.get("sales_invoice_item") or "").strip()
+        if si_ref:
+            pi_by_si_item.setdefault(si_ref, []).append(pii)
+
+    missing_items = []
+    qty_mismatches = []
+    item_mismatches = []
+
+    for sii in si_items:
+        linked_pis = pi_by_si_item.get(sii.name, [])
+        if not linked_pis:
+            missing_items.append({"item_code": sii.item_code, "si_item": sii.name})
+            continue
+        total_pi_qty = sum(flt(p.get("stock_qty") or p.get("qty") or 0) for p in linked_pis)
+        si_qty = flt(sii.stock_qty or sii.qty or 0)
+        if not _qtys_equal_bulk(si_qty, total_pi_qty):
+            qty_mismatches.append({
+                "item_code": sii.item_code, "si_qty": si_qty, "pi_qty": total_pi_qty,
+            })
+        for pii in linked_pis:
+            if (pii.item_code or "") != (sii.item_code or ""):
+                item_mismatches.append({
+                    "si_item_code": sii.item_code, "pi_item_code": pii.item_code,
+                    "si_item": sii.name, "pi_item": pii.name,
+                })
+
+    fully_linked = not missing_items and not qty_mismatches and not item_mismatches
+    return {
+        "linked": fully_linked,
+        "missing_items": missing_items,
+        "qty_mismatches": qty_mismatches,
+        "item_mismatches": item_mismatches,
+    }
+
+
+def _verify_si_pr_item_linkage(si_name: str, pr_name: str) -> Dict[str, Any]:
+    """
+    Verify item-level linkage between SI and PR (SI->PR flow).
+
+    PR items reference SI via sales_invoice_item or item_code+qty matching.
+    """
+    si_items = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"parent": si_name},
+        fields=["name", "item_code", "qty", "stock_qty"],
+    )
+    pr_items = frappe.get_all(
+        "Purchase Receipt Item",
+        filters={"parent": pr_name},
+        fields=["name", "item_code", "qty", "stock_qty", "sales_invoice_item"],
+    )
+
+    pr_meta = frappe.get_meta("Purchase Receipt Item")
+    has_si_item_field = pr_meta.has_field("sales_invoice_item")
+
+    pr_by_si_item = {}
+    unlinked_pr_items = []
+    if has_si_item_field:
+        for pri in pr_items:
+            si_ref = (pri.get("sales_invoice_item") or "").strip()
+            if si_ref:
+                pr_by_si_item.setdefault(si_ref, []).append(pri)
+            else:
+                unlinked_pr_items.append(pri)
+    else:
+        unlinked_pr_items = list(pr_items)
+
+    missing_items = []
+    qty_mismatches = []
+    item_mismatches = []
+
+    si_agg = defaultdict(float)
+    for sii in si_items:
+        si_agg[sii.item_code] += flt(sii.stock_qty or sii.qty or 0)
+
+    pr_agg = defaultdict(float)
+    for pri in pr_items:
+        pr_agg[pri.item_code] += flt(pri.stock_qty or pri.qty or 0)
+
+    for item_code, si_qty in si_agg.items():
+        pr_qty = pr_agg.get(item_code, 0)
+        if not _qtys_equal_bulk(si_qty, pr_qty):
+            if pr_qty == 0:
+                missing_items.append({"item_code": item_code})
+            else:
+                qty_mismatches.append({"item_code": item_code, "si_qty": si_qty, "pr_qty": pr_qty})
+
+    for item_code in pr_agg:
+        if item_code not in si_agg:
+            item_mismatches.append({"si_item_code": None, "pr_item_code": item_code})
+
+    fully_linked = not missing_items and not qty_mismatches and not item_mismatches
+    return {
+        "linked": fully_linked,
+        "missing_items": missing_items,
+        "qty_mismatches": qty_mismatches,
+        "item_mismatches": item_mismatches,
+    }
+
+
+def _verify_pr_pi_item_linkage(pr_name: str, pi_name: str) -> Dict[str, Any]:
+    """
+    Verify item-level linkage between PR and PI (PR->PI flow).
+
+    PI items reference PR via purchase_receipt + pr_detail.
+    """
+    pr_items = frappe.get_all(
+        "Purchase Receipt Item",
+        filters={"parent": pr_name},
+        fields=["name", "item_code", "qty", "stock_qty"],
+    )
+    pi_items = frappe.get_all(
+        "Purchase Invoice Item",
+        filters={"parent": pi_name, "purchase_receipt": pr_name},
+        fields=["name", "item_code", "qty", "stock_qty", "pr_detail"],
+    )
+
+    pr_agg = defaultdict(float)
+    for pri in pr_items:
+        pr_agg[pri.item_code] += flt(pri.stock_qty or pri.qty or 0)
+
+    pi_agg = defaultdict(float)
+    for pii in pi_items:
+        pi_agg[pii.item_code] += flt(pii.stock_qty or pii.qty or 0)
+
+    missing_items = []
+    qty_mismatches = []
+    item_mismatches = []
+
+    for item_code, pr_qty in pr_agg.items():
+        pi_qty = pi_agg.get(item_code, 0)
+        if not _qtys_equal_bulk(pr_qty, pi_qty):
+            if pi_qty == 0:
+                missing_items.append({"item_code": item_code})
+            else:
+                qty_mismatches.append({"item_code": item_code, "pr_qty": pr_qty, "pi_qty": pi_qty})
+
+    for item_code in pi_agg:
+        if item_code not in pr_agg:
+            item_mismatches.append({"pr_item_code": None, "pi_item_code": item_code})
+
+    fully_linked = not missing_items and not qty_mismatches and not item_mismatches
+    return {
+        "linked": fully_linked,
+        "missing_items": missing_items,
+        "qty_mismatches": qty_mismatches,
+        "item_mismatches": item_mismatches,
+    }
+
+
+def _verify_dn_si_item_linkage(dn_name: str, si_name: str) -> Dict[str, Any]:
+    """
+    Verify item-level linkage between DN and SI.
+
+    SI items reference DN via delivery_note + dn_detail fields.
+    """
+    dn_items = frappe.get_all(
+        "Delivery Note Item",
+        filters={"parent": dn_name},
+        fields=["name", "item_code", "qty", "stock_qty"],
+    )
+    si_items = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"parent": si_name, "delivery_note": dn_name},
+        fields=["name", "item_code", "qty", "stock_qty", "dn_detail"],
+    )
+
+    si_by_dn_detail = {}
+    for sii in si_items:
+        ref = (sii.get("dn_detail") or "").strip()
+        if ref:
+            si_by_dn_detail.setdefault(ref, []).append(sii)
+
+    missing_items = []
+    qty_mismatches = []
+    item_mismatches = []
+
+    for dni in dn_items:
+        linked_sis = si_by_dn_detail.get(dni.name, [])
+        if not linked_sis:
+            missing_items.append({"item_code": dni.item_code, "dn_item": dni.name})
+            continue
+        total_si_qty = sum(flt(s.get("stock_qty") or s.get("qty") or 0) for s in linked_sis)
+        dn_qty = flt(dni.stock_qty or dni.qty or 0)
+        if not _qtys_equal_bulk(dn_qty, total_si_qty):
+            qty_mismatches.append({
+                "item_code": dni.item_code, "dn_qty": dn_qty, "si_qty": total_si_qty,
+            })
+        for sii in linked_sis:
+            if (sii.item_code or "") != (dni.item_code or ""):
+                item_mismatches.append({
+                    "dn_item_code": dni.item_code, "si_item_code": sii.item_code,
+                })
+
+    fully_linked = not missing_items and not qty_mismatches and not item_mismatches
+    return {
+        "linked": fully_linked,
+        "missing_items": missing_items,
+        "qty_mismatches": qty_mismatches,
+        "item_mismatches": item_mismatches,
+    }
+
+
+def _get_sis_from_dn(dn_name: str) -> List[str]:
+    """Get submitted Sales Invoices created from a Delivery Note."""
+    si_names = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"delivery_note": dn_name, "docstatus": 1},
+        pluck="parent",
+    )
+    return sorted(set(si_names))
+
+
+def _detect_chain_type(doc_type: str, doc_name: str, doc: Dict) -> Dict[str, Any]:
+    """
+    Detect which internal transfer chain type a document belongs to.
+
+    Args:
+        doc_type: "Delivery Note" or "Sales Invoice"
+        doc_name: Document name
+        doc: Document dict with company_gstin, billing_address_gstin, etc.
+
+    Returns:
+        Dict with chain_type, docs dict keyed by role, and verification results.
+    """
+    company_gstin = (doc.get("company_gstin") or "").strip()
+    billing_gstin = (doc.get("billing_address_gstin") or "").strip()
+    same_gstin = company_gstin and billing_gstin and company_gstin == billing_gstin
+
+    if doc_type == "Delivery Note":
+        if same_gstin:
+            # Chain 1: DN -> PR
+            pr_names = _get_submitted_prs_for_dn(doc_name)
+            if not pr_names:
+                return {"chain_type": "DN->PR", "status": "unlinked", "docs": {"dn": doc_name}, "issues": ["No PR linked to DN"]}
+
+            pr_name = pr_names[0]
+            pr_ref = frappe.db.get_value("Purchase Receipt", pr_name, "bns_inter_company_reference")
+            dn_ref = doc.get("bns_inter_company_reference") or ""
+
+            issues = []
+            if dn_ref != pr_name:
+                issues.append(f"DN.bns_inter_company_reference ({dn_ref}) does not point to PR ({pr_name})")
+            if pr_ref != doc_name:
+                issues.append(f"PR.bns_inter_company_reference ({pr_ref}) does not point to DN ({doc_name})")
+
+            item_check = _verify_dn_pr_item_linkage(doc_name, pr_name)
+            if not item_check["linked"]:
+                issues.extend(_format_item_issues("DN->PR", item_check))
+
+            status = "fully_linked" if not issues else "partially_linked"
+            return {
+                "chain_type": "DN->PR",
+                "status": status,
+                "docs": {"dn": doc_name, "pr": pr_name},
+                "issues": issues,
+            }
+        else:
+            # Different GSTIN DN: look for SI made from this DN
+            si_names = _get_sis_from_dn(doc_name)
+            if not si_names:
+                return {"chain_type": "DN->SI->?", "status": "unlinked", "docs": {"dn": doc_name}, "issues": ["No SI created from DN"]}
+
+            si_name = si_names[0]
+            issues = []
+
+            dn_si_check = _verify_dn_si_item_linkage(doc_name, si_name)
+            if not dn_si_check["linked"]:
+                issues.extend(_format_item_issues("DN->SI", dn_si_check))
+
+            si_data = frappe.db.get_value(
+                "Sales Invoice", si_name,
+                ["bns_inter_company_reference", "bns_purchase_receipt_reference"],
+                as_dict=True,
+            ) or {}
+
+            si_pi_ref = (si_data.get("bns_inter_company_reference") or "").strip()
+            si_pr_ref = (si_data.get("bns_purchase_receipt_reference") or "").strip()
+
+            if si_pr_ref and frappe.db.exists("Purchase Receipt", si_pr_ref):
+                # Chain 5: DN -> SI -> PR -> PI
+                pr_name = si_pr_ref
+                pr_data = frappe.db.get_value(
+                    "Purchase Receipt", pr_name, "bns_inter_company_reference",
+                )
+                if (pr_data or "") != si_name:
+                    issues.append(f"PR.bns_inter_company_reference ({pr_data}) does not point to SI ({si_name})")
+
+                si_pr_check = _verify_si_pr_item_linkage(si_name, pr_name)
+                if not si_pr_check["linked"]:
+                    issues.extend(_format_item_issues("SI->PR", si_pr_check))
+
+                pi_names = frappe.get_all(
+                    "Purchase Invoice Item",
+                    filters={"purchase_receipt": pr_name, "docstatus": 1},
+                    pluck="parent",
+                )
+                pi_names = sorted(set(pi_names))
+
+                if pi_names:
+                    pi_name = pi_names[0]
+                    pr_pi_check = _verify_pr_pi_item_linkage(pr_name, pi_name)
+                    if not pr_pi_check["linked"]:
+                        issues.extend(_format_item_issues("PR->PI", pr_pi_check))
+                    status = "fully_linked" if not issues else "partially_linked"
+                    return {
+                        "chain_type": "DN->SI->PR->PI",
+                        "status": status,
+                        "docs": {"dn": doc_name, "si": si_name, "pr": pr_name, "pi": pi_name},
+                        "issues": issues,
+                    }
+                else:
+                    issues.append("No PI created from PR")
+                    return {
+                        "chain_type": "DN->SI->PR->PI",
+                        "status": "partially_linked",
+                        "docs": {"dn": doc_name, "si": si_name, "pr": pr_name},
+                        "issues": issues,
+                    }
+
+            elif si_pi_ref and frappe.db.exists("Purchase Invoice", si_pi_ref):
+                # Chain 4: DN -> SI -> PI
+                pi_name = si_pi_ref
+                pi_ref = frappe.db.get_value("Purchase Invoice", pi_name, "bns_inter_company_reference")
+                if (pi_ref or "") != si_name:
+                    issues.append(f"PI.bns_inter_company_reference ({pi_ref}) does not point to SI ({si_name})")
+
+                si_pi_check = _verify_si_pi_item_linkage(si_name, pi_name)
+                if not si_pi_check["linked"]:
+                    issues.extend(_format_item_issues("SI->PI", si_pi_check))
+
+                status = "fully_linked" if not issues else "partially_linked"
+                return {
+                    "chain_type": "DN->SI->PI",
+                    "status": status,
+                    "docs": {"dn": doc_name, "si": si_name, "pi": pi_name},
+                    "issues": issues,
+                }
+            else:
+                issues.append("SI has no PI or PR link")
+                return {
+                    "chain_type": "DN->SI->?",
+                    "status": "partially_linked",
+                    "docs": {"dn": doc_name, "si": si_name},
+                    "issues": issues,
+                }
+
+    elif doc_type == "Sales Invoice":
+        # Different GSTIN SI (not from DN -- DN-originated chains are handled above)
+        si_items = frappe.get_all(
+            "Sales Invoice Item",
+            filters={"parent": doc_name},
+            fields=["delivery_note"],
+        )
+        has_dn = any((sii.get("delivery_note") or "").strip() for sii in si_items)
+        if has_dn:
+            return None  # Will be handled via DN-originated chain detection
+
+        si_pi_ref = (doc.get("bns_inter_company_reference") or "").strip()
+        si_pr_ref = (doc.get("bns_purchase_receipt_reference") or "").strip() if hasattr(doc, "get") else ""
+
+        if si_pr_ref and frappe.db.exists("Purchase Receipt", si_pr_ref):
+            # Chain 3: SI -> PR -> PI
+            pr_name = si_pr_ref
+            issues = []
+
+            pr_ref = frappe.db.get_value("Purchase Receipt", pr_name, "bns_inter_company_reference")
+            if (pr_ref or "") != doc_name:
+                issues.append(f"PR.bns_inter_company_reference ({pr_ref}) does not point to SI ({doc_name})")
+
+            si_pr_check = _verify_si_pr_item_linkage(doc_name, pr_name)
+            if not si_pr_check["linked"]:
+                issues.extend(_format_item_issues("SI->PR", si_pr_check))
+
+            pi_names = frappe.get_all(
+                "Purchase Invoice Item",
+                filters={"purchase_receipt": pr_name, "docstatus": 1},
+                pluck="parent",
+            )
+            pi_names = sorted(set(pi_names))
+
+            if pi_names:
+                pi_name = pi_names[0]
+                pr_pi_check = _verify_pr_pi_item_linkage(pr_name, pi_name)
+                if not pr_pi_check["linked"]:
+                    issues.extend(_format_item_issues("PR->PI", pr_pi_check))
+                status = "fully_linked" if not issues else "partially_linked"
+                return {
+                    "chain_type": "SI->PR->PI",
+                    "status": status,
+                    "docs": {"si": doc_name, "pr": pr_name, "pi": pi_name},
+                    "issues": issues,
+                }
+            else:
+                issues.append("No PI created from PR")
+                return {
+                    "chain_type": "SI->PR->PI",
+                    "status": "partially_linked",
+                    "docs": {"si": doc_name, "pr": pr_name},
+                    "issues": issues,
+                }
+
+        elif si_pi_ref and frappe.db.exists("Purchase Invoice", si_pi_ref):
+            # Chain 2: SI -> PI (direct)
+            pi_name = si_pi_ref
+            issues = []
+
+            pi_ref = frappe.db.get_value("Purchase Invoice", pi_name, "bns_inter_company_reference")
+            if (pi_ref or "") != doc_name:
+                issues.append(f"PI.bns_inter_company_reference ({pi_ref}) does not point to SI ({doc_name})")
+
+            si_pi_check = _verify_si_pi_item_linkage(doc_name, pi_name)
+            if not si_pi_check["linked"]:
+                issues.extend(_format_item_issues("SI->PI", si_pi_check))
+
+            status = "fully_linked" if not issues else "partially_linked"
+            return {
+                "chain_type": "SI->PI",
+                "status": status,
+                "docs": {"si": doc_name, "pi": pi_name},
+                "issues": issues,
+            }
+        else:
+            # Also check if PR links back via bns_inter_company_reference
+            pr_names = _get_submitted_prs_for_si(doc_name)
+            if pr_names:
+                pr_name = pr_names[0]
+                issues = []
+
+                si_pr_check = _verify_si_pr_item_linkage(doc_name, pr_name)
+                if not si_pr_check["linked"]:
+                    issues.extend(_format_item_issues("SI->PR", si_pr_check))
+
+                pi_names = frappe.get_all(
+                    "Purchase Invoice Item",
+                    filters={"purchase_receipt": pr_name, "docstatus": 1},
+                    pluck="parent",
+                )
+                pi_names = sorted(set(pi_names))
+                if pi_names:
+                    pi_name = pi_names[0]
+                    pr_pi_check = _verify_pr_pi_item_linkage(pr_name, pi_name)
+                    if not pr_pi_check["linked"]:
+                        issues.extend(_format_item_issues("PR->PI", pr_pi_check))
+                    status = "fully_linked" if not issues else "partially_linked"
+                    return {
+                        "chain_type": "SI->PR->PI",
+                        "status": status,
+                        "docs": {"si": doc_name, "pr": pr_name, "pi": pi_name},
+                        "issues": issues,
+                    }
+                else:
+                    issues.append("No PI created from PR")
+                    return {
+                        "chain_type": "SI->PR->PI",
+                        "status": "partially_linked",
+                        "docs": {"si": doc_name, "pr": pr_name},
+                        "issues": issues,
+                    }
+
+            # Check PI via bns_inter_company_reference pointing to this SI
+            pi_name = frappe.db.get_value(
+                "Purchase Invoice",
+                {"bns_inter_company_reference": doc_name, "docstatus": 1},
+                "name",
+            )
+            if pi_name:
+                issues = []
+                si_pi_check = _verify_si_pi_item_linkage(doc_name, pi_name)
+                if not si_pi_check["linked"]:
+                    issues.extend(_format_item_issues("SI->PI", si_pi_check))
+                status = "fully_linked" if not issues else "partially_linked"
+                return {
+                    "chain_type": "SI->PI",
+                    "status": status,
+                    "docs": {"si": doc_name, "pi": pi_name},
+                    "issues": issues,
+                }
+
+            return {
+                "chain_type": "SI->?",
+                "status": "unlinked",
+                "docs": {"si": doc_name},
+                "issues": ["No PI or PR linked to SI"],
+            }
+
+    return None
+
+
+def _format_item_issues(link_label: str, check_result: Dict) -> List[str]:
+    """Format item verification issues into human-readable strings."""
+    issues = []
+    for m in check_result.get("missing_items", [])[:3]:
+        issues.append(f"{link_label}: item {m.get('item_code', '?')} not linked")
+    for m in check_result.get("qty_mismatches", [])[:3]:
+        keys = [k for k in m if k != "item_code"]
+        detail = ", ".join(f"{k}={m[k]}" for k in keys)
+        issues.append(f"{link_label}: qty mismatch {m.get('item_code', '?')} ({detail})")
+    for m in check_result.get("item_mismatches", [])[:3]:
+        src = m.get("dn_item_code") or m.get("si_item_code") or m.get("pr_item_code") or "?"
+        dst = m.get("pr_item_code") or m.get("pi_item_code") or m.get("si_item_code") or "?"
+        issues.append(f"{link_label}: item code mismatch {src} vs {dst}")
+    return issues
+
+
+def _repost_chain(chain: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Repost all documents in a fully-linked chain in dependency order.
+
+    Args:
+        chain: Chain dict from _detect_chain_type with chain_type, docs, status
+
+    Returns:
+        Dict with reposted doc names and any errors
+    """
+    from erpnext.controllers.stock_controller import create_repost_item_valuation_entry
+
+    chain_type = chain["chain_type"]
+    docs = chain["docs"]
+    reposted = []
+    errors = []
+
+    def _repost_voucher(voucher_type: str, voucher_no: str):
+        """Create a Repost Item Valuation entry for a voucher."""
+        try:
+            doc = frappe.get_doc(voucher_type, voucher_no)
+            if doc.docstatus != 1:
+                return
+            create_repost_item_valuation_entry({
+                "based_on": "Transaction",
+                "voucher_type": voucher_type,
+                "voucher_no": voucher_no,
+                "posting_date": doc.posting_date,
+                "posting_time": getattr(doc, "posting_time", "00:00:00") or "00:00:00",
+                "company": doc.company,
+                "allow_zero_rate": 1,
+            })
+            reposted.append(f"{voucher_type}:{voucher_no}")
+            logger.info("Bulk repost: created Repost Item Valuation for %s %s", voucher_type, voucher_no)
+        except Exception as e:
+            error_msg = f"Failed to repost {voucher_type} {voucher_no}: {str(e)}"
+            errors.append(error_msg)
+            logger.error(error_msg)
+
+    if chain_type == "DN->PR":
+        _repost_voucher("Delivery Note", docs["dn"])
+        if "pr" in docs:
+            _repost_voucher("Purchase Receipt", docs["pr"])
+
+    elif chain_type == "SI->PI":
+        _repost_voucher("Sales Invoice", docs["si"])
+        if "pi" in docs:
+            _repost_voucher("Purchase Invoice", docs["pi"])
+
+    elif chain_type == "SI->PR->PI":
+        _repost_voucher("Sales Invoice", docs["si"])
+        if "pr" in docs:
+            _repost_voucher("Purchase Receipt", docs["pr"])
+        if "pi" in docs:
+            _repost_voucher("Purchase Invoice", docs["pi"])
+
+    elif chain_type == "DN->SI->PI":
+        _repost_voucher("Delivery Note", docs["dn"])
+        if "si" in docs:
+            _repost_voucher("Sales Invoice", docs["si"])
+        if "pi" in docs:
+            _repost_voucher("Purchase Invoice", docs["pi"])
+
+    elif chain_type == "DN->SI->PR->PI":
+        _repost_voucher("Delivery Note", docs["dn"])
+        if "si" in docs:
+            _repost_voucher("Sales Invoice", docs["si"])
+        if "pr" in docs:
+            _repost_voucher("Purchase Receipt", docs["pr"])
+        if "pi" in docs:
+            _repost_voucher("Purchase Invoice", docs["pi"])
+
+    return {"reposted": reposted, "errors": errors}
+
+
+@frappe.whitelist()
+def verify_and_repost_internal_transfers(cutoff_date: str = None, repost: bool = True) -> Dict:
+    """
+    Verify all internal transfer chains after a cutoff date and optionally repost fully-linked ones.
+
+    Detects 5 chain types:
+      1. DN->PR (same GSTIN)
+      2. SI->PI (different GSTIN, direct)
+      3. SI->PR->PI (different GSTIN, via PR)
+      4. DN->SI->PI (different GSTIN, DN-originated)
+      5. DN->SI->PR->PI (different GSTIN, full chain)
+
+    Args:
+        cutoff_date: Posting date cutoff (ISO format). Falls back to BNS Branch Accounting Settings.
+        repost: If True, repost all fully-linked chains. Defaults to True.
+
+    Returns:
+        Dict with summary counts, chain details, and repost results.
+    """
+    if isinstance(repost, str):
+        repost = repost.lower() in ("true", "1", "yes")
+
+    if not cutoff_date:
+        cutoff_date = frappe.db.get_single_value(
+            "BNS Branch Accounting Settings", "internal_validation_cutoff_date"
+        )
+    if not cutoff_date:
+        frappe.throw(_("No cutoff date provided and none configured in BNS Branch Accounting Settings."))
+
+    cutoff_date = getdate(cutoff_date)
+
+    # Collect all source documents
+    dn_rows = frappe.db.sql(
+        """
+        SELECT dn.name, dn.company_gstin, dn.billing_address_gstin,
+               dn.bns_inter_company_reference, dn.posting_date, dn.company
+        FROM `tabDelivery Note` dn
+        JOIN `tabCustomer` c ON dn.customer = c.name
+        WHERE dn.docstatus = 1
+          AND c.is_bns_internal_customer = 1
+          AND dn.posting_date >= %s
+        ORDER BY dn.posting_date
+        """,
+        (cutoff_date,),
+        as_dict=True,
+    ) or []
+
+    si_rows = frappe.db.sql(
+        """
+        SELECT si.name, si.company_gstin, si.billing_address_gstin,
+               si.bns_inter_company_reference, si.posting_date, si.company
+        FROM `tabSales Invoice` si
+        JOIN `tabCustomer` c ON si.customer = c.name
+        WHERE si.docstatus = 1
+          AND c.is_bns_internal_customer = 1
+          AND (si.company_gstin IS NOT NULL AND si.billing_address_gstin IS NOT NULL
+               AND si.company_gstin != si.billing_address_gstin)
+          AND si.posting_date >= %s
+        ORDER BY si.posting_date
+        """,
+        (cutoff_date,),
+        as_dict=True,
+    ) or []
+
+    # Also fetch bns_purchase_receipt_reference for SIs
+    si_meta = frappe.get_meta("Sales Invoice")
+    if si_meta.has_field("bns_purchase_receipt_reference"):
+        for si in si_rows:
+            si["bns_purchase_receipt_reference"] = frappe.db.get_value(
+                "Sales Invoice", si["name"], "bns_purchase_receipt_reference"
+            ) or ""
+
+    chains = []
+    seen_origins = set()
+
+    # Process DNs first (they may originate multi-doc chains)
+    for dn in dn_rows:
+        if dn["name"] in seen_origins:
+            continue
+        seen_origins.add(dn["name"])
+        chain = _detect_chain_type("Delivery Note", dn["name"], dn)
+        if chain:
+            # Mark downstream SIs as seen so they aren't double-counted
+            if chain["docs"].get("si"):
+                seen_origins.add(chain["docs"]["si"])
+            chains.append(chain)
+
+    # Process SIs not already handled via DN chains
+    for si in si_rows:
+        if si["name"] in seen_origins:
+            continue
+        seen_origins.add(si["name"])
+        chain = _detect_chain_type("Sales Invoice", si["name"], si)
+        if chain:
+            chains.append(chain)
+
+    # Categorize
+    fully_linked = [c for c in chains if c["status"] == "fully_linked"]
+    partially_linked = [c for c in chains if c["status"] == "partially_linked"]
+    unlinked = [c for c in chains if c["status"] == "unlinked"]
+
+    # Repost fully linked chains
+    repost_results = []
+    if repost and fully_linked:
+        for chain in fully_linked:
+            result = _repost_chain(chain)
+            repost_results.append({
+                "chain_type": chain["chain_type"],
+                "docs": chain["docs"],
+                "reposted": result["reposted"],
+                "errors": result["errors"],
+            })
+
+    summary = {
+        "cutoff_date": str(cutoff_date),
+        "total_chains": len(chains),
+        "fully_linked": len(fully_linked),
+        "partially_linked": len(partially_linked),
+        "unlinked": len(unlinked),
+        "repost_enabled": repost,
+        "reposted_count": sum(len(r["reposted"]) for r in repost_results),
+        "repost_error_count": sum(len(r["errors"]) for r in repost_results),
+        "chains_by_type": {},
+    }
+
+    for chain in chains:
+        ct = chain["chain_type"]
+        if ct not in summary["chains_by_type"]:
+            summary["chains_by_type"][ct] = {"fully_linked": 0, "partially_linked": 0, "unlinked": 0}
+        summary["chains_by_type"][ct][chain["status"]] += 1
+
+    logger.info(
+        "verify_and_repost_internal_transfers: cutoff=%s total=%s fully_linked=%s partially=%s unlinked=%s reposted=%s",
+        cutoff_date, len(chains), len(fully_linked), len(partially_linked), len(unlinked),
+        summary["reposted_count"],
+    )
+
+    return {
+        "success": True,
+        "summary": summary,
+        "fully_linked": [{"chain_type": c["chain_type"], "docs": c["docs"]} for c in fully_linked],
+        "partially_linked": [
+            {"chain_type": c["chain_type"], "docs": c["docs"], "issues": c["issues"]}
+            for c in partially_linked
+        ],
+        "unlinked": [
+            {"chain_type": c["chain_type"], "docs": c["docs"], "issues": c["issues"]}
+            for c in unlinked
+        ],
+        "repost_results": repost_results,
+        "message": _(
+            "Verification complete: {0} chains found. {1} fully linked, {2} partially linked, {3} unlinked. {4} documents reposted."
+        ).format(
+            len(chains), len(fully_linked), len(partially_linked), len(unlinked),
+            summary["reposted_count"],
+        ),
+    }
+
+
+@frappe.whitelist()
+def enqueue_verify_and_repost_internal_transfers(cutoff_date: str = None, repost: bool = True) -> Dict:
+    """
+    Enqueue bulk verification and repost as a background job.
+
+    Args:
+        cutoff_date: Posting date cutoff (ISO format).
+        repost: If True, repost fully-linked chains.
+
+    Returns:
+        Dict with job enqueue confirmation.
+    """
+    if isinstance(repost, str):
+        repost = repost.lower() in ("true", "1", "yes")
+
+    frappe.enqueue(
+        "business_needed_solutions.bns_branch_accounting.utils.verify_and_repost_internal_transfers",
+        queue="long",
+        timeout=3600,
+        cutoff_date=cutoff_date,
+        repost=repost,
+    )
+
+    return {
+        "success": True,
+        "message": _("Bulk verification and repost job has been enqueued. Check Background Jobs for progress."),
+    }

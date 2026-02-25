@@ -30,11 +30,22 @@ The app is designed to be **configurable via settings** – most features can be
 
 **Intent:** Model inter-branch transfers (same legal entity, different locations) with:
 
-- DN → PR (stock movement)
-- SI → PI (invoice flow)
+- DN → PR (stock movement, same GSTIN)
+- SI → PI (invoice flow, different GSTIN)
+- SI → PR → PI (invoice creates receipt, then invoice on purchase side)
+- DN → SI → PI (delivery note creates sales invoice, then purchase invoice)
+- DN → SI → PR → PI (full chain from stock to invoice on both sides)
 - Correct GL: Stock in Transit, Internal Sales Transfer Account (DN), Internal Purchase Transfer Account (PR), Internal Branch Debtor/Creditor Accounts
 
 **Constraint:** `is_bns_internal_customer` and `is_bns_internal_supplier` are the source of truth. Do not introduce parallel flags.
+
+### 2.2b Bulk Linkage Verification & Repost
+
+**Intent:** Provide a post-cutoff verification mechanism that ensures all internal transfer chains are 100% linked at both doc-level and item-level before triggering repost. This is a manual, controlled operation — not automated — to avoid unintended mass financial updates.
+
+**Reasoning:** After a cutoff date (e.g., system stabilization point), all internal transfers should be fully linked. Partially linked or unlinked chains indicate data integrity issues that must be resolved before financial repost. The function categorizes chains into fully_linked/partially_linked/unlinked so the team can address issues systematically.
+
+**Constraint:** Only fully-linked chains are reposted. Partial or unlinked chains are reported for manual attention. The function must never repost documents it cannot fully verify.
 
 ### 2.2a Billing Location → Customer Address
 

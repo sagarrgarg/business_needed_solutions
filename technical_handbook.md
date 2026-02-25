@@ -43,11 +43,25 @@ BNS extends ERPNext with:
 
 ### 3.2 BNS Branch Accounting (`bns_branch_accounting/utils.py`)
 
-- **What:** Internal transfer flow – DN→PR, SI→PI, SI→PR; status updates; convert/link/unlink.
+- **What:** Internal transfer flow – DN→PR, SI→PI, SI→PR; status updates; convert/link/unlink. Bulk linkage verification and repost.
 - **Why:** Support inter-branch transfers with `is_bns_internal_customer` / `is_bns_internal_supplier`.
 - **Impacted:** DN, PR, SI, PI (client JS + doc_events).
-- **Settings:** BNS Branch Accounting Settings – `stock_in_transit_account`, `internal_sales_transfer_account`, `internal_purchase_transfer_account`, `internal_branch_debtor_account`, `internal_branch_creditor_account`, `enable_internal_dn_ewaybill`.
+- **Settings:** BNS Branch Accounting Settings – `stock_in_transit_account`, `internal_sales_transfer_account`, `internal_purchase_transfer_account`, `internal_branch_debtor_account`, `internal_branch_creditor_account`, `enable_internal_dn_ewaybill`, `internal_validation_cutoff_date`.
 - **PR/PI standard fields:** BNS does **not** set standard ERPNext fields `represents_company` or `inter_company_reference` / `inter_company_invoice_reference` on Purchase Receipt or Purchase Invoice. Only BNS fields are used: `bns_inter_company_reference`, `supplier_delivery_note`, `is_bns_internal_supplier`, etc. Representing-company logic uses Customer/Supplier `bns_represents_company` (with fallback read of `represents_company` for validation only).
+
+### 3.2a Bulk Linkage Verification & Repost (`bns_branch_accounting/utils.py`)
+
+- **What:** `verify_and_repost_internal_transfers()` – scans all internal transfer chains after a cutoff date and verifies 100% linkage at both doc-level and item-level. Five chain types are detected:
+  1. **DN→PR** (same GSTIN): `bns_inter_company_reference` + `delivery_note_item`
+  2. **SI→PI** (different GSTIN, direct): `bns_inter_company_reference` + `sales_invoice_item`
+  3. **SI→PR→PI** (different GSTIN, via PR): SI→PR via `bns_inter_company_reference`, PR→PI via `purchase_receipt`/`purchase_receipt_item`
+  4. **DN→SI→PI** (different GSTIN, DN-originated): DN→SI via `delivery_note`/`dn_detail`, SI→PI via `bns_inter_company_reference`
+  5. **DN→SI→PR→PI** (different GSTIN, full chain): DN→SI→PR→PI with item-level tracing throughout
+- **Categorization:** Each chain is categorized as `fully_linked`, `partially_linked`, or `unlinked`.
+- **Repost:** Fully-linked chains are reposted in dependency order (upstream first) using `create_repost_item_valuation_entry`.
+- **Background:** `enqueue_verify_and_repost_internal_transfers()` wraps the function in `frappe.enqueue` for large datasets.
+- **UI:** "Verify & Repost Internal Transfers" button in BNS Branch Accounting Settings, with preview (Verify) and execute (Run) modes.
+- **Impacted:** All internal transfer document types (DN, PR, SI, PI). Creates Repost Item Valuation entries.
 
 ### 3.3 GST Compliance (`overrides/gst_compliance.py`)
 
@@ -133,6 +147,18 @@ BNS extends ERPNext with:
 |---------|---------|
 | BNS Settings | Global app settings (PAN, GST, stock, submission, print, etc.) |
 | BNS Branch Accounting Settings | Internal transfer accounts, internal DN e-Waybill |
+
+### 3.11 Internal Transfer Receive Mismatch Report (`bns_branch_accounting/report/`)
+
+- **What:** Prepared Script Report identifying DN/SI with internal customers missing or mismatched PR/PI. Enhanced with:
+  - **Transfer Chain** column: identifies the chain type (DN→PR, SI→PI, SI→PR→PI, DN→SI→PI, DN→SI→PR→PI)
+  - **Source Dest. Warehouse** / **Purchase Warehouse** columns: shows target warehouse from DN/SI and actual warehouse on PR/PI
+  - **Location Mismatch** column: flags when destination warehouse differs from purchase-side warehouse
+  - **Item Mismatch** column: flags when item codes differ between linked source and destination items
+  - **SI→PR chain detection**: reports mismatches across SI→PR→PI chains in addition to direct SI→PI
+- **Why:** Provides comprehensive visibility into internal transfer linkage health, warehouse routing accuracy, and item-level integrity.
+- **Impacted:** Report output only (read-only). No data modifications.
+- **Cutoff:** Respects `internal_validation_cutoff_date` from BNS Branch Accounting Settings as default `from_date`.
 
 ---
 
