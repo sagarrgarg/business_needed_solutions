@@ -1,6 +1,6 @@
 {
  "charts": [],
- "content": "[{\"id\":\"bns-branch-settings-shortcut\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"BNS Branch Accounting Settings\",\"col\":4}}]",
+ "content": "[]",
  "creation": "2026-02-16 12:00:00.000000",
  "docstatus": 0,
  "doctype": "Workspace",
@@ -43,16 +43,6 @@
  "quick_lists": [],
  "restrict_to_domain": "",
  "roles": [],
- "shortcuts": [
-  {
-   "color": "Blue",
-   "doc_view": "",
-   "label": "BNS Branch Accounting Settings",
-   "link_to": "BNS Branch Accounting Settings",
-   "restrict_to_domain": "",
-   "stats_filter": "",
-   "type": "DocType"
-  }
- ],
+ "shortcuts": [],
  "title": "BNS Branch Accounting"
 }
