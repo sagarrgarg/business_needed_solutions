@@ -47,6 +47,10 @@ The app is designed to be **configurable via settings** – most features can be
 
 **Constraint:** Only fully-linked chains are reposted. Partial or unlinked chains are reported for manual attention. The function must never repost documents it cannot fully verify.
 
+**Fix Partial DN→PR Intent:** Some DN→PR chains are "partially linked" only because `bns_inter_company_reference` was not set bidirectionally (data migration gaps, manual PR creation, etc.). The fix option auto-repairs these references, but **only** when the underlying data is consistent: same items, same rates, same taxable amounts, and same warehouses. Any mismatch indicates a real data problem that requires manual resolution — the fix must never paper over genuine discrepancies.
+
+**Constraint:** The fix must skip (not force-link) whenever item codes, rates, taxable amounts, or source-to-destination warehouses differ. Skipped pairs are reported with reasons so users can address root causes.
+
 ### 2.2a Billing Location → Customer Address
 
 **Intent:** For BNS internal customers, billing location drives customer address (like location_based_series for company address). On save, server sets customer_address from billing_location's linked address; customer_address is read-only when both are set. For outside customers, billing_location and customer_address are independent—customer_address remains editable.

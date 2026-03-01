@@ -6344,11 +6344,20 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
                 )
             )
         
-        # Check if already fully converted (both flag and status are set)
-        if dn.get("is_bns_internal_customer") and dn.status == "BNS Internally Transferred":
-            # Already converted, but still return success for bulk operations
+        # Check if already fully converted (flag, status, AND reference are all set)
+        if (
+            dn.get("is_bns_internal_customer")
+            and dn.status == "BNS Internally Transferred"
+            and dn.get("bns_inter_company_reference")
+        ):
             return {"success": True, "message": _("Already converted")}
         
+        # Auto-discover matching PR when none is provided
+        if not purchase_receipt:
+            pr_names = _get_submitted_prs_for_dn(dn.name)
+            if pr_names:
+                purchase_receipt = pr_names[0]
+
         # Update Delivery Note (even if flag is already set, ensure status is updated)
         dn.db_set("is_bns_internal_customer", 1, update_modified=False)
         dn.db_set("status", "BNS Internally Transferred", update_modified=False)
@@ -6363,7 +6372,7 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
             "delivery_note": dn.name
         }
         
-        # If Purchase Receipt is provided, validate and link
+        # If Purchase Receipt is provided (or auto-discovered), validate and link
         if purchase_receipt:
             pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
             
@@ -6371,8 +6380,10 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
             if pr.docstatus != 1:
                 raise BNSValidationError(_("Purchase Receipt {0} must be submitted before linking").format(purchase_receipt))
             
-            # Validate PR's supplier_delivery_note matches DN name
-            if pr.supplier_delivery_note != dn.name:
+            # Validate PR traces back to this DN via supplier_delivery_note or bns_inter_company_reference
+            pr_sdn = (pr.supplier_delivery_note or "").strip()
+            pr_ref = (pr.get("bns_inter_company_reference") or "").strip()
+            if pr_sdn != dn.name and pr_ref != dn.name:
                 raise BNSValidationError(
                     _("Purchase Receipt {0} is not linked to Delivery Note {1}").format(
                         purchase_receipt, dn.name
@@ -7702,17 +7713,23 @@ def get_bulk_conversion_preview(from_date: str, force: int = 0) -> Dict:
         dn_list = frappe.get_all(
             "Delivery Note",
             filters=dn_filters,
-            fields=["name", "customer", "is_bns_internal_customer", "status", "billing_address_gstin", "company_gstin"],
+            fields=["name", "customer", "is_bns_internal_customer", "status",
+                    "billing_address_gstin", "company_gstin", "bns_inter_company_reference"],
             limit=10000
         )
         for dn in dn_list:
             customer_internal = frappe.db.get_value("Customer", dn.customer, "is_bns_internal_customer")
             if customer_internal:
-                # Check GSTIN match (same GSTIN only)
                 billing_gstin = dn.get("billing_address_gstin")
                 company_gstin = dn.get("company_gstin")
                 if billing_gstin and company_gstin and billing_gstin == company_gstin:
-                    if force or not dn.get("is_bns_internal_customer") or dn.status != "BNS Internally Transferred":
+                    dn_ref = (dn.get("bns_inter_company_reference") or "").strip()
+                    if (
+                        force
+                        or not dn.get("is_bns_internal_customer")
+                        or dn.status != "BNS Internally Transferred"
+                        or not dn_ref
+                    ):
                         dn_count += 1
         
         # Get counts for Purchase Receipt (from DN with same GSTIN)
@@ -7827,7 +7844,8 @@ def bulk_convert_to_bns_internal(from_date: str, force: int = 0) -> Dict:
                 ["posting_date", ">=", from_date_obj],
                 ["customer", "!=", ""]
             ],
-            fields=["name", "customer", "is_bns_internal_customer", "status", "billing_address_gstin", "company_gstin"],
+            fields=["name", "customer", "is_bns_internal_customer", "status",
+                    "billing_address_gstin", "company_gstin", "bns_inter_company_reference"],
             limit=10000
         )
         for dn in dn_list:
@@ -7836,7 +7854,14 @@ def bulk_convert_to_bns_internal(from_date: str, force: int = 0) -> Dict:
                 billing_gstin = dn.get("billing_address_gstin")
                 company_gstin = dn.get("company_gstin")
                 if billing_gstin and company_gstin and billing_gstin == company_gstin:
-                    if force or not dn.get("is_bns_internal_customer") or dn.status != "BNS Internally Transferred":
+                    dn_ref = (dn.get("bns_inter_company_reference") or "").strip()
+                    needs_convert = (
+                        force
+                        or not dn.get("is_bns_internal_customer")
+                        or dn.status != "BNS Internally Transferred"
+                        or not dn_ref
+                    )
+                    if needs_convert:
                         try:
                             result = convert_delivery_note_to_bns_internal(dn.name, None)
                             if result.get("success"):
@@ -8602,6 +8627,142 @@ def _detect_chain_type(doc_type: str, doc_name: str, doc: Dict) -> Dict[str, Any
     return None
 
 
+def _check_dn_pr_fixable(dn_name: str, pr_name: str) -> Dict[str, Any]:
+    """
+    Check whether a partially linked DN->PR pair can be auto-fixed.
+
+    Skips (returns fixable=False) when any of these mismatches are found:
+      - Item code mismatch (DN item not in PR or vice-versa)
+      - Per-unit rate mismatch
+      - Taxable amount mismatch
+      - Location mismatch (DN target_warehouse vs PR warehouse)
+
+    Args:
+        dn_name: Delivery Note name
+        pr_name: Purchase Receipt name
+
+    Returns:
+        Dict with fixable (bool) and skip_reasons (list of str).
+    """
+    dn_items = frappe.get_all(
+        "Delivery Note Item",
+        filters={"parent": dn_name},
+        fields=["item_code", "qty", "rate", "amount", "warehouse", "target_warehouse"],
+    )
+    pr_items = frappe.get_all(
+        "Purchase Receipt Item",
+        filters={"parent": pr_name},
+        fields=["item_code", "qty", "rate", "amount", "warehouse"],
+    )
+
+    skip_reasons: List[str] = []
+
+    dn_agg: Dict[str, Dict] = {}
+    for item in dn_items:
+        code = item.item_code
+        if code not in dn_agg:
+            dn_agg[code] = {"qty": 0, "amount": 0, "target_warehouses": set()}
+        dn_agg[code]["qty"] += flt(item.qty)
+        dn_agg[code]["amount"] += flt(item.amount)
+        tw = (item.target_warehouse or "").strip()
+        if tw:
+            dn_agg[code]["target_warehouses"].add(tw)
+
+    pr_agg: Dict[str, Dict] = {}
+    for item in pr_items:
+        code = item.item_code
+        if code not in pr_agg:
+            pr_agg[code] = {"qty": 0, "amount": 0, "warehouses": set()}
+        pr_agg[code]["qty"] += flt(item.qty)
+        pr_agg[code]["amount"] += flt(item.amount)
+        wh = (item.warehouse or "").strip()
+        if wh:
+            pr_agg[code]["warehouses"].add(wh)
+
+    dn_codes = set(dn_agg.keys())
+    pr_codes = set(pr_agg.keys())
+
+    missing_in_pr = dn_codes - pr_codes
+    extra_in_pr = pr_codes - dn_codes
+
+    if missing_in_pr:
+        skip_reasons.append(f"Item(s) in DN but not in PR: {', '.join(sorted(missing_in_pr))}")
+    if extra_in_pr:
+        skip_reasons.append(f"Item(s) in PR but not in DN: {', '.join(sorted(extra_in_pr))}")
+
+    for code in sorted(dn_codes & pr_codes):
+        dn_data = dn_agg[code]
+        pr_data = pr_agg[code]
+
+        dn_rate = flt(dn_data["amount"] / dn_data["qty"], 2) if dn_data["qty"] else 0
+        pr_rate = flt(pr_data["amount"] / pr_data["qty"], 2) if pr_data["qty"] else 0
+        if dn_rate != pr_rate:
+            skip_reasons.append(f"Rate mismatch for {code}: DN rate={dn_rate}, PR rate={pr_rate}")
+
+        if flt(dn_data["amount"], 2) != flt(pr_data["amount"], 2):
+            skip_reasons.append(
+                f"Taxable amount mismatch for {code}: DN={flt(dn_data['amount'], 2)}, PR={flt(pr_data['amount'], 2)}"
+            )
+
+        dn_targets = dn_data["target_warehouses"]
+        pr_whs = pr_data["warehouses"]
+        if dn_targets and pr_whs and dn_targets != pr_whs:
+            skip_reasons.append(
+                f"Location mismatch for {code}: DN target={', '.join(sorted(dn_targets))}, "
+                f"PR warehouse={', '.join(sorted(pr_whs))}"
+            )
+
+    return {"fixable": len(skip_reasons) == 0, "skip_reasons": skip_reasons}
+
+
+def _fix_dn_pr_link(dn_name: str, pr_name: str) -> Dict[str, Any]:
+    """
+    Fix a partially linked DN->PR pair by setting bidirectional references and status.
+
+    Args:
+        dn_name: Delivery Note name
+        pr_name: Purchase Receipt name
+
+    Returns:
+        Dict with success (bool) and message (str).
+    """
+    try:
+        dn = frappe.get_doc("Delivery Note", dn_name)
+        pr = frappe.get_doc("Purchase Receipt", pr_name)
+
+        if dn.docstatus != 1 or pr.docstatus != 1:
+            return {"success": False, "message": "Both documents must be submitted"}
+
+        if dn.get("bns_inter_company_reference") != pr_name:
+            dn.db_set("bns_inter_company_reference", pr_name, update_modified=False)
+        if pr.get("bns_inter_company_reference") != dn_name:
+            pr.db_set("bns_inter_company_reference", dn_name, update_modified=False)
+
+        if not dn.get("is_bns_internal_customer"):
+            dn.db_set("is_bns_internal_customer", 1, update_modified=False)
+        if dn.status != "BNS Internally Transferred":
+            dn.db_set("status", "BNS Internally Transferred", update_modified=False)
+        if dn.per_billed != 100:
+            dn.db_set("per_billed", 100, update_modified=False)
+
+        if not pr.get("is_bns_internal_supplier"):
+            pr.db_set("is_bns_internal_supplier", 1, update_modified=False)
+        if pr.status != "BNS Internally Transferred":
+            pr.db_set("status", "BNS Internally Transferred", update_modified=False)
+        if pr.per_billed != 100:
+            pr.db_set("per_billed", 100, update_modified=False)
+
+        frappe.clear_cache(doctype="Delivery Note")
+        frappe.clear_cache(doctype="Purchase Receipt")
+
+        logger.info("Fixed partial DN->PR link: %s <-> %s", dn_name, pr_name)
+        return {"success": True, "message": f"Fixed link: DN {dn_name} <-> PR {pr_name}"}
+
+    except Exception as e:
+        logger.error("Error fixing DN-PR link %s <-> %s: %s", dn_name, pr_name, str(e))
+        return {"success": False, "message": str(e)}
+
+
 def _format_item_issues(link_label: str, check_result: Dict) -> List[str]:
     """Format item verification issues into human-readable strings."""
     issues = []
@@ -8694,7 +8855,9 @@ def _repost_chain(chain: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def verify_and_repost_internal_transfers(cutoff_date: str = None, repost: bool = True) -> Dict:
+def verify_and_repost_internal_transfers(
+    cutoff_date: str = None, repost: bool = True, fix_partial_dn_pr: bool = False
+) -> Dict:
     """
     Verify all internal transfer chains after a cutoff date and optionally repost fully-linked ones.
 
@@ -8708,12 +8871,16 @@ def verify_and_repost_internal_transfers(cutoff_date: str = None, repost: bool =
     Args:
         cutoff_date: Posting date cutoff (ISO format). Falls back to BNS Branch Accounting Settings.
         repost: If True, repost all fully-linked chains. Defaults to True.
+        fix_partial_dn_pr: If True, attempt to fix partially linked DN->PR chains.
+            Skips any pair where item code, rate, taxable amount, or warehouse mismatches.
 
     Returns:
-        Dict with summary counts, chain details, and repost results.
+        Dict with summary counts, chain details, repost results, and fix results.
     """
     if isinstance(repost, str):
         repost = repost.lower() in ("true", "1", "yes")
+    if isinstance(fix_partial_dn_pr, str):
+        fix_partial_dn_pr = fix_partial_dn_pr.lower() in ("true", "1", "yes")
 
     if not cutoff_date:
         cutoff_date = frappe.db.get_single_value(
@@ -8794,6 +8961,47 @@ def verify_and_repost_internal_transfers(cutoff_date: str = None, repost: bool =
     partially_linked = [c for c in chains if c["status"] == "partially_linked"]
     unlinked = [c for c in chains if c["status"] == "unlinked"]
 
+    # Fix partial DN->PR chains if requested
+    fix_results = []
+    if fix_partial_dn_pr:
+        partial_dn_pr = [c for c in partially_linked if c["chain_type"] == "DN->PR"]
+        for chain in partial_dn_pr:
+            dn_name = chain["docs"].get("dn")
+            pr_name = chain["docs"].get("pr")
+            if not dn_name or not pr_name:
+                fix_results.append({
+                    "dn": dn_name, "pr": pr_name, "action": "skipped",
+                    "reason": "Missing DN or PR in chain",
+                })
+                continue
+
+            check = _check_dn_pr_fixable(dn_name, pr_name)
+            if not check["fixable"]:
+                fix_results.append({
+                    "dn": dn_name, "pr": pr_name, "action": "skipped",
+                    "reason": "; ".join(check["skip_reasons"]),
+                })
+                continue
+
+            result = _fix_dn_pr_link(dn_name, pr_name)
+            if result["success"]:
+                fix_results.append({
+                    "dn": dn_name, "pr": pr_name, "action": "fixed",
+                    "reason": result["message"],
+                })
+                chain["status"] = "fully_linked"
+                chain["issues"] = []
+            else:
+                fix_results.append({
+                    "dn": dn_name, "pr": pr_name, "action": "error",
+                    "reason": result["message"],
+                })
+
+        # Re-categorize after fixes
+        if fix_results:
+            fully_linked = [c for c in chains if c["status"] == "fully_linked"]
+            partially_linked = [c for c in chains if c["status"] == "partially_linked"]
+
     # Repost fully linked chains
     repost_results = []
     if repost and fully_linked:
@@ -8806,6 +9014,10 @@ def verify_and_repost_internal_transfers(cutoff_date: str = None, repost: bool =
                 "errors": result["errors"],
             })
 
+    fix_fixed_count = sum(1 for f in fix_results if f["action"] == "fixed")
+    fix_skipped_count = sum(1 for f in fix_results if f["action"] == "skipped")
+    fix_error_count = sum(1 for f in fix_results if f["action"] == "error")
+
     summary = {
         "cutoff_date": str(cutoff_date),
         "total_chains": len(chains),
@@ -8815,6 +9027,10 @@ def verify_and_repost_internal_transfers(cutoff_date: str = None, repost: bool =
         "repost_enabled": repost,
         "reposted_count": sum(len(r["reposted"]) for r in repost_results),
         "repost_error_count": sum(len(r["errors"]) for r in repost_results),
+        "fix_partial_dn_pr": fix_partial_dn_pr,
+        "fix_fixed_count": fix_fixed_count,
+        "fix_skipped_count": fix_skipped_count,
+        "fix_error_count": fix_error_count,
         "chains_by_type": {},
     }
 
@@ -8825,10 +9041,16 @@ def verify_and_repost_internal_transfers(cutoff_date: str = None, repost: bool =
         summary["chains_by_type"][ct][chain["status"]] += 1
 
     logger.info(
-        "verify_and_repost_internal_transfers: cutoff=%s total=%s fully_linked=%s partially=%s unlinked=%s reposted=%s",
+        "verify_and_repost_internal_transfers: cutoff=%s total=%s fully_linked=%s partially=%s unlinked=%s reposted=%s fixed=%s skipped=%s",
         cutoff_date, len(chains), len(fully_linked), len(partially_linked), len(unlinked),
-        summary["reposted_count"],
+        summary["reposted_count"], fix_fixed_count, fix_skipped_count,
     )
+
+    fix_msg = ""
+    if fix_partial_dn_pr:
+        fix_msg = _(" DN->PR fix: {0} fixed, {1} skipped, {2} errors.").format(
+            fix_fixed_count, fix_skipped_count, fix_error_count,
+        )
 
     return {
         "success": True,
@@ -8843,29 +9065,35 @@ def verify_and_repost_internal_transfers(cutoff_date: str = None, repost: bool =
             for c in unlinked
         ],
         "repost_results": repost_results,
+        "fix_results": fix_results,
         "message": _(
             "Verification complete: {0} chains found. {1} fully linked, {2} partially linked, {3} unlinked. {4} documents reposted."
         ).format(
             len(chains), len(fully_linked), len(partially_linked), len(unlinked),
             summary["reposted_count"],
-        ),
+        ) + fix_msg,
     }
 
 
 @frappe.whitelist()
-def enqueue_verify_and_repost_internal_transfers(cutoff_date: str = None, repost: bool = True) -> Dict:
+def enqueue_verify_and_repost_internal_transfers(
+    cutoff_date: str = None, repost: bool = True, fix_partial_dn_pr: bool = False
+) -> Dict:
     """
     Enqueue bulk verification and repost as a background job.
 
     Args:
         cutoff_date: Posting date cutoff (ISO format).
         repost: If True, repost fully-linked chains.
+        fix_partial_dn_pr: If True, attempt to fix partially linked DN->PR chains.
 
     Returns:
         Dict with job enqueue confirmation.
     """
     if isinstance(repost, str):
         repost = repost.lower() in ("true", "1", "yes")
+    if isinstance(fix_partial_dn_pr, str):
+        fix_partial_dn_pr = fix_partial_dn_pr.lower() in ("true", "1", "yes")
 
     frappe.enqueue(
         "business_needed_solutions.bns_branch_accounting.utils.verify_and_repost_internal_transfers",
@@ -8873,6 +9101,7 @@ def enqueue_verify_and_repost_internal_transfers(cutoff_date: str = None, repost
         timeout=3600,
         cutoff_date=cutoff_date,
         repost=repost,
+        fix_partial_dn_pr=fix_partial_dn_pr,
     )
 
     return {

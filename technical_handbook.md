@@ -60,7 +60,24 @@ BNS extends ERPNext with:
 - **Categorization:** Each chain is categorized as `fully_linked`, `partially_linked`, or `unlinked`.
 - **Repost:** Fully-linked chains are reposted in dependency order (upstream first) using `create_repost_item_valuation_entry`.
 - **Background:** `enqueue_verify_and_repost_internal_transfers()` wraps the function in `frappe.enqueue` for large datasets.
-- **UI:** "Verify & Repost Internal Transfers" button in BNS Branch Accounting Settings, with preview (Verify) and execute (Run) modes.
+- **Fix Partial DN→PR:** Optional `fix_partial_dn_pr` flag. When enabled, iterates partially linked DN→PR chains and attempts to set `bns_inter_company_reference` bidirectionally plus status/flags. **Skips** any pair where:
+  - Item code mismatch (items in DN not in PR or vice-versa)
+  - Per-unit rate mismatch
+  - Taxable amount mismatch
+  - Location/warehouse mismatch (DN `target_warehouse` vs PR `warehouse`)
+  Fixed chains are promoted to `fully_linked` and become eligible for repost in the same run. Results include per-pair action (fixed/skipped/error) with skip reasons.
+- **UI:** "Verify & Repost Internal Transfers" button in BNS Branch Accounting Settings, with preview (Verify) and execute (Run) modes. Includes "Fix Partial DN→PR" checkbox. Download CSV report of partial/unlinked/fix results.
+
+### 3.2b-1 Bulk Convert DN→PR Reference Fix (2026)
+
+- **What:** `convert_delivery_note_to_bns_internal()` now auto-discovers the matching PR via `_get_submitted_prs_for_dn()` when no PR is explicitly provided. Previously, calling with `purchase_receipt=None` (as `bulk_convert_to_bns_internal()` does) would set status/flags on the DN but skip setting `bns_inter_company_reference`, leaving the DN→PR chain partially linked.
+- **Root cause:** `bulk_convert_to_bns_internal()` processed DNs with `purchase_receipt=None`, skipping the linking block. The "already converted" early-return also didn't check for missing reference, so re-running bulk convert wouldn't fix existing gaps.
+- **Changes:**
+  1. `convert_delivery_note_to_bns_internal()`: Auto-discovers PR when none provided; "already converted" check now requires `bns_inter_company_reference` to be set.
+  2. `convert_delivery_note_to_bns_internal()`: PR validation relaxed — accepts PR found via `bns_inter_company_reference` in addition to `supplier_delivery_note`.
+  3. `bulk_convert_to_bns_internal()`: DN conversion condition now includes missing `bns_inter_company_reference` check; fetches field in query.
+  4. `get_bulk_conversion_preview()`: DN count condition aligned with convert logic.
+- **Migration:** Re-running "Bulk Convert to BNS Internal" will retroactively fix all DNs with missing `bns_inter_company_reference`.
 - **Impacted:** All internal transfer document types (DN, PR, SI, PI). Creates Repost Item Valuation entries.
 
 ### 3.3 GST Compliance (`overrides/gst_compliance.py`)
