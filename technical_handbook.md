@@ -78,6 +78,13 @@ BNS extends ERPNext with:
   3. `bulk_convert_to_bns_internal()`: DN conversion condition now includes missing `bns_inter_company_reference` check; fetches field in query.
   4. `get_bulk_conversion_preview()`: DN count condition aligned with convert logic.
 - **Migration:** Re-running "Bulk Convert to BNS Internal" will retroactively fix all DNs with missing `bns_inter_company_reference`.
+
+### 3.2b-2 Amended DN Transfer Rate Sync Fix (2026)
+
+- **What:** Transfer rate sync and item-level verification now handle amended Delivery Notes. When a DN is amended (e.g., `DN-0034` → `DN-0034-1`), the PR was created from the original DN, so PR items' `delivery_note_item` references point to item IDs in the cancelled original — not the current amended DN.
+- **Root cause:** `_sync_pr_item_transfer_rate_from_dn`, `_sync_si_item_incoming_rate_from_dn`, and `_verify_dn_pr_item_linkage` all looked up item references by DN Item ID. For amended DNs, these IDs don't exist in the new document, causing `None` lookups and zero-updates.
+- **Fix:** All three functions now fall back to **item_code + positional index matching** when `delivery_note_item` / `dn_detail` references don't resolve in the current DN. This ensures transfer rates flow correctly through amended chains.
+- **Impacted:** DN→PR transfer rate sync, DN→SI incoming_rate sync, chain verification for amended documents.
 - **Impacted:** All internal transfer document types (DN, PR, SI, PI). Creates Repost Item Valuation entries.
 
 ### 3.3 GST Compliance (`overrides/gst_compliance.py`)
