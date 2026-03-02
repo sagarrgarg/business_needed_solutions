@@ -6419,21 +6419,29 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
             # Check if PR already linked to another DN
             existing_ref = pr.get("bns_inter_company_reference")
             if existing_ref and existing_ref != dn.name:
-                raise BNSValidationError(
-                    _("Purchase Receipt {0} is already linked to Delivery Note {1}").format(
-                        purchase_receipt, existing_ref
+                ref_valid = frappe.db.get_value(
+                    "Delivery Note", existing_ref, ["docstatus", "bns_inter_company_reference"], as_dict=True
+                )
+                if ref_valid and ref_valid.docstatus == 1 and ref_valid.bns_inter_company_reference == pr.name:
+                    raise BNSValidationError(
+                        _("Purchase Receipt {0} is already linked to Delivery Note {1}").format(
+                            purchase_receipt, existing_ref
+                        )
                     )
+                logger.info(
+                    "Overwriting stale bns_inter_company_reference on PR %s: %s -> %s",
+                    pr.name, existing_ref, dn.name,
                 )
             
             # Update Purchase Receipt document-level fields
             pr.db_set("is_bns_internal_supplier", 1, update_modified=False)
             pr.db_set("status", "BNS Internally Transferred", update_modified=False)
             pr.db_set("per_billed", 100, update_modified=False)
-            if not pr.get("bns_inter_company_reference"):
+            if pr.get("bns_inter_company_reference") != dn.name:
                 pr.db_set("bns_inter_company_reference", dn.name, update_modified=False)
             
             # Then update Delivery Note reference
-            if not dn.get("bns_inter_company_reference"):
+            if dn.get("bns_inter_company_reference") != pr.name:
                 dn.db_set("bns_inter_company_reference", pr.name, update_modified=False)
             
             _remap_pr_delivery_note_items(dn, pr)
@@ -7119,19 +7127,37 @@ def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
             return {"success": True, "message": _("Already linked")}
         
         # Check if DN is already linked to another PR
-        if dn.get("bns_inter_company_reference") and dn.get("bns_inter_company_reference") != pr.name:
-            raise BNSValidationError(
-                _("Delivery Note {0} is already linked to Purchase Receipt {1}").format(
-                    delivery_note, dn.get("bns_inter_company_reference")
+        existing_dn_ref = dn.get("bns_inter_company_reference")
+        if existing_dn_ref and existing_dn_ref != pr.name:
+            ref_valid = frappe.db.get_value(
+                "Purchase Receipt", existing_dn_ref, ["docstatus", "bns_inter_company_reference"], as_dict=True
+            )
+            if ref_valid and ref_valid.docstatus == 1 and ref_valid.bns_inter_company_reference == dn.name:
+                raise BNSValidationError(
+                    _("Delivery Note {0} is already linked to Purchase Receipt {1}").format(
+                        delivery_note, existing_dn_ref
+                    )
                 )
+            logger.info(
+                "Overwriting stale bns_inter_company_reference on DN %s: %s -> %s",
+                dn.name, existing_dn_ref, pr.name,
             )
         
         # Check if PR is already linked to another DN
-        if pr.get("bns_inter_company_reference") and pr.get("bns_inter_company_reference") != dn.name:
-            raise BNSValidationError(
-                _("Purchase Receipt {0} is already linked to Delivery Note {1}").format(
-                    purchase_receipt, pr.get("bns_inter_company_reference")
+        existing_pr_ref = pr.get("bns_inter_company_reference")
+        if existing_pr_ref and existing_pr_ref != dn.name:
+            ref_valid = frappe.db.get_value(
+                "Delivery Note", existing_pr_ref, ["docstatus", "bns_inter_company_reference"], as_dict=True
+            )
+            if ref_valid and ref_valid.docstatus == 1 and ref_valid.bns_inter_company_reference == pr.name:
+                raise BNSValidationError(
+                    _("Purchase Receipt {0} is already linked to Delivery Note {1}").format(
+                        purchase_receipt, existing_pr_ref
+                    )
                 )
+            logger.info(
+                "Overwriting stale bns_inter_company_reference on PR %s: %s -> %s",
+                pr.name, existing_pr_ref, dn.name,
             )
         
         # Validate items match
