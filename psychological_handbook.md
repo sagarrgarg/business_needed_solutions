@@ -51,6 +51,8 @@ The app is designed to be **configurable via settings** – most features can be
 
 **Constraint:** The fix must skip (not force-link) whenever item codes, rates, taxable amounts, or source-to-destination warehouses differ. Skipped pairs are reported with reasons so users can address root causes.
 
+**Amendment Resilience:** When a DN is amended, the new DN has different item row IDs but the linked PR still references the old IDs. All linking and verification paths must detect this condition and re-map by item_code + qty + rate rather than failing on stale references. Zero-rate items (samples, free goods) are legitimate and must not block GL rewrite — they are skipped, not treated as errors.
+
 ### 2.2a Billing Location → Customer Address
 
 **Intent:** For BNS internal customers, billing location drives customer address (like location_based_series for company address). On save, server sets customer_address from billing_location's linked address; customer_address is read-only when both are set. For outside customers, billing_location and customer_address are independent—customer_address remains editable.

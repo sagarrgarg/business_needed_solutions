@@ -79,12 +79,13 @@ BNS extends ERPNext with:
   4. `get_bulk_conversion_preview()`: DN count condition aligned with convert logic.
 - **Migration:** Re-running "Bulk Convert to BNS Internal" will retroactively fix all DNs with missing `bns_inter_company_reference`.
 
-### 3.2b-2 Amended DN Transfer Rate Sync Fix (2026)
+### 3.2b-2 Amended DN Item Re-mapping & Zero-Rate GL Fix (2026)
 
-- **What:** Transfer rate sync and item-level verification now handle amended Delivery Notes. When a DN is amended (e.g., `DN-0034` → `DN-0034-1`), the PR was created from the original DN, so PR items' `delivery_note_item` references point to item IDs in the cancelled original — not the current amended DN.
-- **Root cause:** `_sync_pr_item_transfer_rate_from_dn`, `_sync_si_item_incoming_rate_from_dn`, and `_verify_dn_pr_item_linkage` all looked up item references by DN Item ID. For amended DNs, these IDs don't exist in the new document, causing `None` lookups and zero-updates.
-- **Fix:** All three functions now fall back to **item_code + positional index matching** when `delivery_note_item` / `dn_detail` references don't resolve in the current DN. This ensures transfer rates flow correctly through amended chains.
-- **Impacted:** DN→PR transfer rate sync, DN→SI incoming_rate sync, chain verification for amended documents.
+- **What:** Two fixes for amended/zero-rate internal DNs:
+  1. **Stale `delivery_note_item` references:** When a DN is amended, PR items still reference old DN item IDs. `_verify_dn_pr_item_linkage` now detects stale refs (IDs not in current DN) and falls back to aggregate matching by `item_code` + `qty`. New `_remap_pr_delivery_note_items()` function re-maps PR items to current DN item IDs by matching `item_code` + `qty` + `rate`. Called automatically in `link_dn_pr`, `_fix_dn_pr_link`, `convert_delivery_note_to_bns_internal`, and `convert_purchase_receipt_to_bns_internal`.
+  2. **GL rewrite blocked by zero-rate items:** `_resolve_dn_transfer_amount` and `_resolve_pr_transfer_amount` treated zero-rate items (samples, free goods) as "missing transfer rate" and blocked the entire GL rewrite. Now items with `rate <= 0` are silently skipped — only items with positive rate but zero computed amount are flagged as missing.
+- **Root cause:** Amendment creates new item row IDs; ERPNext doesn't update `delivery_note_item` on existing PRs. Zero-rate items are legitimate (samples) but the `missing` flag was overly strict.
+- **Impacted:** All DN→PR linking paths, GL rewrite for DN and PR.
 - **Impacted:** All internal transfer document types (DN, PR, SI, PI). Creates Repost Item Valuation entries.
 
 ### 3.3 GST Compliance (`overrides/gst_compliance.py`)

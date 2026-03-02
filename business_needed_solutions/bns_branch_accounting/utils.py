@@ -1167,7 +1167,12 @@ def check_existing_internal_si_for_dn(delivery_notes: List[str], current_si: Opt
 
 
 def _resolve_dn_transfer_amount(doc, force_mode: bool = False) -> Tuple[float, str]:
-    """Resolve DN transfer amount from billing rate side (not valuation)."""
+    """Resolve DN transfer amount from billing rate side (not valuation).
+
+    Zero-rate items (samples, free goods) are skipped without blocking the
+    rewrite — only items with positive qty AND zero rate after all fallbacks
+    are treated as "missing" in non-force mode.
+    """
     total = 0.0
     missing = False
     for item in doc.get("items") or []:
@@ -1175,12 +1180,14 @@ def _resolve_dn_transfer_amount(doc, force_mode: bool = False) -> Tuple[float, s
         if line_amount <= 0:
             line_amount = flt(item.get("base_amount") or 0)
         if line_amount <= 0:
-            # Fallback path when base amounts are not populated.
             qty = abs(flt(item.get("qty") or 0))
             rate = flt(item.get("base_net_rate") or item.get("rate") or 0)
             line_amount = qty * rate
 
         if line_amount <= 0:
+            item_rate = flt(item.get("rate") or 0)
+            if item_rate <= 0:
+                continue
             missing = True
             continue
         total += line_amount
@@ -1193,7 +1200,12 @@ def _resolve_dn_transfer_amount(doc, force_mode: bool = False) -> Tuple[float, s
 
 
 def _resolve_pr_transfer_amount(doc, force_mode: bool = False) -> Tuple[float, str]:
-    """Resolve PR transfer amount from billing rate side (not valuation)."""
+    """Resolve PR transfer amount from billing rate side (not valuation).
+
+    Zero-rate items (samples, free goods) are skipped without blocking the
+    rewrite — only items with positive qty AND zero rate after all fallbacks
+    are treated as "missing" in non-force mode.
+    """
     total = 0.0
     missing = False
     for item in doc.get("items") or []:
@@ -1206,6 +1218,9 @@ def _resolve_pr_transfer_amount(doc, force_mode: bool = False) -> Tuple[float, s
             line_amount = qty * rate
 
         if line_amount <= 0:
+            item_rate = flt(item.get("rate") or 0)
+            if item_rate <= 0:
+                continue
             missing = True
             continue
         total += line_amount
@@ -4089,13 +4104,7 @@ def _sync_pi_sle_from_transfer_rate(pi_name: str) -> int:
 
 
 def _sync_pr_item_transfer_rate_from_dn(dn_name: str, pr_name: Optional[str] = None) -> int:
-    """
-    Sync Purchase Receipt Item.bns_transfer_rate from Delivery Note Item.incoming_rate.
-
-    Handles amended DNs: when PR item delivery_note_item references don't resolve in the
-    current DN (because the PR was created from the original DN before amendment), falls
-    back to matching by item_code + positional index within the same item_code.
-    """
+    """Sync Purchase Receipt Item.bns_transfer_rate from Delivery Note Item.incoming_rate."""
     if not dn_name or not frappe.db.exists("Delivery Note", dn_name):
         return 0
 
@@ -4106,17 +4115,12 @@ def _sync_pr_item_transfer_rate_from_dn(dn_name: str, pr_name: Optional[str] = N
     dn_items = frappe.get_all(
         "Delivery Note Item",
         filters={"parent": dn_name},
-        fields=["name", "item_code", "incoming_rate", "idx"],
-        order_by="idx asc",
+        fields=["name", "incoming_rate"],
     )
     if not dn_items:
         return 0
 
     dn_rate_by_item = {d.name: flt(d.incoming_rate or 0) for d in dn_items}
-
-    dn_rate_by_code: Dict[str, List[float]] = {}
-    for d in dn_items:
-        dn_rate_by_code.setdefault(d.item_code, []).append(flt(d.incoming_rate or 0))
 
     if pr_name:
         pr_names = [pr_name] if frappe.db.exists("Purchase Receipt", pr_name) else []
@@ -4131,28 +4135,16 @@ def _sync_pr_item_transfer_rate_from_dn(dn_name: str, pr_name: Optional[str] = N
         pr_items = frappe.get_all(
             "Purchase Receipt Item",
             filters={"parent": current_pr},
-            fields=["name", "item_code", "delivery_note_item", "bns_transfer_rate", "idx"],
-            order_by="idx asc",
+            fields=["name", "delivery_note_item", "bns_transfer_rate"],
         )
-
-        code_counters: Dict[str, int] = {}
-
         for item in pr_items:
             source_dn_item = item.get("delivery_note_item")
-            source_rate = dn_rate_by_item.get(source_dn_item) if source_dn_item else None
+            if not source_dn_item:
+                continue
 
+            source_rate = dn_rate_by_item.get(source_dn_item)
             if source_rate is None:
-                code = item.get("item_code") or ""
-                idx = code_counters.get(code, 0)
-                code_counters[code] = idx + 1
-                rates_for_code = dn_rate_by_code.get(code, [])
-                if idx < len(rates_for_code):
-                    source_rate = rates_for_code[idx]
-                else:
-                    continue
-            else:
-                code = item.get("item_code") or ""
-                code_counters[code] = code_counters.get(code, 0) + 1
+                continue
 
             if flt(item.get("bns_transfer_rate") or 0) != flt(source_rate):
                 frappe.db.set_value(
@@ -4180,9 +4172,6 @@ def _sync_si_item_incoming_rate_from_dn(
 
     This is required for DN->SI chains where ERPNext repost updates DN valuation
     but does not always push updated incoming_rate into existing SI item rows.
-
-    Handles amended DNs: when dn_detail references don't resolve in the current DN
-    (SI created from original DN before amendment), falls back to item_code matching.
     """
     if not dn_name or not frappe.db.exists("Delivery Note", dn_name):
         return 0, set()
@@ -4190,8 +4179,7 @@ def _sync_si_item_incoming_rate_from_dn(
     dn_items = frappe.get_all(
         "Delivery Note Item",
         filters={"parent": dn_name},
-        fields=["name", "item_code", "incoming_rate", "idx"],
-        order_by="idx asc",
+        fields=["name", "incoming_rate"],
     )
     if not dn_items:
         return 0, set()
@@ -4200,10 +4188,6 @@ def _sync_si_item_incoming_rate_from_dn(
     if not dn_rate_by_item:
         return 0, set()
 
-    dn_rate_by_code: Dict[str, List[float]] = {}
-    for d in dn_items:
-        dn_rate_by_code.setdefault(d.item_code, []).append(flt(d.incoming_rate or 0))
-
     si_filters: Dict[str, Any] = {"delivery_note": dn_name}
     if si_name:
         si_filters["parent"] = si_name
@@ -4211,8 +4195,7 @@ def _sync_si_item_incoming_rate_from_dn(
     si_items = frappe.get_all(
         "Sales Invoice Item",
         filters=si_filters,
-        fields=["name", "parent", "item_code", "dn_detail", "incoming_rate", "idx"],
-        order_by="idx asc",
+        fields=["name", "parent", "dn_detail", "incoming_rate"],
     )
     if not si_items:
         return 0, set()
@@ -4229,34 +4212,15 @@ def _sync_si_item_incoming_rate_from_dn(
 
     updated_count = 0
     impacted_sis: Set[str] = set()
-    code_counters: Dict[str, Dict[str, int]] = {}
-
     for row in si_items:
         if row.parent not in submitted_sis:
             continue
-
         dn_detail = (row.get("dn_detail") or "").strip()
-        source_rate = dn_rate_by_item.get(dn_detail) if dn_detail else None
-
+        if not dn_detail:
+            continue
+        source_rate = dn_rate_by_item.get(dn_detail)
         if source_rate is None:
-            si_parent = row.parent
-            if si_parent not in code_counters:
-                code_counters[si_parent] = {}
-            code = row.get("item_code") or ""
-            idx = code_counters[si_parent].get(code, 0)
-            code_counters[si_parent][code] = idx + 1
-            rates_for_code = dn_rate_by_code.get(code, [])
-            if idx < len(rates_for_code):
-                source_rate = rates_for_code[idx]
-            else:
-                continue
-        else:
-            si_parent = row.parent
-            if si_parent not in code_counters:
-                code_counters[si_parent] = {}
-            code = row.get("item_code") or ""
-            code_counters[si_parent][code] = code_counters[si_parent].get(code, 0) + 1
-
+            continue
         if flt(row.get("incoming_rate") or 0) != flt(source_rate):
             frappe.db.set_value(
                 "Sales Invoice Item",
@@ -6472,6 +6436,8 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
             if not dn.get("bns_inter_company_reference"):
                 dn.db_set("bns_inter_company_reference", pr.name, update_modified=False)
             
+            _remap_pr_delivery_note_items(dn, pr)
+
             # Clear cache for both documents
             frappe.clear_cache(doctype="Purchase Receipt")
             frappe.clear_cache(doctype="Delivery Note")
@@ -6594,6 +6560,8 @@ def convert_purchase_receipt_to_bns_internal(purchase_receipt: str, delivery_not
             if dn_reload.per_billed != 100:
                 dn_reload.db_set("per_billed", 100, update_modified=False)
             
+            _remap_pr_delivery_note_items(dn_reload, pr)
+
             result["delivery_note"] = linked_dn
             result["message"] = _("Purchase Receipt and Delivery Note linked successfully")
             
@@ -7190,6 +7158,8 @@ def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
         if pr.per_billed != 100:
             pr.db_set("per_billed", 100, update_modified=False)
         
+        _remap_pr_delivery_note_items(dn, pr)
+
         # Clear cache
         frappe.clear_cache(doctype="Delivery Note")
         frappe.clear_cache(doctype="Purchase Receipt")
@@ -8114,9 +8084,9 @@ def _verify_dn_pr_item_linkage(dn_name: str, pr_name: str) -> Dict[str, Any]:
     """
     Verify item-level linkage between DN and PR (same GSTIN).
 
-    Handles amended DNs: when delivery_note_item references don't resolve in the
-    current DN (PR created from original before amendment), falls back to aggregate
-    item_code + qty comparison so amended chains aren't falsely flagged.
+    First attempts matching via delivery_note_item references. When all items
+    are unlinked (common after DN amendment where IDs change), falls back to
+    matching by item_code + qty so amended docs aren't falsely flagged.
 
     Args:
         dn_name: Delivery Note name
@@ -8136,67 +8106,53 @@ def _verify_dn_pr_item_linkage(dn_name: str, pr_name: str) -> Dict[str, Any]:
         fields=["name", "item_code", "qty", "stock_qty", "delivery_note_item"],
     )
 
-    dn_item_ids = {d.name for d in dn_items}
     pr_by_dn_item = {}
-    unresolved_pr_items = []
     for pri in pr_items:
         dni_ref = (pri.get("delivery_note_item") or "").strip()
-        if dni_ref and dni_ref in dn_item_ids:
+        if dni_ref:
             pr_by_dn_item.setdefault(dni_ref, []).append(pri)
-        else:
-            unresolved_pr_items.append(pri)
 
-    if unresolved_pr_items and not pr_by_dn_item:
-        return _verify_dn_pr_item_linkage_by_code(dn_items, pr_items)
+    dn_item_ids = {d.name for d in dn_items}
+    refs_valid = any(ref in dn_item_ids for ref in pr_by_dn_item)
 
-    missing_items = []
-    qty_mismatches = []
-    item_mismatches = []
+    if refs_valid:
+        missing_items = []
+        qty_mismatches = []
+        item_mismatches = []
 
-    for dni in dn_items:
-        linked_prs = pr_by_dn_item.get(dni.name, [])
-        if not linked_prs:
-            missing_items.append({"item_code": dni.item_code, "dn_item": dni.name})
-            continue
-        total_pr_qty = sum(flt(p.get("stock_qty") or p.get("qty") or 0) for p in linked_prs)
-        dn_qty = flt(dni.stock_qty or dni.qty or 0)
-        if not _qtys_equal_bulk(dn_qty, total_pr_qty):
-            qty_mismatches.append({
-                "item_code": dni.item_code, "dn_qty": dn_qty, "pr_qty": total_pr_qty,
-            })
-        for pri in linked_prs:
-            if (pri.item_code or "") != (dni.item_code or ""):
-                item_mismatches.append({
-                    "dn_item_code": dni.item_code, "pr_item_code": pri.item_code,
-                    "dn_item": dni.name, "pr_item": pri.name,
+        for dni in dn_items:
+            linked_prs = pr_by_dn_item.get(dni.name, [])
+            if not linked_prs:
+                missing_items.append({"item_code": dni.item_code, "dn_item": dni.name})
+                continue
+            total_pr_qty = sum(flt(p.get("stock_qty") or p.get("qty") or 0) for p in linked_prs)
+            dn_qty = flt(dni.stock_qty or dni.qty or 0)
+            if not _qtys_equal_bulk(dn_qty, total_pr_qty):
+                qty_mismatches.append({
+                    "item_code": dni.item_code, "dn_qty": dn_qty, "pr_qty": total_pr_qty,
                 })
+            for pri in linked_prs:
+                if (pri.item_code or "") != (dni.item_code or ""):
+                    item_mismatches.append({
+                        "dn_item_code": dni.item_code, "pr_item_code": pri.item_code,
+                        "dn_item": dni.name, "pr_item": pri.name,
+                    })
 
-    fully_linked = not missing_items and not qty_mismatches and not item_mismatches
-    return {
-        "linked": fully_linked,
-        "missing_items": missing_items,
-        "qty_mismatches": qty_mismatches,
-        "item_mismatches": item_mismatches,
-    }
+        fully_linked = not missing_items and not qty_mismatches and not item_mismatches
+        return {
+            "linked": fully_linked,
+            "missing_items": missing_items,
+            "qty_mismatches": qty_mismatches,
+            "item_mismatches": item_mismatches,
+        }
 
-
-def _verify_dn_pr_item_linkage_by_code(
-    dn_items: List[Dict], pr_items: List[Dict]
-) -> Dict[str, Any]:
-    """
-    Fallback verification using aggregated item_code + qty comparison.
-
-    Used when PR item delivery_note_item references don't resolve (amended DNs).
-    """
+    # Fallback: refs are stale (e.g. DN was amended). Match by item_code + qty.
     dn_agg: Dict[str, float] = {}
     for d in dn_items:
-        code = d.get("item_code") or ""
-        dn_agg[code] = dn_agg.get(code, 0) + flt(d.get("stock_qty") or d.get("qty") or 0)
-
+        dn_agg[d.item_code] = dn_agg.get(d.item_code, 0) + flt(d.stock_qty or d.qty or 0)
     pr_agg: Dict[str, float] = {}
     for p in pr_items:
-        code = p.get("item_code") or ""
-        pr_agg[code] = pr_agg.get(code, 0) + flt(p.get("stock_qty") or p.get("qty") or 0)
+        pr_agg[p.item_code] = pr_agg.get(p.item_code, 0) + flt(p.stock_qty or p.qty or 0)
 
     missing_items = []
     qty_mismatches = []
@@ -8207,13 +8163,9 @@ def _verify_dn_pr_item_linkage_by_code(
             missing_items.append({"item_code": code, "dn_item": "aggregate"})
         elif not _qtys_equal_bulk(dn_qty, pr_agg[code]):
             qty_mismatches.append({"item_code": code, "dn_qty": dn_qty, "pr_qty": pr_agg[code]})
-
     for code in pr_agg:
         if code not in dn_agg:
-            item_mismatches.append({
-                "dn_item_code": "", "pr_item_code": code,
-                "dn_item": "aggregate", "pr_item": "aggregate",
-            })
+            item_mismatches.append({"dn_item_code": "", "pr_item_code": code, "dn_item": "", "pr_item": "aggregate"})
 
     fully_linked = not missing_items and not qty_mismatches and not item_mismatches
     return {
@@ -8823,7 +8775,11 @@ def _check_dn_pr_fixable(dn_name: str, pr_name: str) -> Dict[str, Any]:
 
 def _fix_dn_pr_link(dn_name: str, pr_name: str) -> Dict[str, Any]:
     """
-    Fix a partially linked DN->PR pair by setting bidirectional references and status.
+    Fix a partially linked DN->PR pair by setting bidirectional references,
+    status, and re-mapping stale delivery_note_item refs on PR items.
+
+    When a DN has been amended, PR items still reference old DN item IDs.
+    This function re-maps them by matching item_code + qty + rate.
 
     Args:
         dn_name: Delivery Note name
@@ -8858,6 +8814,8 @@ def _fix_dn_pr_link(dn_name: str, pr_name: str) -> Dict[str, Any]:
         if pr.per_billed != 100:
             pr.db_set("per_billed", 100, update_modified=False)
 
+        _remap_pr_delivery_note_items(dn, pr)
+
         frappe.clear_cache(doctype="Delivery Note")
         frappe.clear_cache(doctype="Purchase Receipt")
 
@@ -8867,6 +8825,75 @@ def _fix_dn_pr_link(dn_name: str, pr_name: str) -> Dict[str, Any]:
     except Exception as e:
         logger.error("Error fixing DN-PR link %s <-> %s: %s", dn_name, pr_name, str(e))
         return {"success": False, "message": str(e)}
+
+
+def _remap_pr_delivery_note_items(dn, pr) -> int:
+    """
+    Re-map stale delivery_note_item references on PR items to current DN item IDs.
+
+    Matches by item_code + qty + rate. Only updates refs that are empty or
+    point to IDs not present in the current DN (stale after amendment).
+
+    Args:
+        dn: Delivery Note doc object
+        pr: Purchase Receipt doc object
+
+    Returns:
+        Number of PR items re-mapped.
+    """
+    dn_item_ids = {item.name for item in dn.items}
+
+    pr_items_needing_remap = []
+    for pri in pr.items:
+        ref = (pri.get("delivery_note_item") or "").strip()
+        if not ref or ref not in dn_item_ids:
+            pr_items_needing_remap.append(pri)
+
+    if not pr_items_needing_remap:
+        return 0
+
+    dn_pool = []
+    for dni in dn.items:
+        dn_pool.append({
+            "name": dni.name,
+            "item_code": dni.item_code,
+            "qty": flt(dni.qty),
+            "rate": flt(dni.rate),
+            "stock_qty": flt(dni.stock_qty or dni.qty),
+            "used": False,
+        })
+
+    remapped = 0
+    for pri in pr_items_needing_remap:
+        best = None
+        for dn_entry in dn_pool:
+            if dn_entry["used"]:
+                continue
+            if dn_entry["item_code"] != pri.item_code:
+                continue
+            if _qtys_equal_bulk(dn_entry["qty"], flt(pri.qty)):
+                if best is None:
+                    best = dn_entry
+                elif flt(dn_entry["rate"], 2) == flt(pri.rate, 2):
+                    best = dn_entry
+                    break
+
+        if best:
+            best["used"] = True
+            frappe.db.set_value(
+                "Purchase Receipt Item", pri.name,
+                "delivery_note_item", best["name"],
+                update_modified=False,
+            )
+            remapped += 1
+
+    if remapped:
+        logger.info(
+            "Re-mapped %d PR item refs on %s to current DN %s items",
+            remapped, pr.name, dn.name,
+        )
+
+    return remapped
 
 
 def _format_item_issues(link_label: str, check_result: Dict) -> List[str]:
