@@ -521,6 +521,36 @@ def _is_stale_inter_company_ref(doctype: str, docname: str, ref_name: str) -> st
     return ""
 
 
+def _clear_counter_backref(doctype: str, docname: str, old_ref: str) -> None:
+    """
+    When clearing a bns_inter_company_reference on one side, also clear the
+    back-reference on the other document so the pair isn't left half-linked.
+    """
+    counter_doctype = {
+        "Delivery Note": "Purchase Receipt",
+        "Purchase Receipt": "Delivery Note",
+        "Sales Invoice": "Purchase Invoice",
+        "Purchase Invoice": "Sales Invoice",
+    }.get(doctype, "")
+    if not counter_doctype or not old_ref:
+        return
+    if not frappe.db.exists(counter_doctype, old_ref):
+        return
+    back = (
+        frappe.db.get_value(counter_doctype, old_ref, "bns_inter_company_reference") or ""
+    ).strip()
+    if back == docname:
+        frappe.db.set_value(
+            counter_doctype, old_ref,
+            "bns_inter_company_reference", "",
+            update_modified=False,
+        )
+        logger.info(
+            "Cleared counter-backref on %s %s (was %s)",
+            counter_doctype, old_ref, docname,
+        )
+
+
 def _get_linked_delivery_note_for_pr(doc) -> Optional[str]:
     """Resolve linked Delivery Note for Purchase Receipt in same-GSTIN flow."""
     candidate = doc.get("bns_inter_company_reference")
@@ -6399,12 +6429,13 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
                 )
             )
         
-        # Clear stale DN reference before checking "already converted"
+        # Clear stale/wrong DN reference before checking "already converted"
         dn_ref = (dn.get("bns_inter_company_reference") or "").strip()
         if dn_ref:
             stale = _is_stale_inter_company_ref("Delivery Note", dn.name, dn_ref)
             if stale:
                 logger.info("Clearing stale ref %s on DN %s (reason: %s)", dn_ref, dn.name, stale)
+                _clear_counter_backref("Delivery Note", dn.name, dn_ref)
                 dn.db_set("bns_inter_company_reference", "", update_modified=False)
                 dn.bns_inter_company_reference = ""
                 dn_ref = ""
@@ -6466,17 +6497,22 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
                     )
                 )
             
-            # Check if PR already linked to another DN — clear stale links
+            # Check if PR already linked to another DN — clear stale/wrong links
             existing_ref = (pr.get("bns_inter_company_reference") or "").strip()
             if existing_ref and existing_ref != dn.name:
+                pr_sdn = (pr.get("supplier_delivery_note") or "").strip()
                 stale = _is_stale_inter_company_ref(
                     "Purchase Receipt", pr.name, existing_ref
                 )
-                if stale:
+                # supplier_delivery_note is the authoritative ERPNext link;
+                # if it points to our DN, the bns ref is simply wrong.
+                if stale or pr_sdn == dn.name:
+                    reason = stale or f"supplier_delivery_note={pr_sdn}_matches_dn"
                     logger.info(
-                        "Clearing stale bns_inter_company_reference %s on PR %s (reason: %s)",
-                        existing_ref, pr.name, stale,
+                        "Clearing wrong bns_inter_company_reference %s on PR %s (reason: %s)",
+                        existing_ref, pr.name, reason,
                     )
+                    _clear_counter_backref("Purchase Receipt", pr.name, existing_ref)
                     pr.db_set("bns_inter_company_reference", "", update_modified=False)
                     pr.bns_inter_company_reference = ""
                 else:
@@ -6490,11 +6526,11 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
             pr.db_set("is_bns_internal_supplier", 1, update_modified=False)
             pr.db_set("status", "BNS Internally Transferred", update_modified=False)
             pr.db_set("per_billed", 100, update_modified=False)
-            if not pr.get("bns_inter_company_reference"):
+            if (pr.get("bns_inter_company_reference") or "") != dn.name:
                 pr.db_set("bns_inter_company_reference", dn.name, update_modified=False)
             
-            # Then update Delivery Note reference
-            if not dn.get("bns_inter_company_reference"):
+            # Update Delivery Note reference
+            if (dn.get("bns_inter_company_reference") or "") != pr.name:
                 dn.db_set("bns_inter_company_reference", pr.name, update_modified=False)
             
             _remap_pr_delivery_note_items(dn, pr)
@@ -6596,11 +6632,20 @@ def convert_purchase_receipt_to_bns_internal(purchase_receipt: str, delivery_not
                 )
             )
         
+        # Clear stale/wrong bns_inter_company_reference on PR before setting
+        pr_existing_ref = (pr.get("bns_inter_company_reference") or "").strip()
+        if pr_existing_ref and pr_existing_ref != linked_dn:
+            logger.info(
+                "Overriding wrong bns_inter_company_reference %s on PR %s with %s (supplier_delivery_note is authoritative)",
+                pr_existing_ref, pr.name, linked_dn,
+            )
+            _clear_counter_backref("Purchase Receipt", pr.name, pr_existing_ref)
+
         # Update Purchase Receipt (even if flag is already set, ensure status is updated)
         pr.db_set("is_bns_internal_supplier", 1, update_modified=False)
         pr.db_set("status", "BNS Internally Transferred", update_modified=False)
         pr.db_set("per_billed", 100, update_modified=False)
-        if not pr.get("bns_inter_company_reference"):
+        if (pr.get("bns_inter_company_reference") or "") != linked_dn:
             pr.db_set("bns_inter_company_reference", linked_dn, update_modified=False)
         
         result = {
@@ -6609,10 +6654,13 @@ def convert_purchase_receipt_to_bns_internal(purchase_receipt: str, delivery_not
             "purchase_receipt": pr.name
         }
         
-        # Update Delivery Note if not already updated
+        # Update Delivery Note
         if linked_dn:
             dn_reload = frappe.get_doc("Delivery Note", linked_dn)
-            if not dn_reload.get("bns_inter_company_reference"):
+            if (dn_reload.get("bns_inter_company_reference") or "") != pr.name:
+                old_dn_ref = (dn_reload.get("bns_inter_company_reference") or "").strip()
+                if old_dn_ref:
+                    _clear_counter_backref("Delivery Note", dn_reload.name, old_dn_ref)
                 dn_reload.db_set("bns_inter_company_reference", pr.name, update_modified=False)
             if dn_reload.status != "BNS Internally Transferred":
                 dn_reload.db_set("status", "BNS Internally Transferred", update_modified=False)
