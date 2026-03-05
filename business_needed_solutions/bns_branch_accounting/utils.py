@@ -1449,8 +1449,8 @@ def _balance_bns_gl_with_round_off(
 
     # 0 < abs(diff) <= 0.01: append round-off row via Company round-off account
     try:
-        round_off_account, round_off_cost_center, _ = get_round_off_account_and_cost_center(
-            doc.company, doc.doctype, doc.name
+        round_off_account, round_off_cost_center, round_off_for_opening = (
+            get_round_off_account_and_cost_center(doc.company, doc.doctype, doc.name)
         )
     except Exception as e:
         logger.error("Failed to get round-off account for %s: %s", doc.name, str(e))
