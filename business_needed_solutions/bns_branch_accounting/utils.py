@@ -16,7 +16,6 @@ from erpnext.accounts.doctype.sales_invoice.sales_invoice import update_address,
 from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
     get_accounting_dimensions,
 )
-from erpnext.accounts.general_ledger import get_round_off_account_and_cost_center
 from frappe.utils import flt, cint, get_link_to_form, getdate, add_to_date, now_datetime
 from frappe import bold
 from typing import Optional, Dict, Any, List, Tuple, Set
@@ -1423,57 +1422,6 @@ def _make_bns_gl_entry(doc, account: str, debit: float = 0.0, credit: float = 0.
     return doc.get_gl_dict(args)
 
 
-def _balance_bns_gl_with_round_off(
-    doc, rewritten: List[Dict[str, Any]], template: Dict[str, Any]
-) -> Optional[List[Dict[str, Any]]]:
-    """
-    Balance rewritten GL entries with a round-off row when diff is tiny.
-    Uses ERPNext's get_round_off_account_and_cost_center and GL pattern from make_round_off_gle.
-    Returns rewritten list (possibly with round-off row appended) or None to signal fallback to original GL.
-    """
-    debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
-    credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
-    diff = flt(debit_total - credit_total)
-
-    if abs(diff) == 0:
-        return rewritten
-
-    if abs(diff) > 0.01:
-        logger.error(
-            "Skipping BNS GL rewrite for %s due to balance mismatch %s vs %s",
-            doc.name,
-            debit_total,
-            credit_total,
-        )
-        return None
-
-    # 0 < abs(diff) <= 0.01: append round-off row via Company round-off account
-    try:
-        round_off_account, round_off_cost_center, round_off_for_opening = (
-            get_round_off_account_and_cost_center(doc.company, doc.doctype, doc.name)
-        )
-    except Exception as e:
-        logger.error("Failed to get round-off account for %s: %s", doc.name, str(e))
-        return None
-
-    round_off_template = dict(template) if template else {}
-    round_off_template["cost_center"] = round_off_cost_center
-    round_off_template["remarks"] = _("BNS internal transfer precision round-off")
-
-    if diff < 0:
-        round_off_row = _make_bns_gl_entry(
-            doc, round_off_account, debit=abs(diff), credit=0.0, against="", template=round_off_template
-        )
-    else:
-        round_off_row = _make_bns_gl_entry(
-            doc, round_off_account, debit=0.0, credit=diff, against="", template=round_off_template
-        )
-
-    rewritten = list(rewritten)
-    rewritten.append(round_off_row)
-    return rewritten
-
-
 def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Rewrite DN GL entries into BNS internal branch-accounting pattern."""
     if not _is_bns_internal_delivery_note(doc):
@@ -1532,10 +1480,13 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             _make_bns_gl_entry(doc, stock_account, credit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
         ]
 
-    result = _balance_bns_gl_with_round_off(doc, rewritten, template)
-    if result is None:
+    debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
+    credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
+    if abs(debit_total - credit_total) > 0.01:
+        logger.error("Skipping DN GL rewrite for %s due to balance mismatch %s vs %s", doc.name, debit_total, credit_total)
         return gl_entries
-    return result
+
+    return rewritten
 
 
 def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1597,10 +1548,13 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             _make_bns_gl_entry(doc, settings["stock_in_transit_account"], credit=valuation_amount, against=stock_account, template=template),
         ]
 
-    result = _balance_bns_gl_with_round_off(doc, rewritten, template)
-    if result is None:
+    debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
+    credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
+    if abs(debit_total - credit_total) > 0.01:
+        logger.error("Skipping PR GL rewrite for %s due to balance mismatch %s vs %s", doc.name, debit_total, credit_total)
         return gl_entries
-    return result
+
+    return rewritten
 
 
 def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1729,10 +1683,23 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             )
         )
 
-    result = _balance_bns_gl_with_round_off(doc, rewritten, creditor_template)
-    if result is None:
+    debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
+    credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
+    diff = flt(debit_total - credit_total)
+    if abs(diff) <= 0.01 and abs(diff) > 0:
+        # Absorb minor precision residue on transfer leg to keep map balanced.
+        for row in rewritten:
+            if row.get("account") == settings["internal_purchase_transfer_account"] and flt(row.get("debit") or 0) > 0:
+                row["debit"] = flt(row.get("debit") or 0) - diff
+                break
+        debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
+        credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
+
+    if abs(debit_total - credit_total) > 0.01:
+        logger.error("Skipping PI GL rewrite for %s due to balance mismatch %s vs %s", doc.name, debit_total, credit_total)
         return gl_entries
-    return result
+
+    return rewritten
 
 
 def _resolve_pi_tax_account_amounts(doc) -> Dict[str, float]:
@@ -1899,8 +1866,15 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             )
         )
 
-    result = _balance_bns_gl_with_round_off(doc, rewritten, debtor_template)
-    if result is None:
+    debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
+    credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
+    if abs(debit_total - credit_total) > 0.01:
+        logger.error(
+            "Skipping SI GL rewrite for %s due to balance mismatch %s vs %s",
+            doc.name,
+            debit_total,
+            credit_total,
+        )
         return gl_entries
 
     logger.info(
@@ -1910,7 +1884,7 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         grand_total,
         taxable_total,
     )
-    return result
+    return rewritten
 
 
 def _apply_bns_internal_gl_rewrite_patch() -> None:
