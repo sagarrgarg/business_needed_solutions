@@ -36,8 +36,10 @@ The app is designed to be **configurable via settings** – most features can be
 - DN → SI → PI (delivery note creates sales invoice, then purchase invoice)
 - DN → SI → PR → PI (full chain from stock to invoice on both sides)
 - Correct GL: Stock in Transit, Internal Sales Transfer Account (DN), Internal Purchase Transfer Account (PR), Internal Branch Debtor/Creditor Accounts
+- Tiny precision residues (e.g. 0.0001) after internal GL rewrite are posted to the Company round-off account, not absorbed into transfer or branch accounts.
 
 **Constraint:** `is_bns_internal_customer` and `is_bns_internal_supplier` are the source of truth. Do not introduce parallel flags.
+**Constraint:** Round-off account and cost center must come from Company (ERPNext's `get_round_off_account_and_cost_center`). Do not add BNS-specific round-off settings.
 
 ### 2.2b Bulk Linkage Verification & Repost
 
