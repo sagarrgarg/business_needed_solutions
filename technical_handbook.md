@@ -88,6 +88,15 @@ BNS extends ERPNext with:
 - **Impacted:** All DN→PR linking paths, GL rewrite for DN and PR.
 - **Impacted:** All internal transfer document types (DN, PR, SI, PI). Creates Repost Item Valuation entries.
 
+### 3.2b-3 Internal GL Precision Round-Off (2026)
+
+- **What:** BNS internal GL rewrite functions (DN, PR, PI, SI) now allow small debit/credit residuals to pass through to ERPNext's standard `process_debit_credit_difference()` safety net, which books them to the Company round-off account via `make_round_off_gle()`.
+- **Why:** Keeps ERP books clean; tiny precision residues (e.g. 0.0001) follow Company round-off policy rather than distorting internal transfer accounts or causing the BNS rewrite to be abandoned.
+- **How:** Raised the BNS balance-check threshold from `0.01` to `0.5` (matching ERPNext's `get_debit_credit_allowance` for non-JE/PE vouchers). Removed the PI-only hack that absorbed residue into `internal_purchase_transfer_account`. ERPNext's `process_debit_credit_difference()` in `general_ledger.py` runs on every GL map in `save_entries()` and appends a round-off GL row when needed — it never modifies or removes BNS-rewritten entries.
+- **Impacted:** All four BNS internal GL rewrite functions: DN, PR, PI, SI.
+- **Migration:** None. Existing vouchers remain as-is. New or reposted vouchers with tiny residuals will have round-off posted by ERPNext's standard path.
+- **Fail-safe:** Mismatches `> 0.5` still log an error and fall back to original ERPNext GL entries.
+
 ### 3.3 GST Compliance (`overrides/gst_compliance.py`)
 
 - **What:**

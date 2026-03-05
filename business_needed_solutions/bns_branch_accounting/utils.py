@@ -1482,7 +1482,7 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
 
     debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
     credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
-    if abs(debit_total - credit_total) > 0.01:
+    if abs(debit_total - credit_total) > 0.5:
         logger.error("Skipping DN GL rewrite for %s due to balance mismatch %s vs %s", doc.name, debit_total, credit_total)
         return gl_entries
 
@@ -1550,7 +1550,7 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
 
     debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
     credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
-    if abs(debit_total - credit_total) > 0.01:
+    if abs(debit_total - credit_total) > 0.5:
         logger.error("Skipping PR GL rewrite for %s due to balance mismatch %s vs %s", doc.name, debit_total, credit_total)
         return gl_entries
 
@@ -1685,17 +1685,7 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
 
     debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
     credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
-    diff = flt(debit_total - credit_total)
-    if abs(diff) <= 0.01 and abs(diff) > 0:
-        # Absorb minor precision residue on transfer leg to keep map balanced.
-        for row in rewritten:
-            if row.get("account") == settings["internal_purchase_transfer_account"] and flt(row.get("debit") or 0) > 0:
-                row["debit"] = flt(row.get("debit") or 0) - diff
-                break
-        debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
-        credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
-
-    if abs(debit_total - credit_total) > 0.01:
+    if abs(debit_total - credit_total) > 0.5:
         logger.error("Skipping PI GL rewrite for %s due to balance mismatch %s vs %s", doc.name, debit_total, credit_total)
         return gl_entries
 
@@ -1868,7 +1858,7 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
 
     debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
     credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
-    if abs(debit_total - credit_total) > 0.01:
+    if abs(debit_total - credit_total) > 0.5:
         logger.error(
             "Skipping SI GL rewrite for %s due to balance mismatch %s vs %s",
             doc.name,
