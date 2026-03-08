@@ -172,22 +172,22 @@ def get_columns():
 			"width": 140
 		},
 		{
-			"fieldname": "source_destination_warehouse",
-			"label": _("Source Dest. Warehouse"),
+			"fieldname": "source_location",
+			"label": _("Source Location"),
 			"fieldtype": "Data",
-			"width": 180
+			"width": 160
 		},
 		{
-			"fieldname": "purchase_warehouse",
-			"label": _("Purchase Warehouse"),
+			"fieldname": "purchase_location",
+			"label": _("Purchase Location"),
 			"fieldtype": "Data",
-			"width": 180
+			"width": 160
 		},
 		{
-			"fieldname": "warehouse_mismatch",
+			"fieldname": "location_mismatch",
 			"label": _("Location Mismatch"),
 			"fieldtype": "Data",
-			"width": 250
+			"width": 200
 		},
 		{
 			"fieldname": "item_mismatch_details",
@@ -345,9 +345,9 @@ def get_internal_purchase_doc_linkage_mismatches(filters=None):
 					"purchase_receipt": pr.get("name"),
 					"purchase_invoice": None,
 					"transfer_chain": "",
-					"source_destination_warehouse": "",
-					"purchase_warehouse": "",
-					"warehouse_mismatch": "",
+					"source_location": "",
+					"purchase_location": "",
+					"location_mismatch": "",
 					"item_mismatch_details": "",
 				}
 			)
@@ -412,9 +412,9 @@ def get_internal_purchase_doc_linkage_mismatches(filters=None):
 				"purchase_receipt": None,
 				"purchase_invoice": pi.get("name"),
 				"transfer_chain": "",
-				"source_destination_warehouse": "",
-				"purchase_warehouse": "",
-				"warehouse_mismatch": "",
+				"source_location": "",
+				"purchase_location": "",
+				"location_mismatch": "",
 				"item_mismatch_details": "",
 			}
 		)
@@ -523,10 +523,7 @@ def get_delivery_note_mismatches(filters=None):
 		missing_items = []
 		qty_mismatches = []
 		taxable_value_mismatches = []
-		warehouse_mismatches = []
 		item_code_mismatches = []
-		dn_dest_warehouses = set()
-		pr_recv_warehouses = set()
 		matched_prs = set()
 		pr_grand_total = 0
 		pr_total_taxes = 0
@@ -629,20 +626,7 @@ def get_delivery_note_mismatches(filters=None):
 						"pr_taxable_value": pr_taxable_value
 					})
 
-				# Track warehouse and item code mismatches
-				dn_dest_wh = (dn_item.get("target_warehouse") or dn_item.get("warehouse") or "").strip()
-				if dn_dest_wh:
-					dn_dest_warehouses.add(dn_dest_wh)
 				for pr_item in pr_items:
-					pr_wh = (pr_item.get("pr_warehouse") or "").strip()
-					if pr_wh:
-						pr_recv_warehouses.add(pr_wh)
-					if dn_dest_wh and pr_wh and dn_dest_wh != pr_wh:
-						warehouse_mismatches.append({
-							"item": dn_item.get("item_code") or "",
-							"dn_warehouse": dn_dest_wh,
-							"pr_warehouse": pr_wh,
-						})
 					pr_ic = (pr_item.get("pr_item_code") or "").strip()
 					dn_ic = (dn_item.get("item_code") or "").strip()
 					if pr_ic and dn_ic and pr_ic != dn_ic:
@@ -779,16 +763,6 @@ def get_delivery_note_mismatches(filters=None):
 				# No mismatch found, skip this DN
 				continue
 		
-		# Build warehouse and item mismatch summary strings
-		wh_mismatch_str = ""
-		if warehouse_mismatches:
-			wh_parts = []
-			for wm in warehouse_mismatches[:3]:
-				wh_parts.append(f"{wm['item']}: DN={wm['dn_warehouse']}, PR={wm['pr_warehouse']}")
-			if len(warehouse_mismatches) > 3:
-				wh_parts.append(f"... +{len(warehouse_mismatches) - 3} more")
-			wh_mismatch_str = " | ".join(wh_parts)
-
 		item_mismatch_str = ""
 		if item_code_mismatches:
 			im_parts = []
@@ -797,6 +771,15 @@ def get_delivery_note_mismatches(filters=None):
 			if len(item_code_mismatches) > 3:
 				im_parts.append(f"... +{len(item_code_mismatches) - 3} more")
 			item_mismatch_str = " | ".join(im_parts)
+
+		dn_billing_location = (dn_doc.get("billing_location") or "").strip()
+		pr_location = ""
+		location_mismatch_str = ""
+		if matched_prs:
+			first_pr = list(matched_prs)[0]
+			pr_location = (frappe.db.get_value("Purchase Receipt", first_pr, "location") or "").strip()
+			if dn_billing_location and pr_location and dn_billing_location != pr_location:
+				location_mismatch_str = f"DN={dn_billing_location}, PR={pr_location}"
 
 		mismatches.append({
 			"posting_date": dn.get("posting_date") or None,
@@ -810,9 +793,9 @@ def get_delivery_note_mismatches(filters=None):
 			"purchase_receipt": purchase_receipt,
 			"purchase_invoice": None,
 			"transfer_chain": "DN->PR",
-			"source_destination_warehouse": ", ".join(sorted(dn_dest_warehouses)) if dn_dest_warehouses else "",
-			"purchase_warehouse": ", ".join(sorted(pr_recv_warehouses)) if pr_recv_warehouses else "",
-			"warehouse_mismatch": wh_mismatch_str,
+			"source_location": dn_billing_location,
+			"purchase_location": pr_location,
+			"location_mismatch": location_mismatch_str,
 			"item_mismatch_details": item_mismatch_str,
 		})
 	
@@ -934,13 +917,17 @@ def get_sales_invoice_mismatches(filters=None):
 		# Also check SI->PR->PI chain for PR mismatch
 		pr_mismatch_info = _check_si_pr_chain_mismatch(si_name, si_items, si_pr_ref)
 
-		si_warehouses = set()
-		for item in si_items:
-			wh = (item.get("warehouse") or "").strip()
-			if wh:
-				si_warehouses.add(wh)
+		si_billing_location = (si_doc.get("billing_location") or "").strip()
 
 		if pi_mismatch:
+			pi_name_for_loc = pi_mismatch.get("purchase_invoice")
+			pi_location = ""
+			location_mismatch_str = ""
+			if pi_name_for_loc:
+				pi_location = (frappe.db.get_value("Purchase Invoice", pi_name_for_loc, "location") or "").strip()
+				if si_billing_location and pi_location and si_billing_location != pi_location:
+					location_mismatch_str = f"SI={si_billing_location}, PI={pi_location}"
+
 			mismatches.append({
 				"posting_date": si.get("posting_date") or None,
 				"document_type": "Sales Invoice",
@@ -953,12 +940,19 @@ def get_sales_invoice_mismatches(filters=None):
 				"purchase_receipt": pi_mismatch.get("purchase_receipt") or (si_pr_ref if si_pr_ref else None),
 				"purchase_invoice": pi_mismatch.get("purchase_invoice"),
 				"transfer_chain": chain_type,
-				"source_destination_warehouse": ", ".join(sorted(si_warehouses)) if si_warehouses else "",
-				"purchase_warehouse": pi_mismatch.get("purchase_warehouse", ""),
-				"warehouse_mismatch": pi_mismatch.get("warehouse_mismatch", ""),
+				"source_location": si_billing_location,
+				"purchase_location": pi_location,
+				"location_mismatch": location_mismatch_str,
 				"item_mismatch_details": pi_mismatch.get("item_mismatch_details", ""),
 			})
 		elif pr_mismatch_info:
+			pr_location = ""
+			location_mismatch_str = ""
+			if si_pr_ref:
+				pr_location = (frappe.db.get_value("Purchase Receipt", si_pr_ref, "location") or "").strip()
+				if si_billing_location and pr_location and si_billing_location != pr_location:
+					location_mismatch_str = f"SI={si_billing_location}, PR={pr_location}"
+
 			mismatches.append({
 				"posting_date": si.get("posting_date") or None,
 				"document_type": "Sales Invoice",
@@ -971,9 +965,9 @@ def get_sales_invoice_mismatches(filters=None):
 				"purchase_receipt": si_pr_ref or None,
 				"purchase_invoice": None,
 				"transfer_chain": chain_type,
-				"source_destination_warehouse": ", ".join(sorted(si_warehouses)) if si_warehouses else "",
-				"purchase_warehouse": pr_mismatch_info.get("purchase_warehouse", ""),
-				"warehouse_mismatch": pr_mismatch_info.get("warehouse_mismatch", ""),
+				"source_location": si_billing_location,
+				"purchase_location": pr_location,
+				"location_mismatch": location_mismatch_str,
 				"item_mismatch_details": pr_mismatch_info.get("item_mismatch_details", ""),
 			})
 	
@@ -982,7 +976,7 @@ def get_sales_invoice_mismatches(filters=None):
 
 def _check_si_pr_chain_mismatch(si_name, si_items, si_pr_ref):
 	"""
-	Check SI->PR chain for warehouse and item mismatches.
+	Check SI->PR chain for item mismatches.
 
 	Args:
 		si_name: Sales Invoice name
@@ -997,7 +991,7 @@ def _check_si_pr_chain_mismatch(si_name, si_items, si_pr_ref):
 
 	pr_items = frappe.db.sql(
 		"""
-		SELECT item_code, qty, stock_qty, warehouse
+		SELECT item_code, qty, stock_qty
 		FROM `tabPurchase Receipt Item`
 		WHERE parent = %s
 		""",
@@ -1016,23 +1010,12 @@ def _check_si_pr_chain_mismatch(si_name, si_items, si_pr_ref):
 			si_agg[ic] += flt(sii.get("stock_qty") or sii.get("qty") or 0)
 
 	pr_agg = {}
-	pr_warehouses = set()
 	for pri in pr_items:
 		ic = (pri.get("item_code") or "").strip()
-		wh = (pri.get("warehouse") or "").strip()
 		if ic:
 			pr_agg.setdefault(ic, 0)
 			pr_agg[ic] += flt(pri.get("stock_qty") or pri.get("qty") or 0)
-		if wh:
-			pr_warehouses.add(wh)
 
-	si_warehouses = set()
-	for sii in si_items:
-		wh = (sii.get("warehouse") or "").strip()
-		if wh:
-			si_warehouses.add(wh)
-
-	wh_mismatches = []
 	item_mismatches = []
 	qty_mismatches = []
 
@@ -1048,20 +1031,13 @@ def _check_si_pr_chain_mismatch(si_name, si_items, si_pr_ref):
 		if ic not in si_agg:
 			item_mismatches.append(f"PR has extra {ic}")
 
-	if si_warehouses and pr_warehouses and si_warehouses != pr_warehouses:
-		si_wh_str = ", ".join(sorted(si_warehouses))
-		pr_wh_str = ", ".join(sorted(pr_warehouses))
-		wh_mismatches.append(f"SI={si_wh_str}, PR={pr_wh_str}")
-
-	if not qty_mismatches and not item_mismatches and not wh_mismatches:
+	if not qty_mismatches and not item_mismatches:
 		return None
 
 	parts = qty_mismatches + item_mismatches
 	return {
 		"missing_doc": "Purchase Receipt (Mismatch)",
-		"reason": " | ".join(parts[:5]) if parts else "Warehouse mismatch only",
-		"purchase_warehouse": ", ".join(sorted(pr_warehouses)) if pr_warehouses else "",
-		"warehouse_mismatch": " | ".join(wh_mismatches) if wh_mismatches else "",
+		"reason": " | ".join(parts[:5]) if parts else "",
 		"item_mismatch_details": " | ".join(item_mismatches[:3]) if item_mismatches else "",
 	}
 
@@ -1096,11 +1072,8 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 	qty_mismatches = []
 	taxable_value_mismatches = []
 	extra_items = []
-	warehouse_mismatches_pi = []
 	item_code_mismatches_pi = []
-	si_warehouses_set = set()
-	pi_warehouses_set = set()
-	
+
 	# Track which PI items are matched
 	matched_pi_items = set()
 	
@@ -1178,20 +1151,7 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 					"pi_taxable_value": pi_taxable_value
 				})
 
-			# Track warehouse and item code mismatches
-			si_wh = (si_item.get("warehouse") or "").strip()
-			if si_wh:
-				si_warehouses_set.add(si_wh)
 			for pi_item in pi_items:
-				pi_wh = (pi_item.get("pi_warehouse") or "").strip()
-				if pi_wh:
-					pi_warehouses_set.add(pi_wh)
-				if si_wh and pi_wh and si_wh != pi_wh:
-					warehouse_mismatches_pi.append({
-						"item": si_item.get("item_code") or "",
-						"si_warehouse": si_wh,
-						"pi_warehouse": pi_wh,
-					})
 				pi_ic = (pi_item.get("pi_item_code") or "").strip()
 				si_ic = (si_item.get("item_code") or "").strip()
 				if pi_ic and si_ic and pi_ic != si_ic:
@@ -1327,16 +1287,6 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 		if tax_mismatch:
 			all_mismatches.append(f"Total Taxes and Charges: SI ₹{tax_mismatch['si_tax']:.2f} vs PI ₹{tax_mismatch['pi_tax']:.2f} (Diff: ₹{abs(tax_mismatch['diff']):.2f})")
 		
-		# Build warehouse mismatch string
-		wh_mismatch_str = ""
-		if warehouse_mismatches_pi:
-			wh_parts = []
-			for wm in warehouse_mismatches_pi[:3]:
-				wh_parts.append(f"{wm['item']}: SI={wm['si_warehouse']}, PI={wm['pi_warehouse']}")
-			if len(warehouse_mismatches_pi) > 3:
-				wh_parts.append(f"... +{len(warehouse_mismatches_pi) - 3} more")
-			wh_mismatch_str = " | ".join(wh_parts)
-
 		item_mismatch_str = ""
 		if item_code_mismatches_pi:
 			im_parts = []
@@ -1350,39 +1300,21 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 			"missing_doc": "Purchase Invoice (Mismatch)",
 			"reason": " | ".join(all_mismatches[:8]) + (f" | ... and {len(all_mismatches) - 8} more" if len(all_mismatches) > 8 else ""),
 			"purchase_invoice": pi_name,
-			"purchase_warehouse": ", ".join(sorted(pi_warehouses_set)) if pi_warehouses_set else "",
-			"warehouse_mismatch": wh_mismatch_str,
 			"item_mismatch_details": item_mismatch_str,
 		}
-	
-	# No quantity/value mismatches, but check for warehouse or item code mismatches only
-	if warehouse_mismatches_pi or item_code_mismatches_pi:
-		wh_mismatch_str = ""
-		if warehouse_mismatches_pi:
-			wh_parts = []
-			for wm in warehouse_mismatches_pi[:3]:
-				wh_parts.append(f"{wm['item']}: SI={wm['si_warehouse']}, PI={wm['pi_warehouse']}")
-			wh_mismatch_str = " | ".join(wh_parts)
 
+	# No quantity/value mismatches, but check for item code mismatches only
+	if item_code_mismatches_pi:
 		item_mismatch_str = ""
-		if item_code_mismatches_pi:
-			im_parts = []
-			for im in item_code_mismatches_pi[:3]:
-				im_parts.append(f"SI={im['si_item_code']}, PI={im['pi_item_code']}")
-			item_mismatch_str = " | ".join(im_parts)
-
-		reason_parts = []
-		if wh_mismatch_str:
-			reason_parts.append(f"Location: {wh_mismatch_str}")
-		if item_mismatch_str:
-			reason_parts.append(f"Item: {item_mismatch_str}")
+		im_parts = []
+		for im in item_code_mismatches_pi[:3]:
+			im_parts.append(f"SI={im['si_item_code']}, PI={im['pi_item_code']}")
+		item_mismatch_str = " | ".join(im_parts)
 
 		return {
-			"missing_doc": "Purchase Invoice (Location/Item Mismatch)",
-			"reason": " | ".join(reason_parts),
+			"missing_doc": "Purchase Invoice (Item Mismatch)",
+			"reason": f"Item: {item_mismatch_str}",
 			"purchase_invoice": pi_name,
-			"purchase_warehouse": ", ".join(sorted(pi_warehouses_set)) if pi_warehouses_set else "",
-			"warehouse_mismatch": wh_mismatch_str,
 			"item_mismatch_details": item_mismatch_str,
 		}
 
