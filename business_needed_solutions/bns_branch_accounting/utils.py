@@ -6724,8 +6724,10 @@ def ignore_parent_cancellation_links_for_bns_internal(doc, method: Optional[str]
         ]
     elif doc.doctype == "Purchase Invoice":
         ignore_linked_doctypes = [
-            # Keep accounting-link safety consistent
             "GL Entry",
+            "Stock Ledger Entry",
+            "Repost Item Valuation",
+            "Serial and Batch Bundle",
             "Sales Invoice",
             "Payment Ledger Entry",
             "Advance Payment Ledger Entry",
