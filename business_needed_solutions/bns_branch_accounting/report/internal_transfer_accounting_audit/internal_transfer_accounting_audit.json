@@ -1,0 +1,52 @@
+{
+  "add_total_row": 0,
+  "add_translate_data": 0,
+  "columns": [],
+  "creation": "2026-03-08 00:00:00.000000",
+  "disabled": 0,
+  "docstatus": 0,
+  "doctype": "Report",
+  "filters": [
+    {
+      "fieldname": "company",
+      "label": "Company",
+      "fieldtype": "Link",
+      "options": "Company"
+    },
+    {
+      "fieldname": "from_date",
+      "label": "From Date",
+      "fieldtype": "Date"
+    },
+    {
+      "fieldname": "to_date",
+      "label": "To Date",
+      "fieldtype": "Date"
+    },
+    {
+      "fieldname": "document_type",
+      "label": "Document Type",
+      "fieldtype": "Select",
+      "options": "\nDelivery Note\nSales Invoice\nPurchase Receipt\nPurchase Invoice"
+    }
+  ],
+  "idx": 0,
+  "is_standard": "Yes",
+  "letterhead": null,
+  "modified": "2026-03-08 00:00:00.000000",
+  "modified_by": "Administrator",
+  "module": "BNS Branch Accounting",
+  "name": "Internal Transfer Accounting Audit",
+  "owner": "Administrator",
+  "prepared_report": 1,
+  "ref_doctype": "GL Entry",
+  "report_name": "Internal Transfer Accounting Audit",
+  "report_type": "Script Report",
+  "roles": [
+    {"role": "Accounts Manager"},
+    {"role": "Accounts User"},
+    {"role": "Director"},
+    {"role": "Auditor"}
+  ],
+  "timeout": 0
+}

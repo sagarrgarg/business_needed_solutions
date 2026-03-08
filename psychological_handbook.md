@@ -61,6 +61,14 @@ The app is designed to be **configurable via settings** – most features can be
 
 **Constraint:** Only apply auto-update and read-only when `is_bns_internal_customer` is true. Do not extend this logic to outside customers.
 
+### 2.2c Internal Transfer Accounting Audit
+
+**Intent:** Provide a read-only audit report that validates whether GL and SLE entries for BNS internal documents (DN, SI, PR, PI) conform to the expected BNS branch-accounting patterns. This is a detective control — it does not fix anything, only surfaces deviations.
+
+**Reasoning:** The GL rewrite functions may be skipped (missing settings, zero amounts, pre-cutoff documents) or overwritten by repost. SLE transfer rates may diverge from `bns_transfer_rate` after repost. This report gives the accounting team visibility into which documents have non-conforming entries so they can trigger targeted reposts or manual corrections.
+
+**Constraint:** The report must remain read-only. It must not modify GL, SLE, or document data. It must use the same scope-detection logic as the rewrite functions (same GSTIN vs different GSTIN, DN-linked vs SI-linked) to ensure consistency.
+
 ### 2.3 Same-GSTIN Purchase Invoice Block
 
 **Intent:** Prevent self-invoicing when Supplier GSTIN = Company GSTIN. GST does not allow this.

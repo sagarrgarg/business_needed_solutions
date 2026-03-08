@@ -182,7 +182,24 @@ BNS extends ERPNext with:
 | BNS Settings | Global app settings (PAN, GST, stock, submission, print, etc.) |
 | BNS Branch Accounting Settings | Internal transfer accounts, internal DN e-Waybill |
 
-### 3.11 Internal Transfer Receive Mismatch Report (`bns_branch_accounting/report/`)
+### 3.11 Internal Transfer Accounting Audit Report (`bns_branch_accounting/report/`)
+
+- **What:** Prepared Script Report that validates GL Entry and Stock Ledger Entry correctness for all BNS internal DN, SI, PR, and PI against the expected BNS branch-accounting patterns. For each submitted internal document, it compares actual GL/SLE rows with the expected pattern and flags deviations.
+- **GL Checks:**
+  - DN (Same GSTIN): expects Internal Branch Debtor Dr, Stock In Transit Dr, Internal Sales Transfer Cr, Stock Cr.
+  - DN (Different GSTIN): expects Stock In Transit Dr, Stock Cr.
+  - PR (DN-linked Same GSTIN): expects Internal Purchase Transfer Dr, Stock Dr, Internal Branch Creditor Cr, Stock In Transit Cr.
+  - PR (SI-linked): expects Stock Dr, Stock In Transit Cr.
+  - SI (Different GSTIN): expects Internal Branch Debtor Dr, Internal Sales Transfer Cr, tax legs. Optionally stock legs if update_stock.
+  - PI (SI-linked): expects Internal Branch Creditor Cr, Internal Purchase Transfer Dr, tax legs. Optionally stock legs if update_stock and no PR-linked rows.
+- **SLE Checks:** For PR/PI with `bns_transfer_rate`, validates `incoming_rate` and `stock_value_difference` against expected values.
+- **Columns:** Posting Date, Document Type, Document, Internal Scope, Deviation Type, Expected Accounts, Unexpected Accounts, Missing Accounts, SLE Issue, Details.
+- **Filters:** Company, From Date, To Date, Document Type (optional: DN/SI/PR/PI).
+- **Why:** Provides accounting integrity audit for internal transfers — identifies documents where the GL rewrite was skipped, partially applied, or overwritten by repost.
+- **Impacted:** Report output only (read-only). No data modifications.
+- **Cutoff:** Respects `internal_validation_cutoff_date` from BNS Branch Accounting Settings as default `from_date`.
+
+### 3.12 Internal Transfer Receive Mismatch Report (`bns_branch_accounting/report/`)
 
 - **What:** Prepared Script Report identifying DN/SI with internal customers missing or mismatched PR/PI. Enhanced with:
   - **Transfer Chain** column: identifies the chain type (DN→PR, SI→PI, SI→PR→PI, DN→SI→PI, DN→SI→PR→PI)

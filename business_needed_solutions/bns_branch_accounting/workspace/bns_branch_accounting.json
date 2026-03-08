@@ -30,6 +30,37 @@
    "link_type": "DocType",
    "onboard": 1,
    "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Reports",
+   "link_count": 0,
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Internal Transfer Accounting Audit",
+   "link_count": 0,
+   "link_to": "Internal Transfer Accounting Audit",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Internal Transfer Receive Mismatch",
+   "link_count": 0,
+   "link_to": "Internal Transfer Receive Mismatch",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
   }
  ],
  "modified": "2026-02-16 12:00:00.000000",
