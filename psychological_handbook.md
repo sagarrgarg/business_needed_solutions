@@ -61,7 +61,15 @@ The app is designed to be **configurable via settings** – most features can be
 
 **Constraint:** Only apply auto-update and read-only when `is_bns_internal_customer` is true. Do not extend this logic to outside customers.
 
-### 2.2c Internal Transfer Accounting Audit
+### 2.2c Credit Note → Debit Note Conversion (SI Return → PI Return)
+
+**Intent:** Enable BNS internal SI credit notes to be converted to PI debit notes using the same `make_bns_internal_purchase_invoice` conversion function. This mirrors the standard SI→PI flow but handles negative quantities and sets return linkage on the target PI.
+
+**Reasoning:** When goods are returned between internal branches, the selling branch issues a credit note (SI return). The purchasing branch needs a corresponding debit note (PI return) linked to the original PI. Blocking returns entirely was too restrictive — branches need a formal return mechanism for adjustments, damages, and corrections.
+
+**Constraint:** The PI debit note must have `is_return = 1` and `return_against` pointing to the original PI (found via `bns_inter_company_reference` on the original SI). Item quantities remain negative. The previous return-blocking validations (`validate_bns_internal_customer_return`, `validate_bns_internal_delivery_note_return`) were removed to enable this flow — returns are now allowed for BNS internal customers.
+
+### 2.2d Internal Transfer Accounting Audit
 
 **Intent:** Provide a read-only audit report that validates whether GL and SLE entries for BNS internal documents (DN, SI, PR, PI) conform to the expected BNS branch-accounting patterns. This is a detective control — it does not fix anything, only surfaces deviations.
 

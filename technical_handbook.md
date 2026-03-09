@@ -43,9 +43,10 @@ BNS extends ERPNext with:
 
 ### 3.2 BNS Branch Accounting (`bns_branch_accounting/utils.py`)
 
-- **What:** Internal transfer flow – DN→PR, SI→PI, SI→PR; status updates; convert/link/unlink. Bulk linkage verification and repost.
+- **What:** Internal transfer flow – DN→PR, SI→PI, SI→PR; status updates; convert/link/unlink. Bulk linkage verification and repost. Credit note → debit note conversion (SI return → PI return).
 - **Why:** Support inter-branch transfers with `is_bns_internal_customer` / `is_bns_internal_supplier`.
 - **Impacted:** DN, PR, SI, PI (client JS + doc_events).
+- **Credit Note → Debit Note:** SI credit notes (is_return=1) can be converted to PI debit notes via `make_bns_internal_purchase_invoice`. The function detects `is_return` on the source SI, sets `is_return=1` on the target PI, and resolves `return_against` by looking up the original PI linked to `si.return_against`. Item mapping uses `qty != 0` to handle negative quantities.
 - **Settings:** BNS Branch Accounting Settings – `stock_in_transit_account`, `internal_sales_transfer_account`, `internal_purchase_transfer_account`, `internal_branch_debtor_account`, `internal_branch_creditor_account`, `enable_internal_dn_ewaybill`, `internal_validation_cutoff_date`.
 - **PR/PI standard fields:** BNS does **not** set standard ERPNext fields `represents_company` or `inter_company_reference` / `inter_company_invoice_reference` on Purchase Receipt or Purchase Invoice. Only BNS fields are used: `bns_inter_company_reference`, `supplier_delivery_note`, `is_bns_internal_supplier`, etc. Representing-company logic uses Customer/Supplier `bns_represents_company` (with fallback read of `represents_company` for validation only).
 
@@ -226,6 +227,7 @@ BNS extends ERPNext with:
 - **test_bns_settings.py:** Tests for `warehouse_validation`, `auto_transit_validation`, `warehouse_filtering` removed — those modules never existed. Replaced with minimal `test_bns_settings_loads` test.
 - **BNS Settings:** `enable_internal_dn_ewaybill` field removed from field_order — migrated to BNS Branch Accounting Settings.
 - **PR/PI standard inter-company fields:** BNS no longer sets `represents_company` or `inter_company_reference` (PR) / `inter_company_invoice_reference` (PI) on Purchase Receipt or Purchase Invoice. All internal-transfer linking uses BNS fields only (`bns_inter_company_reference`, `supplier_delivery_note`, etc.). Removed from: DN→PR mapping, PR status update on_submit, PI status update on_submit.
+- **BNS Internal Return Blocking (SI/DN):** `validate_bns_internal_customer_return` and `validate_bns_internal_delivery_note_return` previously threw errors blocking credit notes / returns for BNS internal customers. Functions converted to no-ops (pass) to enable SI credit note → PI debit note conversion flow. Hook registrations retained but inactive.
 - **FIFO auto payment reconciliation system:** Removed end-to-end from BNS Settings and backend service. Deleted `auto_payment_reconcile.py`, removed manual "Run FIFO Reconciliation" action from `doctype/bns_settings/bns_settings.js`, and removed reconciliation fields from `doctype/bns_settings/bns_settings.json` (`enable_auto_fifo_reconciliation`, `include_future_payments_in_reconciliation`, `reconciliation_batch_size`, `last_reconciliation_run`, `last_reconciliation_status`).
 
 ---

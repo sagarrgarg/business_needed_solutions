@@ -341,9 +341,8 @@ frappe.ui.form.on('Sales Invoice', {
                 }
             });
             
-            // Check if Purchase Receipt button should be shown
-            // Show if: any item maintains stock (is_stock_item) OR if SI is made from Delivery Note
-            if (frm.doc.items && frm.doc.items.length > 0) {
+            // Purchase Receipt button (only for non-return SIs)
+            if (!frm.doc.is_return && frm.doc.items && frm.doc.items.length > 0) {
                 // Check if SI is made from Delivery Note (items have delivery_note reference)
                 let has_dn_reference = frm.doc.items.some(item => item.delivery_note);
                 
@@ -392,6 +391,32 @@ frappe.ui.form.on('Sales Invoice', {
                     }
                 }
             }
+        }
+
+        if (
+            frm.doc.is_return &&
+            frm.doc.is_bns_internal_customer &&
+            frm.doc.docstatus == 1
+        ) {
+            frappe.db.get_value("Purchase Invoice", {
+                bns_inter_company_reference: frm.doc.name,
+                docstatus: ["!=", 2]
+            }, "name").then(function(r) {
+                var pi_exists = !!(r && r.message && r.message.name);
+                if (!pi_exists) {
+                    frm.add_custom_button(
+                        __("BNS Internal Debit Note"),
+                        function() {
+                            frappe.model.open_mapped_doc({
+                                method: "business_needed_solutions.bns_branch_accounting.utils.make_bns_internal_purchase_invoice",
+                                frm: frm,
+                            });
+                        },
+                        __("Create")
+                    );
+                    frm.page.set_inner_btn_group_as_primary(__("Create"));
+                }
+            });
         }
     }
 });

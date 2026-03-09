@@ -4963,7 +4963,7 @@ def make_bns_internal_purchase_invoice(source_name: str, target_doc: Optional[Di
             source_doc=si,
             target_doc=doclist,
             source_link_field="sales_invoice_item",
-            source_item_filter=lambda d: flt(d.get("qty") or 0) > 0,
+            source_item_filter=lambda d: flt(d.get("qty") or 0) != 0,
             source_label="Sales Invoice",
             target_label="Purchase Invoice",
         )
@@ -5031,7 +5031,7 @@ def _get_sales_invoice_mapping() -> Dict[str, Any]:
                 "name": "sales_invoice_item",
             },
             "field_no_map": ["expense_account", "cost_center", "project", "location"],
-            "condition": lambda item: flt(item.qty or 0) > 0,
+            "condition": lambda item: flt(item.qty or 0) != 0,
             "postprocess": _update_item_pi,
         },
     }
@@ -5078,63 +5078,49 @@ def _update_details_pi(source_doc, target_doc, source_parent) -> None:
     - is_bns_internal_supplier = 1
     - supplier_invoice_number (bill_no) = SI name
     """
-    # Handle case where source_parent might be None (when called as postprocess)
-    if source_parent is None:
-        # This is being called as a postprocess function, so we need to get the data differently
-        # The source_doc is the Sales Invoice, and target_doc is the Purchase Invoice
-        represents_company = _get_representing_company_from_customer(source_doc.customer)
-        target_doc.company = represents_company
-        
-        # Find supplier representing the sales invoice's company
-        supplier = _find_internal_supplier(represents_company)
-        target_doc.supplier = supplier
-        
-        # Set internal transfer fields
-        target_doc.buying_price_list = source_doc.selling_price_list
-        # Do NOT set is_internal_supplier - only set is_bns_internal_supplier for BNS internal transfers
-        # Use bns_inter_company_reference instead of inter_company_invoice_reference to avoid ERPNext validation
-        target_doc.bns_inter_company_reference = source_doc.name
-        
-        # Set is_bns_internal_supplier = 1 (TRANSFER UNDER DIFFERENT GSTIN)
-        target_doc.is_bns_internal_supplier = 1
-        
-        # Set supplier_invoice_number (bill_no) = SI name (TRANSFER UNDER DIFFERENT GSTIN)
-        target_doc.bill_no = source_doc.name
+    represents_company = _get_representing_company_from_customer(source_doc.customer)
+    target_doc.company = represents_company
 
-        # Handle addresses
-        _update_addresses_pi(target_doc, source_doc)
-        
-        # Handle taxes
-        _update_taxes_pi(target_doc)
-    else:
-        # This is being called from the main function with proper parameters
-        represents_company = _get_representing_company_from_customer(source_doc.customer)
-        target_doc.company = represents_company
-        
-        # Find supplier representing the sales invoice's company
-        supplier = _find_internal_supplier(represents_company)
-        target_doc.supplier = supplier
-        
-        # Set internal transfer fields
-        target_doc.buying_price_list = source_doc.selling_price_list
-        # Do NOT set is_internal_supplier - only set is_bns_internal_supplier for BNS internal transfers
-        # Use bns_inter_company_reference instead of inter_company_invoice_reference to avoid ERPNext validation
-        target_doc.bns_inter_company_reference = source_doc.name
-        
-        # Set is_bns_internal_supplier = 1 (TRANSFER UNDER DIFFERENT GSTIN)
-        target_doc.is_bns_internal_supplier = 1
+    supplier = _find_internal_supplier(represents_company)
+    target_doc.supplier = supplier
 
-        # Set supplier_invoice_number (bill_no) = SI name (TRANSFER UNDER DIFFERENT GSTIN)
-        target_doc.bill_no = source_doc.name
-        
-        # Update sales invoice with reference
+    target_doc.buying_price_list = source_doc.selling_price_list
+    target_doc.bns_inter_company_reference = source_doc.name
+    target_doc.is_bns_internal_supplier = 1
+    target_doc.bill_no = source_doc.name
+
+    if cint(source_doc.get("is_return")):
+        target_doc.is_return = 1
+        original_pi = _find_return_against_pi(source_doc.get("return_against"))
+        if original_pi:
+            target_doc.return_against = original_pi
+
+    if source_parent is not None:
         _update_sales_invoice_reference(source_doc.name, target_doc.name)
-        
-        # Handle addresses
-        _update_addresses_pi(target_doc, source_doc)
-        
-        # Handle taxes
-        _update_taxes_pi(target_doc)
+
+    _update_addresses_pi(target_doc, source_doc)
+    _update_taxes_pi(target_doc)
+
+
+def _find_return_against_pi(original_si_name: Optional[str]) -> Optional[str]:
+    """
+    Find the Purchase Invoice created from the original Sales Invoice
+    so it can be used as return_against for the debit note.
+
+    Args:
+        original_si_name: Name of the original SI that the credit note returns against.
+
+    Returns:
+        PI name if found, else None.
+    """
+    if not original_si_name:
+        return None
+    pi_name = frappe.db.get_value(
+        "Purchase Invoice",
+        {"bns_inter_company_reference": original_si_name, "docstatus": 1, "is_return": 0},
+        "name",
+    )
+    return pi_name
 
 
 def _update_addresses_pi(target_doc, source_doc) -> None:
@@ -6905,80 +6891,22 @@ def cancel_linked_purchase_docs_for_sales_invoice(doc, method: Optional[str] = N
 
 def validate_bns_internal_customer_return(doc, method: Optional[str] = None) -> None:
     """
-    Block return entries (Credit Notes) for BNS internal customers.
-    
-    Args:
-        doc: The Sales Invoice document
-        method (Optional[str]): The method being called
+    Validate return entries (Credit Notes) for BNS internal customers.
+
+    Previously blocked all returns; now allows them so that
+    SI credit notes can be converted to PI debit notes.
     """
-    if not doc.is_return or not doc.return_against:
-        return
-    
-    try:
-        # Get the original Sales Invoice
-        original_si = frappe.get_doc("Sales Invoice", doc.return_against)
-        
-        # Check if original SI is for BNS internal customer
-        is_bns_internal = original_si.get("is_bns_internal_customer") or False
-        if not is_bns_internal:
-            # Check customer's is_bns_internal_customer field
-            customer_internal = frappe.db.get_value("Customer", original_si.customer, "is_bns_internal_customer")
-            if customer_internal:
-                is_bns_internal = True
-        
-        if is_bns_internal:
-            frappe.throw(
-                _("Returns (Credit Notes) are not allowed for BNS Internal Customers. Original Sales Invoice {0} is for a BNS Internal Customer.").format(
-                    get_link_to_form("Sales Invoice", doc.return_against)
-                ),
-                title=_("Return Not Allowed")
-            )
-    except frappe.DoesNotExistError:
-        # Original document doesn't exist, let ERPNext handle this validation
-        pass
-    except Exception as e:
-        logger.error(f"Error validating BNS internal customer return for Sales Invoice: {str(e)}")
-        # Don't block if there's an error, but log it
-        pass
+    pass
 
 
 def validate_bns_internal_delivery_note_return(doc, method: Optional[str] = None) -> None:
     """
-    Block return entries for Delivery Notes with BNS internal customers.
-    
-    Args:
-        doc: The Delivery Note document
-        method (Optional[str]): The method being called
+    Validate return entries for Delivery Notes with BNS internal customers.
+
+    Previously blocked all returns; now allows them so that
+    DN returns can be converted to PR returns.
     """
-    if not doc.is_return or not doc.return_against:
-        return
-    
-    try:
-        # Get the original Delivery Note
-        original_dn = frappe.get_doc("Delivery Note", doc.return_against)
-        
-        # Check if original DN is for BNS internal customer
-        is_bns_internal = original_dn.get("is_bns_internal_customer") or False
-        if not is_bns_internal:
-            # Check customer's is_bns_internal_customer field
-            customer_internal = frappe.db.get_value("Customer", original_dn.customer, "is_bns_internal_customer")
-            if customer_internal:
-                is_bns_internal = True
-        
-        if is_bns_internal:
-            frappe.throw(
-                _("Returns are not allowed for BNS Internal Customers. Original Delivery Note {0} is for a BNS Internal Customer.").format(
-                    get_link_to_form("Delivery Note", doc.return_against)
-                ),
-                title=_("Return Not Allowed")
-            )
-    except frappe.DoesNotExistError:
-        # Original document doesn't exist, let ERPNext handle this validation
-        pass
-    except Exception as e:
-        logger.error(f"Error validating BNS internal customer return for Delivery Note: {str(e)}")
-        # Don't block if there's an error, but log it
-        pass
+    pass
 
 
 @frappe.whitelist()
