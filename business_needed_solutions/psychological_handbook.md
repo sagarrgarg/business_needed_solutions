@@ -103,6 +103,16 @@
 - PR-linked PI mirror policy:
   - In SI->PR->PI chains, PI item transfer-rate should still mirror upstream transfer-rate for consistency/reporting even when PI does not own stock valuation legs.
   - Allow PR-row linkage (`pr_detail`) as fallback source when direct SI-row mapping is absent.
+- Credit note / debit note GL symmetry:
+  - GL rewrite functions must handle `is_return` documents by reversing debit/credit sides while preserving the same account structure.
+  - Use `abs()` on `grand_total` / `taxable_total` for returns since ERPNext stores negative amounts for return documents.
+  - The audit report must validate return GL expectations separately (reversed pattern) to avoid false-positive mismatch flags.
+  - Chain-level bulk repost (`verify_and_repost_internal_transfers`) excludes credit note SIs — return documents are not standard forward-flow chains.
+- Audit-driven repost authority:
+  - The Internal Transfer Accounting Audit report can trigger targeted SLE and GL repost for individual flagged documents.
+  - SLE repost creates Repost Item Valuation entries (queued, ERPNext pipeline).
+  - GL repost uses `bns_force_rebuild_gl_for_voucher` (immediate force rebuild with savepoint safety).
+  - Both repost paths run as background jobs to prevent timeout on bulk operations.
 - Debug instrumentation hygiene:
   - Runtime debug logs must use site-local paths, never developer-machine absolute paths.
   - Debug run identifiers should be dynamic to avoid false correlation across requests/runs.

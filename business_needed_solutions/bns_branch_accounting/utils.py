@@ -1571,23 +1571,32 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         logger.warning("Skipping PI GL rewrite for %s due to missing internal_purchase_transfer_account", doc.name)
         return gl_entries
 
+    is_return = cint(doc.get("is_return"))
     grand_total = flt(doc.get("base_grand_total") or doc.get("base_rounded_total") or 0)
     taxable_total = flt(doc.get("base_net_total") or doc.get("base_total") or 0)
     tax_by_account = _resolve_pi_tax_account_amounts(doc)
+
+    if is_return:
+        grand_total = abs(grand_total)
+        taxable_total = abs(taxable_total)
+
     if grand_total <= 0 or taxable_total < 0:
         logger.warning("Skipping PI GL rewrite for %s due to invalid totals", doc.name)
         return gl_entries
+
+    creditor_side = "debit" if is_return else "credit"
+    transfer_side = "credit" if is_return else "debit"
 
     creditor_template = next(
         (
             row
             for row in (gl_entries or [])
-            if row.get("account") == settings["internal_branch_creditor_account"] and flt(row.get("credit") or 0) > 0
+            if row.get("account") == settings["internal_branch_creditor_account"] and flt(row.get(creditor_side) or 0) > 0
         ),
         None,
     )
     if not creditor_template:
-        creditor_template = next((row for row in (gl_entries or []) if flt(row.get("credit") or 0) > 0), None)
+        creditor_template = next((row for row in (gl_entries or []) if flt(row.get(creditor_side) or 0) > 0), None)
     if not creditor_template and gl_entries:
         creditor_template = gl_entries[0]
     if not creditor_template:
@@ -1597,14 +1606,14 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         _make_bns_gl_entry(
             doc,
             settings["internal_branch_creditor_account"],
-            credit=grand_total,
+            **{creditor_side: grand_total},
             against=settings["internal_purchase_transfer_account"],
             template=creditor_template,
         ),
         _make_bns_gl_entry(
             doc,
             settings["internal_purchase_transfer_account"],
-            debit=taxable_total,
+            **{transfer_side: taxable_total},
             against=settings["internal_branch_creditor_account"],
             template=creditor_template,
         ),
@@ -1620,34 +1629,27 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             ),
             creditor_template,
         )
-        if tax_amount > 0:
-            rewritten.append(
-                _make_bns_gl_entry(
-                    doc,
-                    tax_account,
-                    debit=tax_amount,
-                    against=settings["internal_branch_creditor_account"],
-                    template=tax_template,
-                )
-            )
+        abs_tax = abs(tax_amount)
+        if is_return:
+            tax_positive_side = "credit" if tax_amount > 0 else "debit"
         else:
-            rewritten.append(
-                _make_bns_gl_entry(
-                    doc,
-                    tax_account,
-                    credit=abs(tax_amount),
-                    against=settings["internal_branch_creditor_account"],
-                    template=tax_template,
-                )
+            tax_positive_side = "debit" if tax_amount > 0 else "credit"
+        rewritten.append(
+            _make_bns_gl_entry(
+                doc,
+                tax_account,
+                **{tax_positive_side: abs_tax},
+                against=settings["internal_branch_creditor_account"],
+                template=tax_template,
             )
+        )
 
     has_pr_linked_rows = any((row.get("purchase_receipt") or "").strip() for row in (doc.get("items") or []))
 
-    # For SI->PR->PI chain, PR already owns stock valuation leg.
-    # Keep PI accounting to transfer + creditor + taxes only.
     if cint(doc.get("update_stock")) and not has_pr_linked_rows:
+        stock_gl_side = "debit" if not is_return else "credit"
         valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
-            gl_entries, side="debit", company=doc.company
+            gl_entries, side=stock_gl_side, company=doc.company
         )
         if valuation_amount <= 0 or not stock_account:
             logger.warning(
@@ -1660,15 +1662,16 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             (
                 row
                 for row in (gl_entries or [])
-                if row.get("account") == stock_account and flt(row.get("debit") or 0) > 0
+                if row.get("account") == stock_account and flt(row.get(stock_gl_side) or 0) > 0
             ),
             creditor_template,
         )
+        transit_side = "credit" if not is_return else "debit"
         rewritten.append(
             _make_bns_gl_entry(
                 doc,
                 stock_account,
-                debit=valuation_amount,
+                **{stock_gl_side: valuation_amount},
                 against=settings["stock_in_transit_account"],
                 template=stock_template,
             )
@@ -1677,7 +1680,7 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             _make_bns_gl_entry(
                 doc,
                 settings["stock_in_transit_account"],
-                credit=valuation_amount,
+                **{transit_side: valuation_amount},
                 against=stock_account,
                 template=stock_template,
             )
@@ -1744,24 +1747,32 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
 
     debtor_account = settings["internal_branch_debtor_account"]
     transfer_account = settings["internal_sales_transfer_account"]
+    is_return = cint(doc.get("is_return"))
     grand_total = flt(doc.get("base_grand_total") or doc.get("base_rounded_total") or 0)
     taxable_total = flt(doc.get("base_net_total") or doc.get("base_total") or 0)
     tax_by_account = _resolve_si_tax_account_amounts(doc)
+
+    if is_return:
+        grand_total = abs(grand_total)
+        taxable_total = abs(taxable_total)
 
     if grand_total <= 0 or taxable_total < 0:
         logger.warning("Skipping SI GL rewrite for %s due to invalid totals", doc.name)
         return gl_entries
 
+    debtor_side = "credit" if is_return else "debit"
+    transfer_side = "debit" if is_return else "credit"
+
     debtor_template = next(
         (
             row
             for row in (gl_entries or [])
-            if row.get("account") == debtor_account and flt(row.get("debit") or 0) > 0
+            if row.get("account") == debtor_account and flt(row.get(debtor_side) or 0) > 0
         ),
         None,
     )
     if not debtor_template:
-        debtor_template = next((row for row in (gl_entries or []) if flt(row.get("debit") or 0) > 0), None)
+        debtor_template = next((row for row in (gl_entries or []) if flt(row.get(debtor_side) or 0) > 0), None)
     if not debtor_template and gl_entries:
         debtor_template = gl_entries[0]
     if not debtor_template:
@@ -1771,7 +1782,7 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         _make_bns_gl_entry(
             doc,
             debtor_account,
-            debit=grand_total,
+            **{debtor_side: grand_total},
             against=transfer_account,
             template=debtor_template,
         )
@@ -1787,40 +1798,35 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             ),
             debtor_template,
         )
-        if tax_amount > 0:
-            rewritten.append(
-                _make_bns_gl_entry(
-                    doc,
-                    tax_account,
-                    credit=tax_amount,
-                    against=debtor_account,
-                    template=tax_template,
-                )
-            )
+        abs_tax = abs(tax_amount)
+        if is_return:
+            tax_positive_side = "debit" if tax_amount > 0 else "credit"
         else:
-            rewritten.append(
-                _make_bns_gl_entry(
-                    doc,
-                    tax_account,
-                    debit=abs(tax_amount),
-                    against=debtor_account,
-                    template=tax_template,
-                )
+            tax_positive_side = "credit" if tax_amount > 0 else "debit"
+        rewritten.append(
+            _make_bns_gl_entry(
+                doc,
+                tax_account,
+                **{tax_positive_side: abs_tax},
+                against=debtor_account,
+                template=tax_template,
             )
+        )
 
     rewritten.append(
         _make_bns_gl_entry(
             doc,
             transfer_account,
-            credit=taxable_total,
+            **{transfer_side: taxable_total},
             against=debtor_account,
             template=debtor_template,
         )
     )
 
     if cint(doc.get("update_stock")):
+        stock_gl_side = "credit" if not is_return else "debit"
         valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
-            gl_entries, side="credit", company=doc.company
+            gl_entries, side=stock_gl_side, company=doc.company
         )
         if valuation_amount <= 0 or not stock_account:
             logger.warning(
@@ -1833,15 +1839,16 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             (
                 row
                 for row in (gl_entries or [])
-                if row.get("account") == stock_account and flt(row.get("credit") or 0) > 0
+                if row.get("account") == stock_account and flt(row.get(stock_gl_side) or 0) > 0
             ),
             debtor_template,
         )
+        transit_side = "debit" if not is_return else "credit"
         rewritten.append(
             _make_bns_gl_entry(
                 doc,
                 settings["stock_in_transit_account"],
-                debit=valuation_amount,
+                **{transit_side: valuation_amount},
                 against=stock_account,
                 template=stock_template,
             )
@@ -1850,7 +1857,7 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             _make_bns_gl_entry(
                 doc,
                 stock_account,
-                credit=valuation_amount,
+                **{stock_gl_side: valuation_amount},
                 against=settings["stock_in_transit_account"],
                 template=stock_template,
             )
@@ -9093,6 +9100,7 @@ def verify_and_repost_internal_transfers(
           AND c.is_bns_internal_customer = 1
           AND (si.company_gstin IS NOT NULL AND si.billing_address_gstin IS NOT NULL
                AND si.company_gstin != si.billing_address_gstin)
+          AND si.is_return = 0
           AND si.posting_date >= %s
         ORDER BY si.posting_date
         """,

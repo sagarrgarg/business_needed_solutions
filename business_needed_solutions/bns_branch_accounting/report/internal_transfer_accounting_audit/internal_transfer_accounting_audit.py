@@ -12,6 +12,7 @@ GL/SLE rows against the expected BNS branch-accounting pattern defined
 in bns_branch_accounting/utils.py and flags any deviations.
 """
 
+import json
 import frappe
 from frappe import _
 from frappe.utils import flt, getdate, cint
@@ -161,7 +162,7 @@ def _classify_si(doc):
 	Classify a Sales Invoice.
 
 	Returns:
-		str or None: 'different_gstin' | None
+		str or None: 'different_gstin' | 'different_gstin_return' | None
 	"""
 	if not cint(doc.get("is_bns_internal_customer")):
 		customer = doc.get("customer")
@@ -173,6 +174,8 @@ def _classify_si(doc):
 	company_gstin = (doc.get("company_gstin") or "").strip()
 	billing_gstin = (doc.get("billing_address_gstin") or "").strip()
 	if company_gstin and billing_gstin and company_gstin != billing_gstin:
+		if cint(doc.get("is_return")):
+			return "different_gstin_return"
 		return "different_gstin"
 	return None
 
@@ -216,7 +219,7 @@ def _classify_pi(doc):
 	Classify a Purchase Invoice.
 
 	Returns:
-		str or None: 'si_linked' | None
+		str or None: 'si_linked' | 'si_linked_return' | None
 	"""
 	is_internal = cint(doc.get("is_bns_internal_supplier"))
 	if not is_internal:
@@ -226,24 +229,34 @@ def _classify_pi(doc):
 		if not frappe.db.get_value("Supplier", supplier, "is_bns_internal_supplier"):
 			return None
 
+	is_linked = False
+
 	si_ref = (doc.get("bns_inter_company_reference") or "").strip()
 	if si_ref and frappe.db.exists("Sales Invoice", si_ref):
-		return "si_linked"
+		is_linked = True
 
-	bill_no = (doc.get("bill_no") or "").strip()
-	if bill_no and frappe.db.exists("Sales Invoice", {"name": bill_no, "docstatus": 1}):
-		return "si_linked"
+	if not is_linked:
+		bill_no = (doc.get("bill_no") or "").strip()
+		if bill_no and frappe.db.exists("Sales Invoice", {"name": bill_no, "docstatus": 1}):
+			is_linked = True
 
-	pr_names = list({
-		(row.get("purchase_receipt") or "").strip()
-		for row in (doc.get("items") or [])
-		if (row.get("purchase_receipt") or "").strip()
-	})
-	if pr_names:
-		for pr_name in pr_names:
-			pr_ref = frappe.db.get_value("Purchase Receipt", pr_name, "bns_inter_company_reference")
-			if pr_ref and frappe.db.exists("Sales Invoice", (pr_ref or "").strip()):
-				return "si_linked"
+	if not is_linked:
+		pr_names = list({
+			(row.get("purchase_receipt") or "").strip()
+			for row in (doc.get("items") or [])
+			if (row.get("purchase_receipt") or "").strip()
+		})
+		if pr_names:
+			for pr_name in pr_names:
+				pr_ref = frappe.db.get_value("Purchase Receipt", pr_name, "bns_inter_company_reference")
+				if pr_ref and frappe.db.exists("Sales Invoice", (pr_ref or "").strip()):
+					is_linked = True
+					break
+
+	if is_linked:
+		if cint(doc.get("is_return")):
+			return "si_linked_return"
+		return "si_linked"
 
 	return None
 
@@ -348,6 +361,59 @@ def _expected_gl_for_pi(scope, settings, doc):
 		if stock_account:
 			expected.add((stock_account, "debit"))
 			expected.add((settings["stock_in_transit"], "credit"))
+	return expected
+
+
+def _expected_gl_for_si_return(scope, settings, doc):
+	"""Return set of (account, side) tuples for expected BNS GL on SI credit note (reversed)."""
+	expected = {
+		(settings["internal_branch_debtor"], "credit"),
+		(settings["internal_sales_transfer"], "debit"),
+	}
+	for tax in (doc.get("taxes") or []):
+		account = (tax.get("account_head") or "").strip()
+		base_amount = flt(
+			tax.get("base_tax_amount_after_discount_amount")
+			or tax.get("base_tax_amount") or 0
+		)
+		if account and abs(base_amount) > 0.000001:
+			side = "debit" if base_amount < 0 else "credit"
+			expected.add((account, side))
+
+	if cint(doc.get("update_stock")):
+		stock_account = _resolve_stock_account_for_doc(doc)
+		if stock_account:
+			expected.add((settings["stock_in_transit"], "credit"))
+			expected.add((stock_account, "debit"))
+	return expected
+
+
+def _expected_gl_for_pi_return(scope, settings, doc):
+	"""Return set of (account, side) tuples for expected BNS GL on PI debit note (reversed)."""
+	expected = {
+		(settings["internal_branch_creditor"], "debit"),
+		(settings["internal_purchase_transfer"], "credit"),
+	}
+
+	for tax in (doc.get("taxes") or []):
+		account = (tax.get("account_head") or "").strip()
+		base_amount = flt(
+			tax.get("base_tax_amount_after_discount_amount")
+			or tax.get("base_tax_amount") or 0
+		)
+		if account and abs(base_amount) > 0.000001:
+			side = "credit" if base_amount < 0 else "debit"
+			expected.add((account, side))
+
+	has_pr_linked = any(
+		(row.get("purchase_receipt") or "").strip()
+		for row in (doc.get("items") or [])
+	)
+	if cint(doc.get("update_stock")) and not has_pr_linked:
+		stock_account = _resolve_stock_account_for_doc(doc)
+		if stock_account:
+			expected.add((stock_account, "credit"))
+			expected.add((settings["stock_in_transit"], "debit"))
 	return expected
 
 
@@ -565,8 +631,10 @@ def _check_sle_for_pi(doc):
 _SCOPE_LABELS = {
 	"same_gstin": "Same GSTIN",
 	"different_gstin": "Different GSTIN",
+	"different_gstin_return": "Different GSTIN (Credit Note)",
 	"dn_same_gstin": "DN-linked (Same GSTIN)",
 	"si_linked": "SI-linked (Different GSTIN)",
+	"si_linked_return": "SI-linked (Debit Note)",
 }
 
 
@@ -687,7 +755,7 @@ def _audit_delivery_notes(filters, settings):
 
 
 def _audit_sales_invoices(filters, settings):
-	"""Audit GL entries for BNS internal Sales Invoices."""
+	"""Audit GL entries for BNS internal Sales Invoices (including credit notes)."""
 	conditions, values = _build_date_conditions(filters, alias="si")
 	conditions.append(
 		"(si.is_bns_internal_customer = 1"
@@ -697,7 +765,7 @@ def _audit_sales_invoices(filters, settings):
 	sql = f"""
 		SELECT si.name, si.posting_date, si.company, si.customer,
 			   si.is_bns_internal_customer, si.company_gstin, si.billing_address_gstin,
-			   si.update_stock
+			   si.update_stock, si.is_return
 		FROM `tabSales Invoice` si
 		LEFT JOIN `tabCustomer` c ON si.customer = c.name
 		WHERE {" AND ".join(conditions)}
@@ -711,7 +779,10 @@ def _audit_sales_invoices(filters, settings):
 			continue
 
 		doc = frappe.get_doc("Sales Invoice", row.name)
-		expected = _expected_gl_for_si(scope, settings, doc)
+		if scope == "different_gstin_return":
+			expected = _expected_gl_for_si_return(scope, settings, doc)
+		else:
+			expected = _expected_gl_for_si(scope, settings, doc)
 		gl_entries = _fetch_gl_entries("Sales Invoice", row.name)
 
 		if not gl_entries:
@@ -802,7 +873,7 @@ def _audit_purchase_receipts(filters, settings):
 
 
 def _audit_purchase_invoices(filters, settings):
-	"""Audit GL and SLE for BNS internal Purchase Invoices."""
+	"""Audit GL and SLE for BNS internal Purchase Invoices (including debit notes)."""
 	conditions, values = _build_date_conditions(filters, alias="pi")
 	conditions.append(
 		"(pi.is_bns_internal_supplier = 1"
@@ -812,7 +883,7 @@ def _audit_purchase_invoices(filters, settings):
 	sql = f"""
 		SELECT pi.name, pi.posting_date, pi.company, pi.supplier,
 			   pi.is_bns_internal_supplier, pi.bns_inter_company_reference,
-			   pi.bill_no, pi.update_stock
+			   pi.bill_no, pi.update_stock, pi.is_return
 		FROM `tabPurchase Invoice` pi
 		LEFT JOIN `tabSupplier` s ON pi.supplier = s.name
 		WHERE {" AND ".join(conditions)}
@@ -826,7 +897,10 @@ def _audit_purchase_invoices(filters, settings):
 			continue
 
 		doc = frappe.get_doc("Purchase Invoice", row.name)
-		expected = _expected_gl_for_pi(scope, settings, doc)
+		if scope == "si_linked_return":
+			expected = _expected_gl_for_pi_return(scope, settings, doc)
+		else:
+			expected = _expected_gl_for_pi(scope, settings, doc)
 		gl_entries = _fetch_gl_entries("Purchase Invoice", row.name)
 
 		gl_deviation = None
@@ -940,3 +1014,189 @@ def _build_row(
 		"sle_issue": sle_issue or "",
 		"details": details or "",
 	}
+
+
+# ---------------------------------------------------------------------------
+# Bulk repost APIs
+# ---------------------------------------------------------------------------
+
+_VALID_REPOST_DOCTYPES = frozenset({
+	"Delivery Note", "Sales Invoice", "Purchase Receipt", "Purchase Invoice",
+})
+
+
+@frappe.whitelist()
+def repost_sle_for_audit_documents(documents):
+	"""
+	Enqueue SLE repost for a batch of audit-flagged documents.
+
+	Creates one Repost Item Valuation entry per document, queued through
+	ERPNext's standard repost pipeline.
+
+	Args:
+		documents: JSON string of [{voucher_type, voucher_no}, ...].
+
+	Returns:
+		dict with success count, error count, and per-document results.
+	"""
+	frappe.only_for(["Accounts Manager", "System Manager"])
+
+	if isinstance(documents, str):
+		documents = json.loads(documents)
+
+	if not documents:
+		frappe.throw(_("No documents provided for SLE repost."))
+
+	frappe.enqueue(
+		"business_needed_solutions.bns_branch_accounting.report"
+		".internal_transfer_accounting_audit.internal_transfer_accounting_audit"
+		"._process_sle_repost_batch",
+		queue="long",
+		timeout=1800,
+		documents=documents,
+	)
+
+	return {
+		"success": True,
+		"message": _("SLE repost job enqueued for {0} document(s). Check Background Jobs for progress.").format(
+			len(documents)
+		),
+	}
+
+
+def _process_sle_repost_batch(documents):
+	"""
+	Background worker: create Repost Item Valuation entries for each document.
+
+	Args:
+		documents: list of dicts [{voucher_type, voucher_no}, ...].
+	"""
+	from erpnext.controllers.stock_controller import create_repost_item_valuation_entry
+
+	success = 0
+	errors = 0
+
+	for entry in documents:
+		voucher_type = entry.get("voucher_type") or entry.get("document_type") or ""
+		voucher_no = entry.get("voucher_no") or entry.get("document_name") or ""
+
+		if voucher_type not in _VALID_REPOST_DOCTYPES or not voucher_no:
+			errors += 1
+			continue
+
+		try:
+			doc = frappe.get_doc(voucher_type, voucher_no)
+			if doc.docstatus != 1:
+				errors += 1
+				continue
+
+			create_repost_item_valuation_entry({
+				"based_on": "Transaction",
+				"voucher_type": voucher_type,
+				"voucher_no": voucher_no,
+				"posting_date": doc.posting_date,
+				"posting_time": getattr(doc, "posting_time", "00:00:00") or "00:00:00",
+				"company": doc.company,
+				"allow_zero_rate": 1,
+			})
+			success += 1
+			frappe.db.commit()
+		except Exception:
+			errors += 1
+			frappe.db.rollback()
+			frappe.log_error(
+				title=f"Audit SLE Repost Error: {voucher_type} {voucher_no}",
+			)
+
+	frappe.publish_realtime(
+		"msgprint",
+		{
+			"message": _("SLE repost complete: {0} succeeded, {1} failed.").format(success, errors),
+			"title": _("Audit SLE Repost"),
+			"indicator": "green" if errors == 0 else "orange",
+		},
+	)
+
+
+@frappe.whitelist()
+def repost_gl_for_audit_documents(documents):
+	"""
+	Enqueue GL rebuild for a batch of audit-flagged documents.
+
+	Uses the existing bns_force_rebuild_gl_for_voucher from utils.py.
+
+	Args:
+		documents: JSON string of [{voucher_type, voucher_no}, ...].
+
+	Returns:
+		dict with enqueue confirmation.
+	"""
+	frappe.only_for(["Accounts Manager", "System Manager"])
+
+	if isinstance(documents, str):
+		documents = json.loads(documents)
+
+	if not documents:
+		frappe.throw(_("No documents provided for GL repost."))
+
+	frappe.enqueue(
+		"business_needed_solutions.bns_branch_accounting.report"
+		".internal_transfer_accounting_audit.internal_transfer_accounting_audit"
+		"._process_gl_repost_batch",
+		queue="long",
+		timeout=1800,
+		documents=documents,
+	)
+
+	return {
+		"success": True,
+		"message": _("GL repost job enqueued for {0} document(s). Check Background Jobs for progress.").format(
+			len(documents)
+		),
+	}
+
+
+def _process_gl_repost_batch(documents):
+	"""
+	Background worker: force-rebuild GL entries for each document.
+
+	Args:
+		documents: list of dicts [{voucher_type, voucher_no}, ...].
+	"""
+	from business_needed_solutions.bns_branch_accounting.utils import (
+		bns_force_rebuild_gl_for_voucher,
+	)
+
+	success = 0
+	errors = 0
+
+	for entry in documents:
+		voucher_type = entry.get("voucher_type") or entry.get("document_type") or ""
+		voucher_no = entry.get("voucher_no") or entry.get("document_name") or ""
+
+		if voucher_type not in _VALID_REPOST_DOCTYPES or not voucher_no:
+			errors += 1
+			continue
+
+		try:
+			result = bns_force_rebuild_gl_for_voucher(voucher_type, voucher_no)
+			if result.get("ok"):
+				success += 1
+			else:
+				errors += 1
+			frappe.db.commit()
+		except Exception:
+			errors += 1
+			frappe.db.rollback()
+			frappe.log_error(
+				title=f"Audit GL Repost Error: {voucher_type} {voucher_no}",
+			)
+
+	frappe.publish_realtime(
+		"msgprint",
+		{
+			"message": _("GL repost complete: {0} succeeded, {1} failed.").format(success, errors),
+			"title": _("Audit GL Repost"),
+			"indicator": "green" if errors == 0 else "orange",
+		},
+	)

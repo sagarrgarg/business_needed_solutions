@@ -47,6 +47,7 @@ BNS extends ERPNext with:
 - **Why:** Support inter-branch transfers with `is_bns_internal_customer` / `is_bns_internal_supplier`.
 - **Impacted:** DN, PR, SI, PI (client JS + doc_events).
 - **Credit Note → Debit Note:** SI credit notes (is_return=1) can be converted to PI debit notes via `make_bns_internal_purchase_invoice`. The function detects `is_return` on the source SI, sets `is_return=1` on the target PI, and resolves `return_against` by looking up the original PI linked to `si.return_against`. Item mapping uses `qty != 0` to handle negative quantities.
+- **Credit Note / Debit Note GL Rewrite:** `_rewrite_bns_internal_si_gl_entries` and `_rewrite_bns_internal_pi_gl_entries` are return-aware. When `is_return=1`, amounts are `abs()`-normalized and debit/credit sides are swapped: SI credit note puts Internal Branch Debtor on credit side and Internal Sales Transfer on debit side; PI debit note puts Internal Branch Creditor on debit side and Internal Purchase Transfer on credit side. Tax legs and stock valuation legs are similarly reversed.
 - **Settings:** BNS Branch Accounting Settings – `stock_in_transit_account`, `internal_sales_transfer_account`, `internal_purchase_transfer_account`, `internal_branch_debtor_account`, `internal_branch_creditor_account`, `enable_internal_dn_ewaybill`, `internal_validation_cutoff_date`.
 - **PR/PI standard fields:** BNS does **not** set standard ERPNext fields `represents_company` or `inter_company_reference` / `inter_company_invoice_reference` on Purchase Receipt or Purchase Invoice. Only BNS fields are used: `bns_inter_company_reference`, `supplier_delivery_note`, `is_bns_internal_supplier`, etc. Representing-company logic uses Customer/Supplier `bns_represents_company` (with fallback read of `represents_company` for validation only).
 
@@ -68,6 +69,7 @@ BNS extends ERPNext with:
   - Location/warehouse mismatch (DN `target_warehouse` vs PR `warehouse`)
   Fixed chains are promoted to `fully_linked` and become eligible for repost in the same run. Results include per-pair action (fixed/skipped/error) with skip reasons.
 - **UI:** "Verify & Repost Internal Transfers" button in BNS Branch Accounting Settings, with preview (Verify) and execute (Run) modes. Includes "Fix Partial DN→PR" checkbox. Download CSV report of partial/unlinked/fix results.
+- **Return Exclusion:** SI query in `verify_and_repost_internal_transfers` filters out `is_return = 1` (credit notes). Credit note chains are not eligible for bulk chain-level repost since they operate outside the standard forward-flow chain model.
 
 ### 3.2b-1 Bulk Convert DN→PR Reference Fix (2026)
 
@@ -185,19 +187,25 @@ BNS extends ERPNext with:
 
 ### 3.11 Internal Transfer Accounting Audit Report (`bns_branch_accounting/report/`)
 
-- **What:** Prepared Script Report that validates GL Entry and Stock Ledger Entry correctness for all BNS internal DN, SI, PR, and PI against the expected BNS branch-accounting patterns. For each submitted internal document, it compares actual GL/SLE rows with the expected pattern and flags deviations.
+- **What:** Prepared Script Report that validates GL Entry and Stock Ledger Entry correctness for all BNS internal DN, SI, PR, and PI against the expected BNS branch-accounting patterns. For each submitted internal document, it compares actual GL/SLE rows with the expected pattern and flags deviations. Includes bulk repost actions for fixing flagged documents.
 - **GL Checks:**
   - DN (Same GSTIN): expects Internal Branch Debtor Dr, Stock In Transit Dr, Internal Sales Transfer Cr, Stock Cr.
   - DN (Different GSTIN): expects Stock In Transit Dr, Stock Cr.
   - PR (DN-linked Same GSTIN): expects Internal Purchase Transfer Dr, Stock Dr, Internal Branch Creditor Cr, Stock In Transit Cr.
   - PR (SI-linked): expects Stock Dr, Stock In Transit Cr.
   - SI (Different GSTIN): expects Internal Branch Debtor Dr, Internal Sales Transfer Cr, tax legs. Optionally stock legs if update_stock.
+  - SI (Credit Note): expects Internal Branch Debtor Cr, Internal Sales Transfer Dr, reversed tax legs. Optionally reversed stock legs if update_stock.
   - PI (SI-linked): expects Internal Branch Creditor Cr, Internal Purchase Transfer Dr, tax legs. Optionally stock legs if update_stock and no PR-linked rows.
+  - PI (Debit Note): expects Internal Branch Creditor Dr, Internal Purchase Transfer Cr, reversed tax legs. Optionally reversed stock legs if update_stock and no PR-linked rows.
 - **SLE Checks:** For PR/PI with `bns_transfer_rate`, validates `incoming_rate` and `stock_value_difference` against expected values.
+- **Bulk Repost Actions:**
+  - "Repost SLE" (Actions menu): Enqueues `create_repost_item_valuation_entry` for all report rows with SLE deviations. Runs as background job via `frappe.enqueue`.
+  - "Repost GL" (Actions menu): Enqueues `bns_force_rebuild_gl_for_voucher` for all report rows with GL deviations. Runs as background job via `frappe.enqueue`.
+  - Both actions validate Accounts Manager / System Manager role before executing.
 - **Columns:** Posting Date, Document Type, Document, Internal Scope, Deviation Type, Expected Accounts, Unexpected Accounts, Missing Accounts, SLE Issue, Details.
 - **Filters:** Company, From Date, To Date, Document Type (optional: DN/SI/PR/PI).
-- **Why:** Provides accounting integrity audit for internal transfers — identifies documents where the GL rewrite was skipped, partially applied, or overwritten by repost.
-- **Impacted:** Report output only (read-only). No data modifications.
+- **Why:** Provides accounting integrity audit for internal transfers — identifies documents where the GL rewrite was skipped, partially applied, or overwritten by repost. Enables targeted bulk correction.
+- **Impacted:** Report output (read-only for display). Bulk repost actions create Repost Item Valuation entries or rebuild GL entries for flagged documents.
 - **Cutoff:** Respects `internal_validation_cutoff_date` from BNS Branch Accounting Settings as default `from_date`.
 
 ### 3.12 Internal Transfer Receive Mismatch Report (`bns_branch_accounting/report/`)
