@@ -372,7 +372,7 @@
     </div>
 </div>
 
-{% var displayCurrency = (filters.show_in_account_currency && filters.account_currency) ? filters.account_currency : (filters.presentation_currency || frappe.boot.sysdefaults.currency); %}
+{% var displayCurrency = (data && data.length && data[0].account_currency) ? data[0].account_currency : (filters.presentation_currency || frappe.boot.sysdefaults.currency); %}
 <div class="statement-container">
     <!-- Info Cards -->
     {% if (filters.party && filters.party.length) { %}
