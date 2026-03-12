@@ -160,6 +160,10 @@
 
     .statement-table td.text-right { text-align: right; }
 
+    .statement-table td.cur-cell { overflow: hidden; }
+    .statement-table td.cur-cell .cur-s { float: left; }
+    .statement-table td.cur-cell .cur-v { float: right; }
+
     .statement-table tbody tr:nth-child(even) td {
         background: #f7f7f7;
     }
@@ -373,6 +377,24 @@
 </div>
 
 {% var fallbackCurrency = filters.presentation_currency || frappe.boot.sysdefaults.currency; %}
+{% function fmtCurCell(val, cur) {
+    if (!val && val !== 0) return '';
+    var s = format_currency(val, cur);
+    var parts = s.match(/^([^\d\-]*)([\-\d].*)$/);
+    if (parts && parts[1].trim()) {
+        return '<span class="cur-s">' + parts[1].trim() + '</span><span class="cur-v">' + parts[2].trim() + '</span>';
+    }
+    return '<span class="cur-v">' + s + '</span>';
+} %}
+{% function fmtBalCell(val) {
+    if (!val) return '';
+    var s = String(val);
+    var parts = s.match(/^([^\d\-]*)([\-\d].*)$/);
+    if (parts && parts[1].trim()) {
+        return '<span class="cur-s">' + parts[1].trim() + '</span><span class="cur-v">' + parts[2].trim() + '</span>';
+    }
+    return '<span class="cur-v">' + s + '</span>';
+} %}
 <div class="statement-container">
     <!-- Info Cards -->
     {% if (filters.party && filters.party.length) { %}
@@ -454,15 +476,15 @@
                         </div>
                     </td>
                     {% } %}
-                    {% if (show_debit) { %}<td class="text-right">{%= format_currency(row.debit || 0, row.account_currency || fallbackCurrency) %}</td>{% } %}
-                    {% if (show_credit) { %}<td class="text-right">{%= format_currency(row.credit || 0, row.account_currency || fallbackCurrency) %}</td>{% } %}
-                    {% if (show_balance) { %}<td class="text-right" style="font-weight: 600;">{%= row.balance || '' %}</td>{% } %}
+                    {% if (show_debit) { %}<td class="cur-cell">{%= fmtCurCell(row.debit || 0, row.account_currency || fallbackCurrency) %}</td>{% } %}
+                    {% if (show_credit) { %}<td class="cur-cell">{%= fmtCurCell(row.credit || 0, row.account_currency || fallbackCurrency) %}</td>{% } %}
+                    {% if (show_balance) { %}<td class="cur-cell" style="font-weight: 600;">{%= fmtBalCell(row.balance) %}</td>{% } %}
                 {% } else { %}
                     {% if (show_date) { %}<td></td>{% } %}
                     {% if (show_ref) { %}<td><strong>{%= acct ? frappe.format(acct, {fieldtype: "Link"}) : '' %}</strong></td>{% } %}
-                    {% if (show_debit) { %}<td class="text-right">{%= acct ? format_currency(row.debit || 0, row.account_currency || fallbackCurrency) : '' %}</td>{% } %}
-                    {% if (show_credit) { %}<td class="text-right">{%= acct ? format_currency(row.credit || 0, row.account_currency || fallbackCurrency) : '' %}</td>{% } %}
-                    {% if (show_balance) { %}<td class="text-right" style="font-weight: 600;">{%= row.balance || '' %}</td>{% } %}
+                    {% if (show_debit) { %}<td class="cur-cell">{%= acct ? fmtCurCell(row.debit || 0, row.account_currency || fallbackCurrency) : '' %}</td>{% } %}
+                    {% if (show_credit) { %}<td class="cur-cell">{%= acct ? fmtCurCell(row.credit || 0, row.account_currency || fallbackCurrency) : '' %}</td>{% } %}
+                    {% if (show_balance) { %}<td class="cur-cell" style="font-weight: 600;">{%= acct ? fmtBalCell(row.balance) : '' %}</td>{% } %}
                 {% } %}
             </tr>
             {% } %}
