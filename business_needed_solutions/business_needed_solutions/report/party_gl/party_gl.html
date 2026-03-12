@@ -372,6 +372,7 @@
     </div>
 </div>
 
+{% var displayCurrency = (filters.show_in_account_currency && filters.account_currency) ? filters.account_currency : (filters.presentation_currency || frappe.boot.sysdefaults.currency); %}
 <div class="statement-container">
     <!-- Info Cards -->
     {% if (filters.party && filters.party.length) { %}
@@ -453,14 +454,14 @@
                         </div>
                     </td>
                     {% } %}
-                    {% if (show_debit) { %}<td class="text-right">{%= format_currency(row.debit || 0, filters.presentation_currency || row.account_currency) %}</td>{% } %}
-                    {% if (show_credit) { %}<td class="text-right">{%= format_currency(row.credit || 0, filters.presentation_currency || row.account_currency) %}</td>{% } %}
+                    {% if (show_debit) { %}<td class="text-right">{%= format_currency(row.debit || 0, displayCurrency) %}</td>{% } %}
+                    {% if (show_credit) { %}<td class="text-right">{%= format_currency(row.credit || 0, displayCurrency) %}</td>{% } %}
                     {% if (show_balance) { %}<td class="text-right" style="font-weight: 600;">{%= row.balance || '' %}</td>{% } %}
                 {% } else { %}
                     {% if (show_date) { %}<td></td>{% } %}
                     {% if (show_ref) { %}<td><strong>{%= acct ? frappe.format(acct, {fieldtype: "Link"}) : '' %}</strong></td>{% } %}
-                    {% if (show_debit) { %}<td class="text-right">{%= acct ? format_currency(row.debit || 0, filters.presentation_currency || row.account_currency) : '' %}</td>{% } %}
-                    {% if (show_credit) { %}<td class="text-right">{%= acct ? format_currency(row.credit || 0, filters.presentation_currency || row.account_currency) : '' %}</td>{% } %}
+                    {% if (show_debit) { %}<td class="text-right">{%= acct ? format_currency(row.debit || 0, displayCurrency) : '' %}</td>{% } %}
+                    {% if (show_credit) { %}<td class="text-right">{%= acct ? format_currency(row.credit || 0, displayCurrency) : '' %}</td>{% } %}
                     {% if (show_balance) { %}<td class="text-right" style="font-weight: 600;">{%= row.balance || '' %}</td>{% } %}
                 {% } %}
             </tr>

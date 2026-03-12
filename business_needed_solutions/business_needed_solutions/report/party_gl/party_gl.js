@@ -184,6 +184,11 @@ frappe.query_reports["Party GL"] = {
 			fieldtype: "Check",
 		},
 		{
+			fieldname: "show_in_account_currency",
+			label: __("Show in Account Currency"),
+			fieldtype: "Check",
+		},
+		{
 			fieldname: "add_values_in_transaction_currency",
 			label: __("Add Columns in Transaction Currency"),
 			fieldtype: "Check",

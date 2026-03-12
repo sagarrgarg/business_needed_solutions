@@ -144,6 +144,20 @@ BNS extends ERPNext with:
 
 ---
 
+## 6.5 Party GL – Multi-Currency Account Toggle
+
+- **What:** Added `show_in_account_currency` checkbox filter to Party GL report. When enabled, Debit/Credit/Balance columns display amounts in the party's account currency instead of company currency.
+- **Why:** Parties with foreign-currency receivable/payable accounts (e.g. USD Receivable) need to view their ledger in the account's native currency. GL Entry already stores `debit_in_account_currency` / `credit_in_account_currency`; this toggle surfaces those values.
+- **How it works:**
+  - `set_account_currency()` resolves the account currency from the party's GL entries or the account filter. `company_currency` is now always populated as a fallback.
+  - When the toggle is on and `account_currency != company_currency`, `get_result_as_list()` swaps each row's `debit`/`credit` with `debit_in_account_currency`/`credit_in_account_currency` before computing the running balance.
+  - `get_columns()` labels Debit/Credit headers with the account currency symbol.
+  - The HTML print template (`party_gl.html`) uses a `displayCurrency` variable derived from the toggle state for `format_currency` calls.
+- **Edge cases:** If the party has entries across accounts with mixed currencies, `set_account_currency()` falls back to company currency, and the toggle has no effect.
+- **Impacted files:** `party_gl.py`, `party_gl.js`, `party_gl.html`.
+
+---
+
 ## 7. Removed Logic
 
 - **test_bns_settings.py:** Tests for `warehouse_validation`, `auto_transit_validation`, `warehouse_filtering` removed — those modules never existed. Replaced with minimal `test_bns_settings_loads` test.

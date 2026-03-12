@@ -8,7 +8,7 @@ from collections import OrderedDict
 import frappe
 from frappe import _, _dict
 from frappe.query_builder import Criterion
-from frappe.utils import cstr, getdate
+from frappe.utils import cstr, fmt_money, getdate
 
 from erpnext import get_company_currency, get_default_company
 from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
@@ -114,25 +114,36 @@ def set_account_currency(filters):
 				if is_same_account_currency:
 					account_currency = currency
 
-		elif filters.get("party") and filters.get("party_type"):
-			gle_currency = frappe.db.get_value(
-				"GL Entry",
-				{"party_type": filters.party_type, "party": filters.party[0], "company": filters.company},
-				"account_currency",
-			)
+		elif filters.get("party"):
+			gle_filters = {"party": filters.party[0], "company": filters.company}
+			if filters.get("party_type"):
+				gle_filters["party_type"] = filters.party_type
+
+			gle_currency = frappe.db.get_value("GL Entry", gle_filters, "account_currency")
 
 			if gle_currency:
 				account_currency = gle_currency
-			else:
+			elif filters.get("party_type"):
 				account_currency = (
 					None
 					if filters.party_type in ["Employee", "Shareholder", "Member"]
 					else frappe.get_cached_value(filters.party_type, filters.party[0], "default_currency")
 				)
+			else:
+				for party_doctype in ("Customer", "Supplier"):
+					if frappe.db.exists(party_doctype, filters.party[0]):
+						account_currency = frappe.get_cached_value(
+							party_doctype, filters.party[0], "default_currency"
+						)
+						break
 
 		filters["account_currency"] = account_currency or filters.company_currency
-		if filters.account_currency != filters.company_currency and not filters.presentation_currency:
-			filters.presentation_currency = filters.account_currency
+
+	if not filters.get("company_currency"):
+		filters["company_currency"] = frappe.get_cached_value("Company", filters.company, "default_currency")
+
+	if not filters.get("account_currency"):
+		filters["account_currency"] = filters["company_currency"]
 
 	return filters
 
@@ -553,39 +564,45 @@ def get_account_type_map(company):
 
 
 def get_result_as_list(data, filters):
-	balance, _balance_in_account_currency = 0, 0
-	supplier_invoice_details = get_supplier_invoice_details()  # Fetch bill_no details
-	
-	# Collect all voucher_nos by type for batch queries
+	balance = 0
+	supplier_invoice_details = get_supplier_invoice_details()
+
 	voucher_nos_by_type = collect_voucher_nos_by_type(data)
-	
-	# Batch fetch references for Payment Entry and Journal Entry
+
 	payment_references = get_payment_entry_references(voucher_nos_by_type.get("Payment Entry", []))
 	journal_references = get_journal_entry_references(voucher_nos_by_type.get("Journal Entry", []))
-	
-	# Batch fetch return status for Sales Invoice and Purchase Invoice
+
 	invoice_return_status = get_invoice_return_status(
 		voucher_nos_by_type.get("Sales Invoice", []),
 		voucher_nos_by_type.get("Purchase Invoice", [])
 	)
 
+	use_account_currency = (
+		filters.get("show_in_account_currency")
+		and filters.get("account_currency")
+		and filters.get("account_currency") != filters.get("company_currency")
+	)
+
+	display_currency = filters.get("account_currency") if use_account_currency else filters.get("company_currency")
+
 	for d in data:
+		if use_account_currency:
+			d["debit"] = d.get("debit_in_account_currency", 0)
+			d["credit"] = d.get("credit_in_account_currency", 0)
+
 		if not d.get("posting_date"):
-			balance, _balance_in_account_currency = 0, 0
+			balance = 0
 
 		balance = get_balance(d, balance, "debit", "credit")
 
 		if d.get("voucher_no") or d.get("remarks"):
 			d["reference_with_remarks"] = f"{d.get('voucher_no', '')} {d.get('remarks', '')}".strip()
 
-		d["balance"] = balance
-
 		if balance >= 0:
-			d["balance"] = f"{frappe.format_value(balance, {'fieldtype': 'Currency', 'options': filters.account_currency})} Dr"
+			d["balance"] = f"{fmt_money(balance, currency=display_currency)} Dr"
 		else:
-			d["balance"] = f"{frappe.format_value(abs(balance), {'fieldtype': 'Currency', 'options': filters.account_currency})} Cr"
+			d["balance"] = f"{fmt_money(abs(balance), currency=display_currency)} Cr"
 
-		# Get supplier bill details (bill_no and bill_date)
 		bill_info = supplier_invoice_details.get(d.get("voucher_no"), {})
 		if isinstance(bill_info, dict):
 			d["bill_no"] = bill_info.get("bill_no", "")
@@ -593,20 +610,17 @@ def get_result_as_list(data, filters):
 		else:
 			d["bill_no"] = bill_info or ""
 			d["bill_date"] = ""
-		
-		# Get voucher info for reference lookups
+
 		voucher_no = d.get("voucher_no")
 		voucher_type = d.get("voucher_type")
-		
-		# Add ref_no for Payment Entry and Journal Entry
+
 		if voucher_type == "Payment Entry" and voucher_no in payment_references:
 			d["ref_no"] = payment_references[voucher_no]
 		elif voucher_type == "Journal Entry" and voucher_no in journal_references:
 			d["ref_no"] = journal_references[voucher_no]
 		else:
 			d["ref_no"] = ""
-		
-		# Override voucher_subtype for Sales Invoice / Purchase Invoice returns
+
 		if voucher_type == "Sales Invoice" and voucher_no in invoice_return_status:
 			if invoice_return_status[voucher_no].get("is_return"):
 				d["voucher_subtype"] = _("Credit Note")
@@ -614,7 +628,7 @@ def get_result_as_list(data, filters):
 			if invoice_return_status[voucher_no].get("is_return"):
 				d["voucher_subtype"] = _("Debit Note")
 
-		d["account_currency"] = filters.account_currency
+		d["account_currency"] = display_currency
 
 	return data
 
@@ -757,8 +771,15 @@ def get_balance(row, balance, debit_field, credit_field):
 
 
 def get_columns(filters):
-    # Define currency based on presentation or company
-    if filters.get("presentation_currency"):
+    use_account_currency = (
+        filters.get("show_in_account_currency")
+        and filters.get("account_currency")
+        and filters.get("account_currency") != filters.get("company_currency")
+    )
+
+    if use_account_currency:
+        currency = filters["account_currency"]
+    elif filters.get("presentation_currency"):
         currency = filters["presentation_currency"]
     else:
         if filters.get("company"):
@@ -767,7 +788,6 @@ def get_columns(filters):
             company = get_default_company()
             currency = get_company_currency(company)
 
-    # Define columns to show only the required fields
     columns = [
         {"label": _("Date"), "fieldname": "posting_date", "fieldtype": "Date", "width": 100},
         {
@@ -783,9 +803,9 @@ def get_columns(filters):
             "options": "voucher_type",
             "width": 180,
         },
-        {"label": _("Ref No"), "fieldname": "ref_no", "fieldtype": "Data", "width": 120},  # Cheque/Reference No
-        {"label": _("Bill No"), "fieldname": "bill_no", "fieldtype": "Data", "width": 100},  # Supplier Bill No
-        {"label": _("Bill Date"), "fieldname": "bill_date", "fieldtype": "Date", "width": 90},  # Supplier Bill Date
+        {"label": _("Ref No"), "fieldname": "ref_no", "fieldtype": "Data", "width": 120},
+        {"label": _("Bill No"), "fieldname": "bill_no", "fieldtype": "Data", "width": 100},
+        {"label": _("Bill Date"), "fieldname": "bill_date", "fieldtype": "Date", "width": 90},
         {"label": _("Remarks"), "fieldname": "remarks", "fieldtype": "Data", "width": 250},
         {
             "label": _("Debit ({0})").format(currency),

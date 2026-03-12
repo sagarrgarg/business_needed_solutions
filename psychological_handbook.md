@@ -108,6 +108,14 @@ The app is designed to be **configurable via settings** – most features can be
 | `gst_compliance.py` | GST validations, e-Waybill | Internal transfer accounting |
 | `business_needed_solutions/utils.py` | Re-exports, shared helpers | Core BNS internal logic (moved to bns_branch_accounting) |
 
+### 6.1 Party GL Report – Multi-Currency Philosophy
+
+The Party GL report is a **read-only view** over GL Entry data. Its multi-currency toggle (`show_in_account_currency`) follows the principle of **surfacing existing data, not transforming it**: GL Entry already stores amounts in three currency layers (company, account, transaction). The toggle simply selects which layer to display.
+
+**Reasoning:** Users dealing with foreign-currency accounts need ledger balances in the account's native currency for reconciliation and statement purposes. Forcing them through presentation currency or manual conversion adds friction.
+
+**Constraint:** The toggle does not perform currency conversion. It reads `debit_in_account_currency`/`credit_in_account_currency` directly from GL Entry. If a party has entries across accounts with different currencies, the toggle has no effect (falls back to company currency) to avoid mixing incompatible amounts.
+
 ---
 
 ## 7. When Adding New Features
