@@ -810,13 +810,15 @@ def get_columns(filters):
         {
             "label": _("Debit ({0})").format(currency),
             "fieldname": "debit",
-            "fieldtype": "Float",
+            "fieldtype": "Currency",
+            "options": "account_currency",
             "width": 130,
         },
         {
             "label": _("Credit ({0})").format(currency),
             "fieldname": "credit",
-            "fieldtype": "Float",
+            "fieldtype": "Currency",
+            "options": "account_currency",
             "width": 130,
         },
         {
