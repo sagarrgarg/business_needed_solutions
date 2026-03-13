@@ -158,6 +158,24 @@ BNS extends ERPNext with:
 
 ---
 
+## 6.6 Pure AR/AP Summary – FIFO Ageing Adjustment for Running Accounts
+
+- **What:** Added `adjust_running_accounts` checkbox filter to both Pure Accounts Receivable Summary and Pure Accounts Payable Summary reports. When enabled, unallocated/on-account payments (negative outstanding entries) are virtually applied FIFO (oldest invoices first) to redistribute ageing buckets, eliminating misleading negative values in recent buckets and inflated amounts in older buckets.
+- **Why:** Most parties operate on running accounts where payments are not reconciled bill-wise. Without reconciliation, ERPNext places on-account payments as negative outstanding in recent ageing buckets while old invoices remain fully outstanding in old buckets. This gives a distorted ageing picture even though total outstanding is correct.
+- **How it works:**
+  - `adjust_ageing_fifo()` method in `AccountsReceivablePayableSummary` runs after `get_party_total()` when the filter is checked.
+  - For each party, entries are separated into positive outstanding (invoices) and negative outstanding (advances/on-account payments).
+  - Invoices are sorted by date (oldest first, using the same `ageing_based_on` filter — Posting Date or Due Date).
+  - The total negative amount is applied FIFO against invoices, reducing oldest first.
+  - Ageing buckets (`range1..rangeN`) and `total_due` are recalculated from adjusted invoice amounts.
+  - `outstanding`, `invoiced`, `paid`, `credit_note`, `opening` remain untouched.
+- **Post-netting redistribution:** For parties with AR/AP netting (via Party Link or common parties), bucket-by-bucket subtraction can create new negatives. `redistribute_negative_ageing_buckets()` runs after netting in `execute()`: sums all negative buckets, zeroes them, then reduces the oldest positive buckets FIFO. This ensures all buckets are >= 0.
+- **Invariant:** `sum(range1..rangeN) == outstanding` — preserved before and after adjustment.
+- **Impacted files:** `pure_accounts_receivable_summary.py`, `pure_accounts_receivable_summary.js`, `pure_accounts_payable_summary.py`, `pure_accounts_payable_summary.js`.
+- **Shared logic:** `AccountsReceivablePayableSummary` class is used by both AR and AP reports, so the FIFO method works for both automatically. `redistribute_negative_ageing_buckets()` is imported by the AP report from the AR report module.
+
+---
+
 ## 7. Removed Logic
 
 - **test_bns_settings.py:** Tests for `warehouse_validation`, `auto_transit_validation`, `warehouse_filtering` removed — those modules never existed. Replaced with minimal `test_bns_settings_loads` test.

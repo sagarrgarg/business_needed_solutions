@@ -118,6 +118,11 @@ frappe.query_reports["Pure Accounts Payable Summary"] = {
 			label: __("Add Supplier Cities ?"),
 			fieldtype: "Check",
 		},
+		{
+			fieldname: "adjust_running_accounts",
+			label: __("Adjust Ageing for Running Accounts (FIFO)"),
+			fieldtype: "Check",
+		},
 	],
 
 	onload: function (report) {

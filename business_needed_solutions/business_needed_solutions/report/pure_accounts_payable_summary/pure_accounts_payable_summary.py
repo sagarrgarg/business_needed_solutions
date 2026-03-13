@@ -7,7 +7,8 @@ from urllib.parse import quote
 from frappe.utils import cint, flt
 from business_needed_solutions.business_needed_solutions.report.pure_accounts_receivable_summary.pure_accounts_receivable_summary import (
 	AccountsReceivablePayableSummary, get_fiscal_year_dates, 
-	get_supplier_invoice_and_received_amounts, get_customer_invoice_and_paid_amounts
+	get_supplier_invoice_and_received_amounts, get_customer_invoice_and_paid_amounts,
+	redistribute_negative_ageing_buckets
 )
 
 
@@ -325,6 +326,9 @@ def execute(filters=None):
 		
 		# Only add if outstanding is positive after adjustments
 		if flt(updated_row.get("outstanding", 0.0)) > 0:
+			if filters.get("adjust_running_accounts"):
+				redistribute_negative_ageing_buckets(updated_row, ageing_bucket_fields)
+
 			# For common parties in Payable report, ensure supplier city is set
 			if filters.get("add_supplier_cities") and is_common_party:
 				updated_row["city"] = supplier_cities.get(party, updated_row.get("city", ""))

@@ -4,7 +4,7 @@
 
 import frappe
 from frappe import _, scrub
-from frappe.utils import cint, flt
+from frappe.utils import cint, flt, getdate
 from urllib.parse import quote
 from erpnext.accounts.party import get_partywise_advanced_payment_amount
 from erpnext.accounts.report.accounts_receivable.accounts_receivable import ReceivablePayableReport
@@ -157,6 +157,34 @@ def get_customer_invoice_and_paid_amounts(parties, company, report_date, show_fu
 
 
 
+
+
+def redistribute_negative_ageing_buckets(row, ageing_bucket_fields):
+	"""
+	After AR/AP netting, some ageing buckets may be negative. Redistribute by
+	treating the negative total as excess payment and applying it FIFO against
+	the oldest positive buckets. Preserves the overall bucket sum.
+	"""
+	negative_total = 0.0
+	for field in ageing_bucket_fields:
+		val = flt(row.get(field, 0.0))
+		if val < 0:
+			negative_total += abs(val)
+			row[field] = 0.0
+
+	if negative_total <= 0:
+		return
+
+	for field in reversed(ageing_bucket_fields):
+		if negative_total <= 0:
+			break
+		val = flt(row.get(field, 0.0))
+		if val > 0:
+			reduction = min(negative_total, val)
+			row[field] = val - reduction
+			negative_total -= reduction
+
+	row["total_due"] = sum(flt(row.get(f, 0.0)) for f in ageing_bucket_fields)
 
 
 def execute(filters=None):
@@ -470,6 +498,9 @@ def execute(filters=None):
 		
 		# Only add if outstanding is positive after adjustments
 		if flt(updated_row.get("outstanding", 0.0)) > 0:
+			if filters.get("adjust_running_accounts"):
+				redistribute_negative_ageing_buckets(updated_row, ageing_bucket_fields)
+
 			party_name = updated_row.get("party_name") or party
 			
 			# Get Receivable accounts to filter Party GL by account_type
@@ -507,7 +538,7 @@ def execute(filters=None):
 		{
 			"label": "Secondary Party",
 			"fieldname": "secondary_party",
-			"fieldtype": "Data",  # or "Dynamic Link" if you want it linked
+			"fieldtype": "Data",
 			"width": 140,
 		}
 	)
@@ -558,10 +589,6 @@ def execute(filters=None):
 			"width": 150,
 		})
 	
-	# 6. You can return the same columns from the main dataset
-	#    (they now reflect the differences).
-	#    No extra "r_minus_p" column is needed since you replaced
-	#    the existing numeric fields with (R - P).
 	return main_columns, final_data
 
 
@@ -580,6 +607,9 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 		self.currency_precision = get_currency_precision() or 2
 
 		self.get_party_total(args)
+
+		if self.filters.get("adjust_running_accounts"):
+			self.adjust_ageing_fifo()
 
 		if self.filters.show_gl_balance:
 			gl_balance_map = get_gl_balance(self.filters.report_date, self.filters.company, self.account_type)
@@ -705,6 +735,78 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 
 		if self.filters.sales_partner:
 			self.party_total[row.party]["default_sales_partner"] = row.get("default_sales_partner", "")
+
+	def adjust_ageing_fifo(self):
+		"""
+		Virtually apply unallocated payments (negative outstanding) to the oldest
+		invoices (positive outstanding) on a per-party FIFO basis.
+
+		Only ageing bucket distribution (range1..rangeN) and total_due are
+		recalculated. Outstanding, invoiced, paid, credit_note, opening remain
+		untouched so totals stay correct.
+		"""
+		party_entries = {}
+		for entry in self.accounting_entries:
+			party_entries.setdefault(entry.get("party"), []).append(entry)
+
+		if self.filters.get("ageing_based_on") == "Due Date":
+			date_field = "due_date"
+		else:
+			date_field = "posting_date"
+
+		for party, entries in party_entries.items():
+			if party not in self.party_total:
+				continue
+
+			invoices = [e for e in entries if flt(e.get("outstanding")) > 0]
+			advances = [e for e in entries if flt(e.get("outstanding")) < 0]
+
+			if not advances:
+				continue
+
+			advance_to_apply = abs(sum(flt(e.get("outstanding")) for e in advances))
+			if advance_to_apply <= 0:
+				continue
+
+			invoices.sort(
+				key=lambda x: getdate(x.get(date_field) or x.get("posting_date"))
+			)
+
+			for range_key in [f"range{i}" for i in self.range_numbers]:
+				self.party_total[party][range_key] = 0.0
+
+			for inv in invoices:
+				inv_outstanding = flt(inv.get("outstanding"))
+
+				if advance_to_apply > 0:
+					reduction = min(advance_to_apply, inv_outstanding)
+					inv_outstanding -= reduction
+					advance_to_apply -= reduction
+
+				if inv_outstanding > 0:
+					entry_date = getdate(
+						inv.get(date_field) or inv.get("posting_date")
+					)
+					if not entry_date:
+						continue
+
+					age = (getdate(self.age_as_on) - entry_date).days or 0
+
+					if entry_date > getdate(self.age_as_on):
+						continue
+
+					bucket_index = next(
+						(i for i, days in enumerate(self.ranges)
+						 if cint(age) <= cint(days)),
+						len(self.ranges),
+					)
+					range_key = f"range{bucket_index + 1}"
+					self.party_total[party][range_key] += inv_outstanding
+
+			self.party_total[party]["total_due"] = sum(
+				self.party_total[party][f"range{i}"]
+				for i in self.range_numbers
+			)
 
 	def get_columns(self):
 		self.columns = []

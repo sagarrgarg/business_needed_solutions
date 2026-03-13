@@ -108,7 +108,15 @@ The app is designed to be **configurable via settings** – most features can be
 | `gst_compliance.py` | GST validations, e-Waybill | Internal transfer accounting |
 | `business_needed_solutions/utils.py` | Re-exports, shared helpers | Core BNS internal logic (moved to bns_branch_accounting) |
 
-### 6.1 Party GL Report – Multi-Currency Philosophy
+### 6.1 Pure AR/AP Summary – FIFO Ageing for Running Accounts
+
+The FIFO ageing adjustment is a **report-level presentation layer** — it does not modify any underlying data. The checkbox redistributes ageing buckets to give a realistic picture of where outstanding amounts truly sit when payments are on running accounts.
+
+**Reasoning:** Running accounts are the norm for most parties. Requiring full payment reconciliation just to see correct ageing is impractical. This feature gives the same insight without forcing users through the reconciliation tool.
+
+**Constraint:** The adjustment must never alter total outstanding, invoiced, paid, credit_note, or opening balance. Only ageing bucket distribution and total_due (which is derived from buckets) may change. The invariant `sum(range1..rangeN) == outstanding` must always hold. If it doesn't, the adjustment has a bug.
+
+### 6.2 Party GL Report – Multi-Currency Philosophy
 
 The Party GL report is a **read-only view** over GL Entry data. Its multi-currency toggle (`show_in_account_currency`) follows the principle of **surfacing existing data, not transforming it**: GL Entry already stores amounts in three currency layers (company, account, transaction). The toggle simply selects which layer to display.
 
