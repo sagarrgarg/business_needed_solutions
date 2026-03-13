@@ -108,6 +108,20 @@
   - Use `abs()` on `grand_total` / `taxable_total` for returns since ERPNext stores negative amounts for return documents.
   - The audit report must validate return GL expectations separately (reversed pattern) to avoid false-positive mismatch flags.
   - Chain-level bulk repost (`verify_and_repost_internal_transfers`) excludes credit note SIs — return documents are not standard forward-flow chains.
+- Zero-amount document exclusion:
+  - Documents with zero `base_grand_total` AND zero `base_net_total` are excluded from audit.
+  - Zero-value transactions (e.g., zero-rate credit notes, zero-rate returns) will never produce GL entries -- flagging them as "GL Missing" is a false positive.
+  - Uses `abs()` to handle both positive-zero and negative-zero representations.
+- SLE audit boundary:
+  - The audit validates only `incoming_rate` against `bns_transfer_rate`, not `stock_value_difference`.
+  - SVD is computed by ERPNext's valuation engine and is affected by external factors (negative stock, moving average revaluation) that BNS does not control.
+  - Checking SVD would create false positives for any warehouse with negative stock, masking real transfer-rate issues.
+- Cross-document audit integrity:
+  - Per-document GL audits cannot detect one-sided internal GL (e.g., PI has internal GL but source SI does not).
+  - The audit must cross-validate that both sides of an internal transfer chain have consistent BNS internal GL.
+  - Classification functions must check `docstatus=1` on referenced source documents -- `frappe.db.exists` without docstatus returns True for cancelled docs, creating false passes.
+  - Missing counter-documents are invisible to per-document audits because each document's GL is individually correct -- the gap is structural. The counter-document check must be GSTIN-aware: same-GSTIN DNs expect a PR; different-GSTIN DNs follow the DN→SI→PI chain (no PR needed).
+  - These checks run as a separate pass (`_audit_cross_document_consistency`) after per-document audits, using `_has_internal_gl` to detect whether BNS internal accounts exist in a document's GL.
 - Audit-driven repost authority:
   - The Internal Transfer Accounting Audit report can trigger targeted SLE and GL repost for individual flagged documents.
   - SLE repost creates Repost Item Valuation entries (queued, ERPNext pipeline).

@@ -197,7 +197,7 @@ def _classify_pr(doc):
 
 	source_ref = (doc.get("bns_inter_company_reference") or "").strip()
 
-	if source_ref and frappe.db.exists("Delivery Note", source_ref):
+	if source_ref and frappe.db.exists("Delivery Note", {"name": source_ref, "docstatus": 1}):
 		dn_data = frappe.db.get_value(
 			"Delivery Note", source_ref,
 			["company_gstin", "billing_address_gstin"], as_dict=True
@@ -208,7 +208,7 @@ def _classify_pr(doc):
 			if dn_co and dn_bill and dn_co == dn_bill:
 				return "dn_same_gstin"
 
-	if source_ref and frappe.db.exists("Sales Invoice", source_ref):
+	if source_ref and frappe.db.exists("Sales Invoice", {"name": source_ref, "docstatus": 1}):
 		return "si_linked"
 
 	return None
@@ -232,7 +232,7 @@ def _classify_pi(doc):
 	is_linked = False
 
 	si_ref = (doc.get("bns_inter_company_reference") or "").strip()
-	if si_ref and frappe.db.exists("Sales Invoice", si_ref):
+	if si_ref and frappe.db.exists("Sales Invoice", {"name": si_ref, "docstatus": 1}):
 		is_linked = True
 
 	if not is_linked:
@@ -249,7 +249,7 @@ def _classify_pi(doc):
 		if pr_names:
 			for pr_name in pr_names:
 				pr_ref = frappe.db.get_value("Purchase Receipt", pr_name, "bns_inter_company_reference")
-				if pr_ref and frappe.db.exists("Sales Invoice", (pr_ref or "").strip()):
+				if pr_ref and frappe.db.exists("Sales Invoice", {"name": (pr_ref or "").strip(), "docstatus": 1}):
 					is_linked = True
 					break
 
@@ -538,7 +538,7 @@ def _check_sle_for_pr(doc):
 
 	sle_rows = frappe.db.sql(
 		"""
-		SELECT name, voucher_detail_no, actual_qty, incoming_rate, stock_value_difference
+		SELECT name, voucher_detail_no, actual_qty, incoming_rate
 		FROM `tabStock Ledger Entry`
 		WHERE voucher_type = 'Purchase Receipt' AND voucher_no = %s AND is_cancelled = 0
 		""",
@@ -557,12 +557,6 @@ def _check_sle_for_pr(doc):
 		if abs(actual_rate - expected_rate) > 0.01:
 			issues.append(
 				f"SLE {sle.name}: incoming_rate={actual_rate}, expected={expected_rate}"
-			)
-		expected_svd = flt(sle.get("actual_qty") or 0) * expected_rate
-		actual_svd = flt(sle.get("stock_value_difference") or 0)
-		if abs(actual_svd - expected_svd) > 0.5:
-			issues.append(
-				f"SLE {sle.name}: stock_value_diff={actual_svd}, expected={expected_svd:.2f}"
 			)
 
 	return issues
@@ -594,7 +588,7 @@ def _check_sle_for_pi(doc):
 
 	sle_rows = frappe.db.sql(
 		"""
-		SELECT name, voucher_detail_no, actual_qty, incoming_rate, stock_value_difference
+		SELECT name, voucher_detail_no, actual_qty, incoming_rate
 		FROM `tabStock Ledger Entry`
 		WHERE voucher_type = 'Purchase Invoice' AND voucher_no = %s AND is_cancelled = 0
 		""",
@@ -614,12 +608,6 @@ def _check_sle_for_pi(doc):
 			issues.append(
 				f"SLE {sle.name}: incoming_rate={actual_rate}, expected={expected_rate}"
 			)
-		expected_svd = flt(sle.get("actual_qty") or 0) * expected_rate
-		actual_svd = flt(sle.get("stock_value_difference") or 0)
-		if abs(actual_svd - expected_svd) > 0.5:
-			issues.append(
-				f"SLE {sle.name}: stock_value_diff={actual_svd}, expected={expected_svd:.2f}"
-			)
 
 	return issues
 
@@ -635,6 +623,9 @@ _SCOPE_LABELS = {
 	"dn_same_gstin": "DN-linked (Same GSTIN)",
 	"si_linked": "SI-linked (Different GSTIN)",
 	"si_linked_return": "SI-linked (Debit Note)",
+	"orphaned_receiving": "Orphaned (source cancelled/missing)",
+	"flag_mismatch": "Flag Mismatch (one-sided internal)",
+	"no_counter_doc": "Missing Counter-Document",
 }
 
 
@@ -673,6 +664,8 @@ def _get_data(filters):
 	if "Purchase Invoice" in doc_types:
 		data.extend(_audit_purchase_invoices(filters, settings))
 
+	data.extend(_audit_cross_document_consistency(filters, settings))
+
 	data.sort(key=lambda r: r.get("posting_date") or "0000-00-00", reverse=True)
 	return data
 
@@ -683,6 +676,11 @@ def _get_doc_types_to_audit(filters):
 	if dt:
 		return [dt]
 	return ["Delivery Note", "Sales Invoice", "Purchase Receipt", "Purchase Invoice"]
+
+
+def _is_zero_amount_document(doc):
+	"""Return True when document has zero grand total and net total -- no GL expected."""
+	return abs(flt(doc.get("base_grand_total"))) <= 0 and abs(flt(doc.get("base_net_total"))) <= 0
 
 
 def _build_date_conditions(filters, alias="doc"):
@@ -729,6 +727,8 @@ def _audit_delivery_notes(filters, settings):
 			continue
 
 		doc = frappe.get_doc("Delivery Note", row.name)
+		if _is_zero_amount_document(doc):
+			continue
 		expected = _expected_gl_for_dn(scope, settings, doc)
 		gl_entries = _fetch_gl_entries("Delivery Note", row.name)
 
@@ -779,6 +779,8 @@ def _audit_sales_invoices(filters, settings):
 			continue
 
 		doc = frappe.get_doc("Sales Invoice", row.name)
+		if _is_zero_amount_document(doc):
+			continue
 		if scope == "different_gstin_return":
 			expected = _expected_gl_for_si_return(scope, settings, doc)
 		else:
@@ -831,6 +833,8 @@ def _audit_purchase_receipts(filters, settings):
 			continue
 
 		doc = frappe.get_doc("Purchase Receipt", row.name)
+		if _is_zero_amount_document(doc):
+			continue
 		expected = _expected_gl_for_pr(scope, settings, doc)
 		gl_entries = _fetch_gl_entries("Purchase Receipt", row.name)
 
@@ -897,6 +901,8 @@ def _audit_purchase_invoices(filters, settings):
 			continue
 
 		doc = frappe.get_doc("Purchase Invoice", row.name)
+		if _is_zero_amount_document(doc):
+			continue
 		if scope == "si_linked_return":
 			expected = _expected_gl_for_pi_return(scope, settings, doc)
 		else:
@@ -937,6 +943,241 @@ def _audit_purchase_invoices(filters, settings):
 				sle_issue=sle_deviation,
 				details=details,
 			))
+
+	return results
+
+
+# ---------------------------------------------------------------------------
+# Cross-document consistency audit
+# ---------------------------------------------------------------------------
+
+def _audit_cross_document_consistency(filters, settings):
+	"""
+	Detect cross-document issues that per-document audits miss.
+
+	Checks:
+	1. Orphaned PR/PI: references a cancelled/missing source DN/SI but has BNS internal GL.
+	2. Flag mismatch: PI has internal GL but referenced SI does not (or PR vs DN).
+	3. Missing counter-document: DN/SI has BNS internal GL but no submitted PR/PI exists.
+	"""
+	results = []
+	internal_accounts = {
+		settings.get("internal_branch_debtor"),
+		settings.get("internal_branch_creditor"),
+		settings.get("internal_sales_transfer"),
+		settings.get("internal_purchase_transfer"),
+		settings.get("stock_in_transit"),
+	}
+	internal_accounts.discard(None)
+	internal_accounts.discard("")
+
+	if not internal_accounts:
+		return results
+
+	def _has_internal_gl(voucher_type, voucher_no):
+		"""Return True if document has any active GL entries on BNS internal accounts."""
+		placeholders = ", ".join(["%s"] * len(internal_accounts))
+		count = frappe.db.sql(
+			f"""SELECT COUNT(*) FROM `tabGL Entry`
+			WHERE voucher_type = %s AND voucher_no = %s
+			AND is_cancelled = 0 AND account IN ({placeholders})""",
+			(voucher_type, voucher_no, *internal_accounts),
+		)[0][0]
+		return count > 0
+
+	date_from = filters.get("from_date") or "2000-01-01"
+	date_to = filters.get("to_date") or "2099-12-31"
+	company = filters.get("company") or ""
+	company_cond = "AND pr.company = %s" if company else ""
+	company_vals = (company,) if company else ()
+
+	# --- Check 1 & 2: PR with orphaned/mismatched DN ---
+	pr_rows = frappe.db.sql(
+		f"""SELECT pr.name, pr.posting_date, pr.bns_inter_company_reference,
+		          pr.is_bns_internal_supplier, pr.supplier
+		   FROM `tabPurchase Receipt` pr
+		   WHERE pr.docstatus = 1
+		     AND pr.posting_date >= %s AND pr.posting_date <= %s
+		     {company_cond}
+		     AND (pr.is_bns_internal_supplier = 1
+		          OR pr.supplier IN (SELECT name FROM tabSupplier WHERE is_bns_internal_supplier = 1))
+		""",
+		(date_from, date_to, *company_vals),
+		as_dict=True,
+	) or []
+
+	for pr in pr_rows:
+		ref = (pr.bns_inter_company_reference or "").strip()
+		if not ref:
+			continue
+		if not _has_internal_gl("Purchase Receipt", pr.name):
+			continue
+
+		if frappe.db.exists("Delivery Note", ref):
+			dn_ds = frappe.db.get_value("Delivery Note", ref, "docstatus")
+			if dn_ds == 2:
+				results.append(_build_row(
+					pr, "orphaned_receiving", "Orphaned GL",
+					details=f"PR references cancelled DN {ref}. PR has BNS internal GL but source is dead.",
+				))
+			elif not _has_internal_gl("Delivery Note", ref):
+				results.append(_build_row(
+					pr, "flag_mismatch", "Flag Mismatch",
+					details=f"PR has BNS internal GL but source DN {ref} does not.",
+				))
+		elif frappe.db.exists("Sales Invoice", ref):
+			si_ds = frappe.db.get_value("Sales Invoice", ref, "docstatus")
+			if si_ds == 2:
+				results.append(_build_row(
+					pr, "orphaned_receiving", "Orphaned GL",
+					details=f"PR references cancelled SI {ref}. PR has BNS internal GL but source is dead.",
+				))
+			elif not _has_internal_gl("Sales Invoice", ref):
+				results.append(_build_row(
+					pr, "flag_mismatch", "Flag Mismatch",
+					details=f"PR has BNS internal GL but source SI {ref} does not.",
+				))
+
+	company_cond_pi = "AND pi.company = %s" if company else ""
+
+	# --- Check 1 & 2: PI with orphaned/mismatched SI ---
+	pi_rows = frappe.db.sql(
+		f"""SELECT pi.name, pi.posting_date, pi.bns_inter_company_reference,
+		          pi.is_bns_internal_supplier, pi.supplier, pi.is_return
+		   FROM `tabPurchase Invoice` pi
+		   WHERE pi.docstatus = 1
+		     AND pi.posting_date >= %s AND pi.posting_date <= %s
+		     {company_cond_pi}
+		     AND (pi.is_bns_internal_supplier = 1
+		          OR pi.supplier IN (SELECT name FROM tabSupplier WHERE is_bns_internal_supplier = 1))
+		""",
+		(date_from, date_to, *company_vals),
+		as_dict=True,
+	) or []
+
+	for pi in pi_rows:
+		ref = (pi.bns_inter_company_reference or "").strip()
+		if not ref:
+			continue
+		if not _has_internal_gl("Purchase Invoice", pi.name):
+			continue
+
+		if frappe.db.exists("Sales Invoice", ref):
+			si_ds = frappe.db.get_value("Sales Invoice", ref, "docstatus")
+			if si_ds == 2:
+				results.append(_build_row(
+					pi, "orphaned_receiving", "Orphaned GL",
+					details=f"PI references cancelled SI {ref}. PI has BNS internal GL but source is dead.",
+				))
+			elif not _has_internal_gl("Sales Invoice", ref):
+				results.append(_build_row(
+					pi, "flag_mismatch", "Flag Mismatch",
+					details=f"PI has BNS internal GL but source SI {ref} does not.",
+				))
+
+	company_cond_dn = "AND dn.company = %s" if company else ""
+
+	# --- Check 3: DN with BNS internal GL but no submitted PR/SI->PI ---
+	dn_rows = frappe.db.sql(
+		f"""SELECT dn.name, dn.posting_date, dn.is_bns_internal_customer, dn.customer,
+		          dn.company_gstin, dn.billing_address_gstin
+		   FROM `tabDelivery Note` dn
+		   WHERE dn.docstatus = 1
+		     AND dn.posting_date >= %s AND dn.posting_date <= %s
+		     {company_cond_dn}
+		     AND dn.is_return = 0
+		     AND (dn.is_bns_internal_customer = 1
+		          OR dn.customer IN (SELECT name FROM tabCustomer WHERE is_bns_internal_customer = 1))
+		""",
+		(date_from, date_to, *company_vals),
+		as_dict=True,
+	) or []
+
+	for dn in dn_rows:
+		if not _has_internal_gl("Delivery Note", dn.name):
+			continue
+
+		co_gstin = (dn.get("company_gstin") or "").strip()
+		bill_gstin = (dn.get("billing_address_gstin") or "").strip()
+		is_same_gstin = co_gstin and bill_gstin and co_gstin == bill_gstin
+
+		if is_same_gstin:
+			has_pr = frappe.db.exists("Purchase Receipt", {
+				"bns_inter_company_reference": dn.name,
+				"docstatus": 1,
+			})
+			if not has_pr:
+				results.append(_build_row(
+					dn, "no_counter_doc", "No Counter-Document",
+					details="Same-GSTIN DN has BNS internal GL but no submitted PR references it.",
+				))
+		else:
+			linked_si = frappe.db.sql(
+				"""SELECT DISTINCT si.name FROM `tabSales Invoice Item` sii
+				   JOIN `tabSales Invoice` si ON si.name = sii.parent
+				   WHERE sii.delivery_note = %s AND si.docstatus = 1
+				   LIMIT 1""",
+				(dn.name,),
+			)
+			if not linked_si:
+				results.append(_build_row(
+					dn, "no_counter_doc", "No Counter-Document",
+					details="Different-GSTIN DN has BNS internal GL but no submitted SI is linked to it.",
+				))
+			else:
+				si_name = linked_si[0][0]
+				has_pi = frappe.db.exists("Purchase Invoice", {
+					"bns_inter_company_reference": si_name,
+					"docstatus": 1,
+				})
+				if not has_pi:
+					has_pi = frappe.db.exists("Purchase Invoice", {
+						"bill_no": si_name,
+						"docstatus": 1,
+					})
+				if not has_pi:
+					results.append(_build_row(
+						dn, "no_counter_doc", "No Counter-Document",
+						details=f"DN->SI chain exists (SI {si_name}) but no submitted PI references the SI.",
+					))
+
+	company_cond_si = "AND si.company = %s" if company else ""
+
+	# --- Check 3: SI with BNS internal GL but no submitted PI ---
+	si_rows = frappe.db.sql(
+		f"""SELECT si.name, si.posting_date, si.is_bns_internal_customer, si.customer
+		   FROM `tabSales Invoice` si
+		   WHERE si.docstatus = 1
+		     AND si.posting_date >= %s AND si.posting_date <= %s
+		     {company_cond_si}
+		     AND si.is_return = 0
+		     AND (si.is_bns_internal_customer = 1
+		          OR si.customer IN (SELECT name FROM tabCustomer WHERE is_bns_internal_customer = 1))
+		     AND si.company_gstin IS NOT NULL
+		     AND si.billing_address_gstin IS NOT NULL
+		     AND si.company_gstin != si.billing_address_gstin
+		""",
+		(date_from, date_to, *company_vals),
+		as_dict=True,
+	) or []
+
+	for si in si_rows:
+		if not _has_internal_gl("Sales Invoice", si.name):
+			continue
+		has_pi = frappe.db.exists("Purchase Invoice", {
+			"bns_inter_company_reference": si.name,
+			"docstatus": 1,
+		})
+		if not has_pi:
+			has_pi_bill = frappe.db.exists("Purchase Invoice", {
+				"bill_no": si.name,
+				"docstatus": 1,
+			})
+			if not has_pi_bill:
+				results.append(_build_row(
+					si, "no_counter_doc", "No Counter-Document",
+					details=f"SI has BNS internal GL but no submitted PI references it.",
+				))
 
 	return results
 

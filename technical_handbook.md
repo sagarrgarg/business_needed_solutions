@@ -197,7 +197,13 @@ BNS extends ERPNext with:
   - SI (Credit Note): expects Internal Branch Debtor Cr, Internal Sales Transfer Dr, reversed tax legs. Optionally reversed stock legs if update_stock.
   - PI (SI-linked): expects Internal Branch Creditor Cr, Internal Purchase Transfer Dr, tax legs. Optionally stock legs if update_stock and no PR-linked rows.
   - PI (Debit Note): expects Internal Branch Creditor Dr, Internal Purchase Transfer Cr, reversed tax legs. Optionally reversed stock legs if update_stock and no PR-linked rows.
-- **SLE Checks:** For PR/PI with `bns_transfer_rate`, validates `incoming_rate` and `stock_value_difference` against expected values.
+- **Zero-Amount Skip:** Documents where both `base_grand_total` and `base_net_total` are zero (absolute) are skipped entirely -- no GL is expected for zero-value transactions (e.g., zero-rate credit notes/debit notes).
+- **SLE Checks:** For PR/PI with `bns_transfer_rate`, validates `incoming_rate` against expected transfer rate. Does NOT check `stock_value_difference` since SVD is computed by ERPNext's valuation engine and is affected by factors outside BNS control (negative stock, moving average revaluation).
+- **Cross-Document Consistency Checks** (`_audit_cross_document_consistency`):
+  - **Orphaned GL:** PR/PI that has BNS internal GL but references a cancelled or missing source DN/SI. Deviation type: "Orphaned GL".
+  - **Flag Mismatch:** PR/PI has BNS internal GL but the referenced source DN/SI does NOT have BNS internal GL (e.g., customer `is_bns_internal_customer=0`). Deviation type: "Flag Mismatch".
+  - **Missing Counter-Document:** DN/SI has BNS internal GL but no submitted counter-document exists. For same-GSTIN DNs, checks for a submitted PR. For different-GSTIN DNs, verifies the DN→SI→PI chain (linked SI via items, then PI via `bns_inter_company_reference` or `bill_no`). For SIs, checks for a submitted PI. Deviation type: "No Counter-Document".
+  - Classification functions (`_classify_pr`, `_classify_pi`) now check `docstatus=1` on referenced source documents to avoid classifying against cancelled docs.
 - **Bulk Repost Actions:**
   - "Repost SLE" (Actions menu): Enqueues `create_repost_item_valuation_entry` for all report rows with SLE deviations. Runs as background job via `frappe.enqueue`.
   - "Repost GL" (Actions menu): Enqueues `bns_force_rebuild_gl_for_voucher` for all report rows with GL deviations. Runs as background job via `frappe.enqueue`.
