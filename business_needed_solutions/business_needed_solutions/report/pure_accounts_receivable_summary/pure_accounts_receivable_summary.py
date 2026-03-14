@@ -758,6 +758,12 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 			if party not in self.party_total:
 				continue
 
+			# Skip parties with non-positive outstanding — advances exceed invoices
+			# so FIFO would zero out all buckets. Leave original buckets for
+			# redistribute_negative_ageing_buckets to handle after netting.
+			if flt(self.party_total[party].outstanding) <= 0:
+				continue
+
 			invoices = [e for e in entries if flt(e.get("outstanding")) > 0]
 			advances = [e for e in entries if flt(e.get("outstanding")) < 0]
 
