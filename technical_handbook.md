@@ -245,6 +245,23 @@ BNS extends ERPNext with:
 - **Report guidance:** When running reports with batch segregation across the FY boundary, filter by `from_date >= new FY start` to avoid split-timeline artifacts.
 - **Parity validation:** `_validate_batch_serial_parity()` logs warnings (not errors) when one side of an internal transfer has batch/serial info and the other doesn't, accommodating the transition period.
 
+### 3.15 Purchase Document Attachment Validation (`overrides/attachment_validation.py`)
+
+- **What:** `before_submit` hook for Purchase Receipt and Purchase Invoice that enforces mandatory attachments via dedicated Attach fields on each doctype.
+- **Why:** Supplier invoices (and e-Waybills when applicable) must be on file before a purchase document is finalized. Prevents submission without supporting documents. Using explicit Attach fields (instead of generic File attachments) provides clear separation between document types.
+- **Custom Fields (on both PR and PI):**
+  - `bns_purchase_attachments_section` — Section Break, collapsible.
+  - `bns_supplier_invoice_attachment` — Attach (mandatory on submit when feature enabled).
+  - `bns_ewaybill_attachment` — Attach (hidden when e-Waybill is not applicable; mandatory when visible and document meets threshold).
+  - `bns_builty_attachment` — Attach (always optional, for transport builty / lorry receipt).
+- **e-Waybill field visibility:** Controlled client-side via `purchase_attachment_fields.js` calling `check_ewaybill_applicability` API. Field is hidden when: e-Waybill is disabled in GST Settings, document has no stock items (PI without update_stock), or `abs(base_grand_total) < e_waybill_threshold`.
+- **Rules:**
+  - **PR:** `bns_supplier_invoice_attachment` required. `bns_ewaybill_attachment` required when threshold met. `bns_builty_attachment` always optional.
+  - **PI created from PR:** Exempt — all 3 fields are hidden, dashboard headline links to the PR.
+  - **PI created directly (no PR items):** Same rules as PR.
+- **Settings:** BNS Settings > Stock & Inventory > `enforce_purchase_document_attachments` (Check, default off).
+- **Files:** `attachment_validation.py` (server), `purchase_attachment_fields.js` (client), `purchase_invoice_form.js` (headline), `custom_field.json` (field definitions), `hooks.py` (doctype_js + before_submit).
+
 ---
 
 ## 6. Migration Implications

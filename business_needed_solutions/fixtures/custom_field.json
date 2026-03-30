@@ -2931,5 +2931,93 @@
   "no_copy": 1,
   "read_only": 1,
   "description": "Internal transfer valuation rate mirrored from source Sales Invoice Item for BNS internal flows."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Receipt",
+  "fieldname": "bns_purchase_attachments_section",
+  "fieldtype": "Section Break",
+  "label": "Purchase Document Attachments",
+  "insert_after": "subscription_detail",
+  "collapsible": 1,
+  "module": "Business Needed Solutions",
+  "name": "Purchase Receipt-bns_purchase_attachments_section"
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Receipt",
+  "fieldname": "bns_supplier_invoice_attachment",
+  "fieldtype": "Attach",
+  "label": "Supplier Invoice",
+  "insert_after": "bns_purchase_attachments_section",
+  "module": "Business Needed Solutions",
+  "name": "Purchase Receipt-bns_supplier_invoice_attachment",
+  "description": "Attach the supplier invoice document."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Receipt",
+  "fieldname": "bns_ewaybill_attachment",
+  "fieldtype": "Attach",
+  "label": "e-Waybill",
+  "insert_after": "bns_supplier_invoice_attachment",
+  "module": "Business Needed Solutions",
+  "name": "Purchase Receipt-bns_ewaybill_attachment",
+  "description": "Attach the e-Waybill document (required when net total exceeds the threshold)."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Receipt",
+  "fieldname": "bns_builty_attachment",
+  "fieldtype": "Attach",
+  "label": "Builty / LR Copy",
+  "insert_after": "bns_ewaybill_attachment",
+  "module": "Business Needed Solutions",
+  "name": "Purchase Receipt-bns_builty_attachment",
+  "description": "Optional: Attach the transport builty or lorry receipt."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Invoice",
+  "fieldname": "bns_purchase_attachments_section",
+  "fieldtype": "Section Break",
+  "label": "Purchase Document Attachments",
+  "insert_after": "subscription_section",
+  "collapsible": 1,
+  "module": "Business Needed Solutions",
+  "name": "Purchase Invoice-bns_purchase_attachments_section"
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Invoice",
+  "fieldname": "bns_supplier_invoice_attachment",
+  "fieldtype": "Attach",
+  "label": "Supplier Invoice",
+  "insert_after": "bns_purchase_attachments_section",
+  "module": "Business Needed Solutions",
+  "name": "Purchase Invoice-bns_supplier_invoice_attachment",
+  "description": "Attach the supplier invoice document."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Invoice",
+  "fieldname": "bns_ewaybill_attachment",
+  "fieldtype": "Attach",
+  "label": "e-Waybill",
+  "insert_after": "bns_supplier_invoice_attachment",
+  "module": "Business Needed Solutions",
+  "name": "Purchase Invoice-bns_ewaybill_attachment",
+  "description": "Attach the e-Waybill document (required when net total exceeds the threshold)."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Invoice",
+  "fieldname": "bns_builty_attachment",
+  "fieldtype": "Attach",
+  "label": "Builty / LR Copy",
+  "insert_after": "bns_ewaybill_attachment",
+  "module": "Business Needed Solutions",
+  "name": "Purchase Invoice-bns_builty_attachment",
+  "description": "Optional: Attach the transport builty or lorry receipt."
  }
 ]

@@ -155,6 +155,9 @@ The app is designed to be **configurable via settings** – most features can be
 11. **Link/convert without locks** – Always use `frappe.lock_doc()` before read-check-write sequences in link/convert operations to prevent duplicate creation from concurrent requests.
 12. **Empty GSTIN as same-GSTIN** – Treat missing/empty GSTINs as "unknown", not "same". Do not trigger same-GSTIN GL rewrite when either GSTIN is absent.
 13. **Unlinking without status reset** – Clearing `bns_inter_company_reference` alone leaves documents visually in "transferred" state. Always reset `is_bns_internal_*`, `status`, and `per_billed` when unlinking.
+14. **Duplicate attachment enforcement on PR and PI** – When a PI is created from a PR, do not require attachments on the PI. The PR holds the supplier invoice, e-Waybill, and builty; the PI hides those fields entirely and shows an info headline linking to the PR. Only enforce attachments on the document that "owns" the physical receipt.
+15. **Generic File-based attachment counting** – Never count generic `File` records to determine whether specific attachments are present. Use dedicated Attach fields (`bns_supplier_invoice_attachment`, `bns_ewaybill_attachment`, `bns_builty_attachment`) so each document type is explicitly identifiable. This prevents ambiguity when users attach unrelated files.
+16. **Showing mandatory fields that don't apply** – The e-Waybill attachment field must be hidden when the document doesn't meet the threshold or stock-item criteria. Showing a mandatory field that the user can never fill correctly creates confusion. Use dynamic visibility via server-side applicability check.
 
 ---
 
@@ -163,6 +166,7 @@ The app is designed to be **configurable via settings** – most features can be
 | Module | Responsibility | Do not |
 |--------|-----------------|--------|
 | `overrides/` | Validation, enforcement | Business logic for DN/PR/SI/PI creation |
+| `overrides/attachment_validation.py` | Purchase attachment enforcement | e-Waybill generation, GST calculations |
 | `bns_branch_accounting/utils.py` | Internal transfer logic, status, conversion | GST validation, submission restriction |
 | `gst_compliance.py` | GST validations, e-Waybill | Internal transfer accounting |
 | `business_needed_solutions/utils.py` | Re-exports, shared helpers | Core BNS internal logic (moved to bns_branch_accounting) |

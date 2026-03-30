@@ -66,9 +66,9 @@ doctype_js = {
               "Delivery Note" : ["public/js/delivery_note.js?v=130", "public/js/doctype_item_grid_controls.js"],
               
               # Purchase Documents
-              "Purchase Invoice" : "public/js/doctype_item_grid_controls.js",
+              "Purchase Invoice" : ["public/js/doctype_item_grid_controls.js", "public/js/purchase_attachment_fields.js"],
               "Purchase Order" : ["public/js/doctype_item_grid_controls.js", "public/js/update_items_override.js"],
-              "Purchase Receipt" : ["public/js/purchase_receipt_form.js", "public/js/doctype_item_grid_controls.js"],
+              "Purchase Receipt" : ["public/js/doctype_item_grid_controls.js", "public/js/purchase_attachment_fields.js"],
               
               # Warehouse
               "Warehouse" : "public/js/warehouse.js",
@@ -228,7 +228,8 @@ doc_events = {
         "validate": "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
         "before_submit": [
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
-            "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage"
+            "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
+            "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments"
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
@@ -254,6 +255,7 @@ doc_events = {
         "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.cancel_linked_purchase_docs_for_sales_invoice"
     },
     "Purchase Invoice": {
+        "before_submit": "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments",
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.bns_branch_accounting.utils.update_purchase_invoice_status_for_bns_internal"

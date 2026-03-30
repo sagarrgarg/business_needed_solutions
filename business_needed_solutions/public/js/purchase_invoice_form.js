@@ -39,6 +39,19 @@ frappe.ui.form.on('Purchase Invoice', {
         }
     },
     refresh: function(frm) {
+        if (frm.doc.docstatus === 0) {
+            let linkedPR = null;
+            (frm.doc.items || []).some(function(d) {
+                if (d.purchase_receipt) { linkedPR = d.purchase_receipt; return true; }
+            });
+            if (linkedPR) {
+                frm.dashboard.set_headline(
+                    __("Supplier Invoice, e-Waybill & Builty documents are expected on the linked Purchase Receipt: {0}",
+                        ['<a href="/app/purchase-receipt/' + linkedPR + '">' + linkedPR + '</a>'])
+                );
+            }
+        }
+
         // Show button to convert to BNS Internal if supplier is BNS internal but PI is not marked
         // OR if PI is marked but status is not "BNS Internally Transferred"
         if (frm.doc.docstatus == 1) {

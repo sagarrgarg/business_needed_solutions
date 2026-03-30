@@ -28,6 +28,8 @@
   "stock_entry_controls_section",
   "enforce_stock_update_or_reference",
   "enable_per_warehouse_negative_stock_disallow",
+  "purchase_attachment_section",
+  "enforce_purchase_document_attachments",
 
   "tab_break_manufacturing",
   "manufacturing_section",
@@ -176,6 +178,18 @@
    "fieldname": "enable_per_warehouse_negative_stock_disallow",
    "fieldtype": "Check",
    "label": "Enable Per-Warehouse Negative Stock Control"
+  },
+  {
+   "fieldname": "purchase_attachment_section",
+   "fieldtype": "Section Break",
+   "label": "Purchase Document Attachments"
+  },
+  {
+   "default": "0",
+   "description": "When enabled, Purchase Receipt and Purchase Invoice submissions require a supplier invoice attachment. If the net total exceeds the e-Waybill threshold (from GST Settings), an e-Waybill attachment is also required. If a PI is created from a PR, the PI is exempt (documents are expected on the PR).",
+   "fieldname": "enforce_purchase_document_attachments",
+   "fieldtype": "Check",
+   "label": "Enforce Purchase Document Attachments"
   },
   {
    "fieldname": "tab_break_manufacturing",
