@@ -23,10 +23,7 @@ frappe.ui.form.on('Purchase Invoice', {
         // Pre-populate link title cache SYNCHRONOUSLY so Link controls never request missing docs.
         if (!frappe._link_titles) frappe._link_titles = {};
 
-        var siRefs = [
-            frm.doc.bns_inter_company_reference,
-            frm.doc.inter_company_invoice_reference
-        ].filter(Boolean);
+        var siRefs = [frm.doc.bns_inter_company_reference].filter(Boolean);
         siRefs.forEach(function(siName) {
             frappe._link_titles['Sales Invoice::' + siName] = siName;
         });
@@ -180,33 +177,7 @@ frappe.ui.form.on('Purchase Invoice', {
         
         // Link/Unlink with Sales Invoice buttons
         if (frm.doc.docstatus == 1) {
-            if (frm.doc.bns_inter_company_reference) {
-                // Show Unlink button if already linked
-                frm.add_custom_button(__('Unlink Sales Invoice'), function() {
-                    frappe.confirm(
-                        __('Are you sure you want to unlink this Purchase Invoice from Sales Invoice {0}?', [frm.doc.bns_inter_company_reference]),
-                        function() {
-                            frappe.call({
-                                method: 'business_needed_solutions.bns_branch_accounting.utils.unlink_si_pi',
-                                args: {
-                                    purchase_invoice: frm.doc.name
-                                },
-                                freeze: true,
-                                freeze_message: __('Unlinking...'),
-                                callback: function(r) {
-                                    if (!r.exc) {
-                                        frappe.show_alert({
-                                            message: r.message.message || __('Unlinked successfully'),
-                                            indicator: 'green'
-                                        });
-                                        frm.reload_doc();
-                                    }
-                                }
-                            });
-                        }
-                    );
-                }, __('Actions'));
-            } else if (frm.doc.bill_no) {
+            if (!frm.doc.bns_inter_company_reference && frm.doc.bill_no) {
                 // Only attempt the SI lookup for BNS internal suppliers.
                 // For external suppliers bill_no is the vendor's own invoice
                 // number (e.g. "KPU1/25-26/4588") which is NOT a Sales

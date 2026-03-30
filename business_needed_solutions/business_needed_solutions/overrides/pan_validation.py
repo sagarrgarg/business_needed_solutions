@@ -14,9 +14,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class PANValidationError(Exception):
-    """Custom exception for PAN validation errors."""
-    pass
+# Temporarily disabled unused custom exception (kept commented for rollback safety).
+# class PANValidationError(Exception):
+#     """Custom exception for PAN validation errors."""
+#     pass
 
 
 def validate_pan_uniqueness(doc, method: Optional[str] = None) -> None:

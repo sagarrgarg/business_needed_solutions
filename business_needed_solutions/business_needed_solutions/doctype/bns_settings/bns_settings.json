@@ -54,14 +54,7 @@
   "secondary_rate_display",
   "secondary_rate_field",
 
-  "tab_break_accounts",
-  "reconciliation_section",
-  "enable_auto_fifo_reconciliation",
-  "include_future_payments_in_reconciliation",
-  "reconciliation_batch_size",
-  "column_break_reconciliation",
-  "last_reconciliation_run",
-  "last_reconciliation_status"
+  "tab_break_accounts"
  ],
  "fields": [
   {
@@ -319,50 +312,6 @@
    "fieldname": "tab_break_accounts",
    "fieldtype": "Tab Break",
    "label": "Accounts"
-  },
-  {
-   "fieldname": "reconciliation_section",
-   "fieldtype": "Section Break",
-   "label": "Auto FIFO Payment Reconciliation"
-  },
-  {
-   "default": "0",
-   "description": "Enable automatic FIFO-based payment reconciliation for all customers and suppliers. When enabled, a daily scheduled job will match unallocated payments to oldest outstanding invoices first.",
-   "fieldname": "enable_auto_fifo_reconciliation",
-   "fieldtype": "Check",
-   "label": "Enable Auto FIFO Reconciliation"
-  },
-  {
-   "default": "1",
-   "depends_on": "enable_auto_fifo_reconciliation",
-   "description": "Include future-dated payments when reconciling. This helps produce more accurate ageing reports by considering payments that will be applied.",
-   "fieldname": "include_future_payments_in_reconciliation",
-   "fieldtype": "Check",
-   "label": "Include Future Payments"
-  },
-  {
-   "default": "100",
-   "depends_on": "enable_auto_fifo_reconciliation",
-   "description": "Maximum number of allocations (payment-invoice matches) to process per run. Set to 0 for unlimited. Lower values reduce system load but require more runs to complete.",
-   "fieldname": "reconciliation_batch_size",
-   "fieldtype": "Int",
-   "label": "Batch Size (Allocations per Run)"
-  },
-  {
-   "fieldname": "column_break_reconciliation",
-   "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "last_reconciliation_run",
-   "fieldtype": "Datetime",
-   "label": "Last Reconciliation Run",
-   "read_only": 1
-  },
-  {
-   "fieldname": "last_reconciliation_status",
-   "fieldtype": "Data",
-   "label": "Last Reconciliation Status",
-   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 1,

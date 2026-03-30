@@ -30,11 +30,30 @@ The app is designed to be **configurable via settings** – most features can be
 
 **Intent:** Model inter-branch transfers (same legal entity, different locations) with:
 
-- DN → PR (stock movement)
-- SI → PI (invoice flow)
-- Correct GL: Stock in Transit, Internal Transfer Account, Internal Branch Debtor Account
+- DN → PR (stock movement, same GSTIN)
+- SI → PI (invoice flow, different GSTIN)
+- SI → PR → PI (invoice creates receipt, then invoice on purchase side)
+- DN → SI → PI (delivery note creates sales invoice, then purchase invoice)
+- DN → SI → PR → PI (full chain from stock to invoice on both sides)
+- Correct GL: Stock in Transit, Internal Sales Transfer Account (DN), Internal Purchase Transfer Account (PR), Internal Branch Debtor/Creditor Accounts
+- Tiny precision residues (e.g. 0.0001) after internal GL rewrite are handled by ERPNext's `process_debit_credit_difference()` which posts them to the Company round-off account. BNS must not absorb residuals into transfer or branch accounts.
 
 **Constraint:** `is_bns_internal_customer` and `is_bns_internal_supplier` are the source of truth. Do not introduce parallel flags.
+**Constraint:** Do not add BNS-specific round-off logic. ERPNext's `process_debit_credit_difference` / `make_round_off_gle` handles GL residuals via Company round-off account. BNS rewrite functions must not interfere with this by absorbing diffs into transfer accounts or discarding rewrites for small diffs.
+
+### 2.2b Bulk Linkage Verification & Repost
+
+**Intent:** Provide a post-cutoff verification mechanism that ensures all internal transfer chains are 100% linked at both doc-level and item-level before triggering repost. This is a manual, controlled operation — not automated — to avoid unintended mass financial updates.
+
+**Reasoning:** After a cutoff date (e.g., system stabilization point), all internal transfers should be fully linked. Partially linked or unlinked chains indicate data integrity issues that must be resolved before financial repost. The function categorizes chains into fully_linked/partially_linked/unlinked so the team can address issues systematically.
+
+**Constraint:** Only fully-linked chains are reposted. Partial or unlinked chains are reported for manual attention. The function must never repost documents it cannot fully verify.
+
+**Fix Partial DN→PR Intent:** Some DN→PR chains are "partially linked" only because `bns_inter_company_reference` was not set bidirectionally (data migration gaps, manual PR creation, etc.). The fix option auto-repairs these references, but **only** when the underlying data is consistent: same items, same rates, same taxable amounts, and same warehouses. Any mismatch indicates a real data problem that requires manual resolution — the fix must never paper over genuine discrepancies.
+
+**Constraint:** The fix must skip (not force-link) whenever item codes, rates, taxable amounts, or source-to-destination warehouses differ. Skipped pairs are reported with reasons so users can address root causes.
+
+**Amendment Resilience:** When a DN is amended, the new DN has different item row IDs but the linked PR still references the old IDs. All linking and verification paths must detect this condition and re-map by item_code + qty + rate rather than failing on stale references. Zero-rate items (samples, free goods) are legitimate and must not block GL rewrite — they are skipped, not treated as errors.
 
 ### 2.2a Billing Location → Customer Address
 
@@ -42,21 +61,53 @@ The app is designed to be **configurable via settings** – most features can be
 
 **Constraint:** Only apply auto-update and read-only when `is_bns_internal_customer` is true. Do not extend this logic to outside customers.
 
+### 2.2c Credit Note → Debit Note Conversion (SI Return → PI Return)
+
+**Intent:** Enable BNS internal SI credit notes to be converted to PI debit notes using the same `make_bns_internal_purchase_invoice` conversion function. This mirrors the standard SI→PI flow but handles negative quantities and sets return linkage on the target PI.
+
+**Reasoning:** When goods are returned between internal branches, the selling branch issues a credit note (SI return). The purchasing branch needs a corresponding debit note (PI return) linked to the original PI. Blocking returns entirely was too restrictive — branches need a formal return mechanism for adjustments, damages, and corrections.
+
+**Constraint:** The PI debit note must have `is_return = 1` and `return_against` pointing to the original PI (found via `bns_inter_company_reference` on the original SI). Item quantities remain negative. The previous return-blocking validations (`validate_bns_internal_customer_return`, `validate_bns_internal_delivery_note_return`) were removed to enable this flow — returns are now allowed for BNS internal customers.
+
+### 2.2d Internal Transfer Accounting Audit
+
+**Intent:** Provide a read-only audit report that validates whether GL and SLE entries for BNS internal documents (DN, SI, PR, PI) conform to the expected BNS branch-accounting patterns. This is a detective control — it does not fix anything, only surfaces deviations.
+
+**Reasoning:** The GL rewrite functions may be skipped (missing settings, zero amounts, pre-cutoff documents) or overwritten by repost. SLE transfer rates may diverge from `bns_transfer_rate` after repost. This report gives the accounting team visibility into which documents have non-conforming entries so they can trigger targeted reposts or manual corrections.
+
+**Constraint:** The report must remain read-only. It must not modify GL, SLE, or document data. It must use the same scope-detection logic as the rewrite functions (same GSTIN vs different GSTIN, DN-linked vs SI-linked) to ensure consistency.
+
 ### 2.3 Same-GSTIN Purchase Invoice Block
 
 **Intent:** Prevent self-invoicing when Supplier GSTIN = Company GSTIN. GST does not allow this.
 
 **Constraint:** Validation runs on validate; GSTIN is resolved from doc or from Company/Supplier addresses. Do not skip when India Compliance is present.
 
+### 2.3b Serial and Batch Bundle Support (ERPNext v15+)
+
+**Intent:** All stock-related code in BNS must support ERPNext v15+ Serial and Batch Bundle (SBB) alongside legacy `serial_no`/`batch_no` fields. This ensures batch and serial traceability across all internal transfer mappings, negative stock validations, and reports.
+
+**Pattern:** Use `_duplicate_serial_and_batch_bundle()` for all document-to-document item mappings (DN→PR, SI→PI, SI→PR). Never copy `serial_and_batch_bundle` directly between documents — each document needs its own SBB created via `SerialBatchCreation.duplicate_package()`.
+
+**Constraint:** Do not reintroduce legacy `serial_no`/`batch_no` into `field_map` for mappings. These fields are in `field_no_map` to prevent raw copying. The helper handles all four scenarios (SBB, legacy fields, cross-FY item without tracking, non-batch/serial item) in a single codepath.
+
+**Constraint:** Reports that query SLE must handle both `batch_no` on SLE and `serial_and_batch_bundle` references. When `batch_no` is empty, fall back to querying the SBB's child entries (`Serial and Batch Entry`).
+
+**Fiscal Year Transition:** When enabling batch/serial tracking on items from a new fiscal year:
+- Complete all pending cross-FY internal transfers before enabling `has_batch_no`/`has_serial_no`.
+- Set `internal_validation_cutoff_date` to the new FY start date to isolate old-FY documents.
+- The SBB duplication helper logs a warning (not an error) for cross-FY items missing batch/serial on the source.
+- Parity validation uses warnings for one-side-missing scenarios, not hard errors — this accommodates the transition period without breaking existing workflows.
+
 ### 2.4 Stock Update vs. Reference
 
-**Intent:** When SI/PI do not update stock, every stock item must trace back to DN/PR. Ensures audit trail.
+**Intent:** When SI/PI do not update stock, every stock item must trace back to DN/PR. Ensures audit trail. Includes batch continuity: the batch_no on the invoice item must match the referenced source item's batch_no.
 
 **Constraint:** Do not relax this for "special cases" without explicit business approval.
 
 ### 2.5 Per-Warehouse Negative Stock
 
-**Intent:** Some warehouses (e.g. retail) must never go negative; others (e.g. manufacturing) may. ERPNext's global setting is insufficient.
+**Intent:** Some warehouses (e.g. retail) must never go negative; others (e.g. manufacturing) may. ERPNext's global setting is insufficient. Supports batch-level negative stock detection — when items use SBB instead of legacy `batch_no`, batch numbers are extracted from the bundle and each is validated individually.
 
 **Constraint:** Works only when ERPNext allows negative stock globally. Warehouse-level setting is additive.
 
@@ -75,6 +126,7 @@ The app is designed to be **configurable via settings** – most features can be
 3. **Single source of truth:** BNS internal logic lives in `bns_branch_accounting/utils.py`. Re-exports from `business_needed_solutions.utils` for backward compatibility only.
 4. **India Compliance integration:** Use India Compliance APIs and address GSTIN when available. Do not duplicate GST logic.
 5. **Graceful degradation:** If a setting is off or data is missing, skip validation rather than fail. Log at debug level.
+6. **Avoid broad auto-financial writes:** Automated mass reconciliation logic was intentionally removed to reduce risk from high-impact background updates and broad whitelisted entry points.
 
 ---
 
@@ -96,6 +148,13 @@ The app is designed to be **configurable via settings** – most features can be
 4. **Bypassing hooks** – All validations must run via doc_events. Do not call validation only from client JS.
 5. **Duplicate accounting logic** – Use BNS Branch Accounting Settings for accounts. Do not hardcode account names.
 6. **Handbook drift** – After any logic change, update both `technical_handbook.md` and `psychological_handbook.md` so the docs match the code.
+7. **Direct SBB field copy in mappings** – Never copy `serial_and_batch_bundle` via `field_map`. Each target document needs its own SBB created via `duplicate_package()`. Use `field_no_map` to block raw copying.
+8. **Ignoring SBB in batch-aware code** – When checking `batch_no`, always add a fallback path for `serial_and_batch_bundle`. ERPNext v15+ may populate only the SBB field.
+9. **Cross-FY repost without account verification** – Never repost old-FY documents after BNS Branch Accounting Settings have changed. The GL rewrite reads accounts at execution time; reposting with new accounts breaks the debit/credit pairing with the counter-document that was written with the old accounts. Use `allow_cross_fy_repost=True` only after verifying account consistency.
+10. **Premature reference writes** – Never write `bns_inter_company_reference` on a source document before the target document is saved/submitted. Use `on_submit` hooks for reference writes to avoid dangling refs.
+11. **Link/convert without locks** – Always use `frappe.lock_doc()` before read-check-write sequences in link/convert operations to prevent duplicate creation from concurrent requests.
+12. **Empty GSTIN as same-GSTIN** – Treat missing/empty GSTINs as "unknown", not "same". Do not trigger same-GSTIN GL rewrite when either GSTIN is absent.
+13. **Unlinking without status reset** – Clearing `bns_inter_company_reference` alone leaves documents visually in "transferred" state. Always reset `is_bns_internal_*`, `status`, and `per_billed` when unlinking.
 
 ---
 

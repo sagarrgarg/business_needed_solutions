@@ -14,9 +14,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class ItemValidationError(Exception):
-    """Custom exception for item validation errors."""
-    pass
+# Temporarily disabled unused custom exception (kept commented for rollback safety).
+# class ItemValidationError(Exception):
+#     """Custom exception for item validation errors."""
+#     pass
 
 
 def validate_expense_account_for_non_stock_items(doc, method: Optional[str] = None) -> None:

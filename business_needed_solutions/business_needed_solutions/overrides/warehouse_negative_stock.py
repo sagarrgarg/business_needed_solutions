@@ -90,7 +90,12 @@ def should_apply_warehouse_restriction():
 def validate_warehouse_negative_stock(args):
 	"""
 	Validate negative stock for a warehouse that disallows it.
-	
+
+	Supports both legacy batch_no field and ERPNext v15+ Serial and Batch
+	Bundle (SBB).  When batch_no is empty but serial_and_batch_bundle is
+	present, batch numbers are extracted from the bundle and each is
+	validated individually.
+
 	Args:
 		args (dict): Stock Ledger Entry arguments containing:
 			- item_code
@@ -101,9 +106,10 @@ def validate_warehouse_negative_stock(args):
 			- posting_datetime
 			- voucher_type
 			- voucher_no
-			- batch_no (optional)
+			- batch_no (optional, legacy)
+			- serial_and_batch_bundle (optional, v15+)
 			- reserved_stock (optional)
-			
+
 	Raises:
 		NegativeStockError: If negative stock would occur and warehouse disallows it
 	"""
@@ -187,26 +193,51 @@ def validate_warehouse_negative_stock(args):
 		)
 		frappe.throw(message, NegativeStockError, title=_("Insufficient Stock"))
 	
-	# Check batch-level negative stock if batch_no is present
-	if args.get("batch_no"):
-		neg_batch_sle = get_future_sle_with_negative_batch_qty(args)
-		if is_negative_with_precision(neg_batch_sle, is_batch=True):
-			warehouse_name = frappe.get_desk_link("Warehouse", args.get("warehouse"))
-			message = _(
-				"{0} units of {1} needed in {2} on {3} {4} for {5} to complete this transaction."
-			).format(
-				abs(neg_batch_sle[0]["cumulative_total"]),
-				frappe.get_desk_link("Batch", args.get("batch_no")),
-				warehouse_name,
-				neg_batch_sle[0]["posting_date"],
-				neg_batch_sle[0]["posting_time"],
-				frappe.get_desk_link(neg_batch_sle[0]["voucher_type"], neg_batch_sle[0]["voucher_no"]),
-			)
-			# Add warehouse restriction context
-			message += "<br><br>" + _("Note: While 'Allow Negative Stock' is enabled in Stock Settings, warehouse {0} has 'Disallow Negative Stock' enabled.").format(
-				warehouse_name
-			)
-			frappe.throw(message, NegativeStockError, title=_("Insufficient Stock for Batch"))
+	# Check batch-level negative stock via legacy batch_no or SBB
+	batch_no = args.get("batch_no")
+	if not batch_no and args.get("serial_and_batch_bundle"):
+		_validate_sbb_batch_negative_stock(args)
+	elif batch_no:
+		_validate_single_batch_negative_stock(args, batch_no)
+
+
+def _validate_single_batch_negative_stock(args, batch_no):
+	"""Validate negative stock for a single batch_no."""
+	batch_args = dict(args)
+	batch_args["batch_no"] = batch_no
+	neg_batch_sle = get_future_sle_with_negative_batch_qty(batch_args)
+	if is_negative_with_precision(neg_batch_sle, is_batch=True):
+		warehouse_name = frappe.get_desk_link("Warehouse", batch_args.get("warehouse"))
+		message = _(
+			"{0} units of {1} needed in {2} on {3} {4} for {5} to complete this transaction."
+		).format(
+			abs(neg_batch_sle[0]["cumulative_total"]),
+			frappe.get_desk_link("Batch", batch_no),
+			warehouse_name,
+			neg_batch_sle[0]["posting_date"],
+			neg_batch_sle[0]["posting_time"],
+			frappe.get_desk_link(neg_batch_sle[0]["voucher_type"], neg_batch_sle[0]["voucher_no"]),
+		)
+		message += "<br><br>" + _("Note: While 'Allow Negative Stock' is enabled in Stock Settings, warehouse {0} has 'Disallow Negative Stock' enabled.").format(
+			warehouse_name
+		)
+		frappe.throw(message, NegativeStockError, title=_("Insufficient Stock for Batch"))
+
+
+def _validate_sbb_batch_negative_stock(args):
+	"""
+	Extract batch numbers from a Serial and Batch Bundle and validate
+	each batch individually for negative stock.
+	"""
+	from erpnext.stock.serial_batch_bundle import get_batch_nos
+
+	bundle_id = args.get("serial_and_batch_bundle")
+	batch_data = get_batch_nos(bundle_id)
+	if not batch_data:
+		return
+
+	for batch_no in batch_data:
+		_validate_single_batch_negative_stock(args, batch_no)
 
 
 def apply_patches():

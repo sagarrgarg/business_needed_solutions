@@ -247,23 +247,64 @@ def convert_to_stock_qty(qty, from_uom, to_uom, item_code):
     
     return flt(qty * conversion_factor)
 
-def get_bin_qty(item_code, warehouse, uom=None):
-    """Get actual stock quantity from bin in specified UOM"""
-    bin_qty = frappe.db.get_value(
-        "Bin",
-        {"item_code": item_code, "warehouse": warehouse},
-        "actual_qty"
-    ) or 0
-    
+def get_bin_qty(item_code, warehouse, uom=None, batch_no=None):
+    """
+    Get actual stock quantity in specified UOM.
+
+    When batch_no is provided, computes qty from Stock Ledger Entries
+    since the Bin doctype does not track batch-level balances.
+    """
+    if batch_no:
+        bin_qty = flt(
+            frappe.db.sql(
+                """
+                SELECT SUM(actual_qty)
+                FROM `tabStock Ledger Entry`
+                WHERE item_code = %s AND warehouse = %s AND batch_no = %s
+                  AND is_cancelled = 0
+                """,
+                (item_code, warehouse, batch_no),
+            )[0][0]
+            or 0
+        )
+    else:
+        bin_qty = frappe.db.get_value(
+            "Bin",
+            {"item_code": item_code, "warehouse": warehouse},
+            "actual_qty"
+        ) or 0
+
     if uom:
         item_stock_uom = frappe.db.get_value("Item", item_code, "stock_uom")
         if uom != item_stock_uom:
             bin_qty = convert_to_stock_qty(bin_qty, item_stock_uom, uom, item_code)
-    
+
     return flt(bin_qty)
 
-def find_alternative_warehouse(item_code, required_qty, current_warehouse):
-    """Find alternative warehouse with sufficient stock"""
+def find_alternative_warehouse(item_code, required_qty, current_warehouse, batch_no=None):
+    """
+    Find alternative warehouse with sufficient stock.
+
+    When batch_no is provided, queries SLE aggregates instead of the Bin
+    doctype to find warehouses with batch-level availability.
+    """
+    if batch_no:
+        rows = frappe.db.sql(
+            """
+            SELECT warehouse, SUM(actual_qty) as total_qty
+            FROM `tabStock Ledger Entry`
+            WHERE item_code = %s AND warehouse != %s AND batch_no = %s
+              AND is_cancelled = 0
+            GROUP BY warehouse
+            HAVING total_qty >= %s
+            ORDER BY total_qty DESC
+            LIMIT 1
+            """,
+            (item_code, current_warehouse, batch_no, required_qty),
+            as_dict=True,
+        )
+        return rows[0].warehouse if rows else ""
+
     bins = frappe.get_all(
         "Bin",
         filters={

@@ -13,14 +13,2927 @@ from frappe import _
 from frappe.model.mapper import get_mapped_doc
 from frappe.contacts.doctype.address.address import get_company_address
 from erpnext.accounts.doctype.sales_invoice.sales_invoice import update_address, update_taxes
-from frappe.utils import flt, get_link_to_form
+from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
+    get_accounting_dimensions,
+)
+from frappe.utils import flt, cint, get_link_to_form, getdate, add_to_date, now_datetime
 from frappe import bold
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple, Set
 from collections import defaultdict
 import logging
+import json
+import time
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+
+def _bns_debug_log(hypothesis_id: str, location: str, message: str, data: Optional[Dict[str, Any]] = None) -> None:
+    """Append one NDJSON debug line for runtime investigation."""
+    try:
+        site_name = getattr(frappe.local, "site", "") or "unknown-site"
+        payload = {
+            "runId": f"{site_name}:{int(time.time() * 1000)}",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data or {},
+            "timestamp": int(time.time() * 1000),
+        }
+        debug_log_path = frappe.get_site_path("logs", "bns_branch_accounting_debug.ndjson")
+        with open(debug_log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
+
+_BNS_INTERNAL_GL_PATCHED = False
+_BNS_REPOST_GL_FAILSAFE_PATCHED = False
+_BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED = False
+_BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = False
+_BNS_REPOST_TRACKING_DTYPE = "BNS Repost Tracking"
+_BNS_REPOST_STATUS_IN_PROGRESS = "In Progress"
+_BNS_REPOST_STATUS_PROCESSED = "Processed"
+_BNS_REPOST_STATUS_FAILED = "Failed"
+_BNS_REPOST_CACHE_TTL_SEC = 6 * 60 * 60
+
+
+def _duplicate_serial_and_batch_bundle(
+    source_item, target_item, target_warehouse: Optional[str], transaction_type: str = "Inward"
+) -> None:
+    """
+    Clone a Serial and Batch Bundle from source item row to target item row.
+
+    Handles four scenarios:
+    1. Source has serial_and_batch_bundle -> duplicate via SerialBatchCreation
+    2. Source has legacy serial_no/batch_no without bundle -> copy with use_serial_batch_fields=1
+    3. Source has neither, but Item now requires batch/serial (cross-FY) -> log warning, skip
+    4. Source has neither and Item doesn't require batch/serial -> no-op
+
+    Args:
+        source_item: Source document item row (DN Item, SI Item)
+        target_item: Target document item row (PR Item, PI Item)
+        target_warehouse: Warehouse for the new bundle (must not be None when SBB is present)
+        transaction_type: "Inward" or "Outward"
+    """
+    source_bundle = source_item.get("serial_and_batch_bundle")
+
+    if source_bundle:
+        if not target_warehouse:
+            logger.warning(
+                "SBB duplication skipped for item %s: target_warehouse is None "
+                "(source bundle %s). Batch/serial info will not carry to target.",
+                source_item.item_code, source_bundle,
+            )
+            return
+
+        from erpnext.stock.serial_batch_bundle import SerialBatchCreation
+
+        try:
+            cls_obj = SerialBatchCreation(
+                {
+                    "type_of_transaction": transaction_type,
+                    "serial_and_batch_bundle": source_bundle,
+                    "item_code": source_item.item_code,
+                    "warehouse": target_warehouse,
+                }
+            )
+            cls_obj.duplicate_package()
+            target_item.serial_and_batch_bundle = cls_obj.serial_and_batch_bundle
+            target_item.use_serial_batch_fields = 0
+        except Exception:
+            logger.error(
+                "Failed to duplicate Serial and Batch Bundle %s for item %s",
+                source_bundle, source_item.item_code, exc_info=True,
+            )
+            raise
+
+    elif source_item.get("serial_no") or source_item.get("batch_no"):
+        target_item.use_serial_batch_fields = 1
+        if source_item.get("serial_no"):
+            target_item.serial_no = source_item.serial_no
+        if source_item.get("batch_no"):
+            target_item.batch_no = source_item.batch_no
+
+    else:
+        item_meta = frappe.get_cached_value(
+            "Item", source_item.item_code,
+            ["has_batch_no", "has_serial_no"], as_dict=True,
+        )
+        if item_meta and (item_meta.has_batch_no or item_meta.has_serial_no):
+            logger.warning(
+                "Item %s now requires batch/serial, but source document item "
+                "has no batch_no, serial_no, or serial_and_batch_bundle. "
+                "This is expected for cross-fiscal-year transfers where tracking "
+                "was enabled after the source was submitted. The target document's "
+                "batch/serial must be set manually before submission.",
+                source_item.item_code,
+            )
+
+
+def _get_bns_transfer_rate_for_pr_sle(sle) -> float:
+    """
+    Resolve bns_transfer_rate for a Purchase Receipt SLE row.
+
+    Scope:
+    - Purchase Receipt only
+    - Submitted PR only
+    - BNS internal supplier only
+    - DN-linked (same GSTIN DN->PR flow)
+    """
+    if not sle or getattr(sle, "voucher_type", None) != "Purchase Receipt":
+        return 0.0
+    if not getattr(sle, "voucher_detail_no", None):
+        return 0.0
+    if flt(getattr(sle, "actual_qty", 0)) <= 0:
+        return 0.0
+
+    pri_meta = frappe.get_meta("Purchase Receipt Item")
+    if not pri_meta.has_field("bns_transfer_rate"):
+        return 0.0
+
+    pr_item = frappe.db.get_value(
+        "Purchase Receipt Item",
+        sle.voucher_detail_no,
+        ["parent", "bns_transfer_rate"],
+        as_dict=True,
+    )
+    if not pr_item:
+        return 0.0
+
+    transfer_rate = flt(pr_item.get("bns_transfer_rate") or 0)
+    if transfer_rate <= 0:
+        return 0.0
+
+    pr = frappe.db.get_value(
+        "Purchase Receipt",
+        pr_item.get("parent"),
+        ["docstatus", "is_bns_internal_supplier", "bns_inter_company_reference", "posting_date"],
+        as_dict=True,
+    )
+    if not pr or pr.docstatus != 1:
+        return 0.0
+    if not is_after_internal_validation_cutoff(pr.get("posting_date")):
+        return 0.0
+    source_ref = (pr.get("bns_inter_company_reference") or "").strip()
+    if not source_ref:
+        return 0.0
+    is_dn_linked = bool(pr.get("is_bns_internal_supplier") and frappe.db.exists("Delivery Note", source_ref))
+    is_si_linked = frappe.db.exists("Sales Invoice", source_ref)
+    if not (is_dn_linked or is_si_linked):
+        return 0.0
+
+    return transfer_rate
+
+
+def _get_bns_transfer_rate_for_pi_sle(sle) -> float:
+    """
+    Resolve bns_transfer_rate for a Purchase Invoice SLE row.
+
+    Scope:
+    - Purchase Invoice only
+    - Submitted PI only
+    - BNS internal supplier only
+    - SI-linked (different GSTIN SI->PI flow)
+    """
+    if not sle or getattr(sle, "voucher_type", None) != "Purchase Invoice":
+        return 0.0
+    if not getattr(sle, "voucher_detail_no", None):
+        return 0.0
+    if flt(getattr(sle, "actual_qty", 0)) <= 0:
+        return 0.0
+
+    pii_meta = frappe.get_meta("Purchase Invoice Item")
+    if not pii_meta.has_field("bns_transfer_rate"):
+        return 0.0
+
+    pi_item = frappe.db.get_value(
+        "Purchase Invoice Item",
+        sle.voucher_detail_no,
+        ["parent", "bns_transfer_rate"],
+        as_dict=True,
+    )
+    if not pi_item:
+        return 0.0
+
+    transfer_rate = flt(pi_item.get("bns_transfer_rate") or 0)
+    if transfer_rate <= 0:
+        return 0.0
+
+    pi = frappe.db.get_value(
+        "Purchase Invoice",
+        pi_item.get("parent"),
+        [
+            "docstatus",
+            "is_bns_internal_supplier",
+            "bns_inter_company_reference",
+            "posting_date",
+            "update_stock",
+        ],
+        as_dict=True,
+    )
+    if not pi or pi.docstatus != 1:
+        return 0.0
+    if not cint(pi.get("update_stock")):
+        return 0.0
+    if not is_after_internal_validation_cutoff(pi.get("posting_date")):
+        return 0.0
+    if not pi.get("is_bns_internal_supplier"):
+        return 0.0
+    source_ref = (pi.get("bns_inter_company_reference") or "").strip()
+    if not source_ref or not frappe.db.exists("Sales Invoice", source_ref):
+        return 0.0
+
+    return transfer_rate
+
+
+def _get_bns_transfer_rate_for_sle(sle) -> float:
+    """Resolve transfer-rate override for PR/PI SLE rows."""
+    return _get_bns_transfer_rate_for_pr_sle(sle) or _get_bns_transfer_rate_for_pi_sle(sle)
+
+
+def _apply_bns_transfer_rate_stock_ledger_patch() -> None:
+    """Ensure PR repost valuation path can use Purchase Receipt Item.bns_transfer_rate."""
+    global _BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED
+    if _BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED:
+        return
+
+    try:
+        from erpnext.stock.stock_ledger import update_entries_after
+
+        original_method = update_entries_after.get_incoming_outgoing_rate_from_transaction
+        original_process_sle = update_entries_after.process_sle
+        if getattr(original_method, "_bns_transfer_rate_patched", False):
+            _BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED = True
+            return
+
+        def patched_get_incoming_outgoing_rate_from_transaction(self, sle):
+            rate = original_method(self, sle)
+            transfer_rate = _get_bns_transfer_rate_for_sle(sle)
+            if transfer_rate > 0:
+                sle.incoming_rate = transfer_rate
+                return transfer_rate
+            return rate
+
+        def patched_process_sle(self, sle):
+            transfer_rate = _get_bns_transfer_rate_for_sle(sle)
+            if transfer_rate > 0:
+                sle.incoming_rate = transfer_rate
+                sle.recalculate_rate = 1
+            return original_process_sle(self, sle)
+
+        patched_get_incoming_outgoing_rate_from_transaction._bns_transfer_rate_patched = True
+        patched_process_sle._bns_transfer_rate_patched = True
+        update_entries_after.get_incoming_outgoing_rate_from_transaction = patched_get_incoming_outgoing_rate_from_transaction
+        update_entries_after.process_sle = patched_process_sle
+        _BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED = True
+        logger.info("Applied BNS stock-ledger patch: PR/PI repost valuation uses bns_transfer_rate")
+    except Exception as e:
+        logger.error(f"Failed to apply BNS transfer-rate stock-ledger patch: {str(e)}")
+
+
+def _get_bns_branch_accounting_accounts() -> Dict[str, Any]:
+    """Get BNS Branch Accounting account settings required for GL rewrite."""
+    legacy_internal_transfer_account = (
+        frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_transfer_account") or ""
+    ).strip()
+    settings = {
+        "stock_in_transit_account": frappe.db.get_single_value(
+            "BNS Branch Accounting Settings", "stock_in_transit_account"
+        ),
+        "internal_sales_transfer_account": (
+            frappe.db.get_single_value(
+                "BNS Branch Accounting Settings", "internal_sales_transfer_account"
+            )
+            or legacy_internal_transfer_account
+        ),
+        "internal_purchase_transfer_account": (
+            frappe.db.get_single_value(
+                "BNS Branch Accounting Settings", "internal_purchase_transfer_account"
+            )
+            or legacy_internal_transfer_account
+        ),
+        # Keep legacy field readable during transition only.
+        "internal_transfer_account": legacy_internal_transfer_account,
+        "internal_branch_debtor_account": frappe.db.get_single_value(
+            "BNS Branch Accounting Settings", "internal_branch_debtor_account"
+        ),
+        "internal_branch_creditor_account": frappe.db.get_single_value(
+            "BNS Branch Accounting Settings", "internal_branch_creditor_account"
+        ),
+        "force_bns_internal_gl_rewrite": cint(
+            frappe.db.get_single_value("BNS Branch Accounting Settings", "force_bns_internal_gl_rewrite") or 0
+        ),
+    }
+
+    required = (
+        "stock_in_transit_account",
+        "internal_branch_debtor_account",
+        "internal_branch_creditor_account",
+    )
+    missing = [f for f in required if not settings.get(f)]
+    if missing:
+        logger.warning("Skipping BNS internal GL rewrite. Missing settings fields: %s", ", ".join(missing))
+        return {}
+
+    return settings
+
+
+def _is_bns_internal_dn_pr_scope(doc) -> bool:
+    """Return True when document is in BNS internal DN/PR scope."""
+    if not doc:
+        return False
+    if doc.doctype == "Delivery Note":
+        if doc.get("is_bns_internal_customer"):
+            return True
+        customer = doc.get("customer")
+        return bool(customer and frappe.db.get_value("Customer", customer, "is_bns_internal_customer"))
+    if doc.doctype == "Purchase Receipt":
+        if doc.get("is_bns_internal_supplier"):
+            return True
+        supplier = doc.get("supplier")
+        return bool(supplier and frappe.db.get_value("Supplier", supplier, "is_bns_internal_supplier"))
+    return False
+
+
+def validate_bns_internal_accounting_settings_for_dn_pr(
+    doc, method: Optional[str] = None
+) -> None:
+    """
+    Hard gate before DN/PR submit for BNS internal scope.
+
+    Blocks submit when required BNS accounts are missing or invalid.
+    """
+    if not doc or doc.doctype not in ("Delivery Note", "Purchase Receipt"):
+        return
+    if not _is_bns_internal_dn_pr_scope(doc):
+        return
+
+    legacy_internal_transfer_account = (
+        frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_transfer_account") or ""
+    ).strip()
+
+    required_fields = {
+        "stock_in_transit_account": _("Stock in Transit Account"),
+        "internal_branch_debtor_account": _("Internal Branch Debtor Account"),
+        "internal_branch_creditor_account": _("Internal Branch Creditor Account"),
+    }
+    if doc.doctype == "Delivery Note" and (doc.get("billing_address_gstin") or "") == (doc.get("company_gstin") or ""):
+        required_fields["internal_sales_transfer_account"] = _("Internal Sales Transfer Account")
+    elif doc.doctype == "Purchase Receipt":
+        required_fields["internal_purchase_transfer_account"] = _("Internal Purchase Transfer Account")
+
+    configured = {
+        fieldname: (frappe.db.get_single_value("BNS Branch Accounting Settings", fieldname) or "").strip()
+        for fieldname in required_fields
+    }
+    # Transition fallback: if new split fields are empty, allow legacy field value.
+    if "internal_sales_transfer_account" in configured and not configured["internal_sales_transfer_account"]:
+        configured["internal_sales_transfer_account"] = legacy_internal_transfer_account
+    if "internal_purchase_transfer_account" in configured and not configured["internal_purchase_transfer_account"]:
+        configured["internal_purchase_transfer_account"] = legacy_internal_transfer_account
+    missing = [required_fields[f] for f, value in configured.items() if not value]
+
+    invalid_messages = []
+    for fieldname, account_name in configured.items():
+        if not account_name:
+            continue
+        account_row = frappe.db.get_value(
+            "Account",
+            account_name,
+            ["name", "is_group", "disabled", "company"],
+            as_dict=True,
+        )
+        label = required_fields[fieldname]
+        if not account_row:
+            invalid_messages.append(_("{0}: '{1}' does not exist.").format(label, account_name))
+            continue
+        if cint(account_row.get("is_group")):
+            invalid_messages.append(
+                _("{0}: '{1}' is a Group account. Please select a Ledger account.").format(
+                    label, account_name
+                )
+            )
+        if cint(account_row.get("disabled")):
+            invalid_messages.append(
+                _("{0}: '{1}' is disabled. Please select an active account.").format(
+                    label, account_name
+                )
+            )
+        if doc.get("company") and account_row.get("company") and account_row.get("company") != doc.get("company"):
+            invalid_messages.append(
+                _("{0}: '{1}' belongs to company '{2}', but this document is for '{3}'.").format(
+                    label,
+                    account_name,
+                    account_row.get("company"),
+                    doc.get("company"),
+                )
+            )
+
+    if not missing and not invalid_messages:
+        return
+
+    parts = []
+    if missing:
+        parts.append(
+            _("Missing in BNS Branch Accounting Settings: {0}.").format(", ".join(missing))
+        )
+    if invalid_messages:
+        parts.append("\n".join(invalid_messages))
+
+    frappe.throw(
+        _(
+            "Cannot submit this internal {0} because BNS accounting setup is incomplete.\n\n{1}\n\nPlease update BNS Branch Accounting Settings and try again."
+        ).format(doc.doctype, "\n".join(parts)),
+        title=_("BNS Internal Accounting Setup Required"),
+    )
+
+
+def _get_internal_validation_cutoff_date():
+    """Return configured posting-date cutoff for internal validations, if any."""
+    cutoff = frappe.db.get_single_value(
+        "BNS Branch Accounting Settings", "internal_validation_cutoff_date"
+    )
+    if not cutoff:
+        return None
+    try:
+        return getdate(cutoff)
+    except Exception:
+        return None
+
+
+def is_after_internal_validation_cutoff(posting_date) -> bool:
+    """Return True when posting_date is on/after cutoff, or when no cutoff is set."""
+    cutoff = _get_internal_validation_cutoff_date()
+    if not cutoff:
+        return True
+    if not posting_date:
+        return False
+    try:
+        return getdate(posting_date) >= cutoff
+    except Exception:
+        return False
+
+
+def _get_pr_source_link_flags(doc) -> Dict[str, Any]:
+    """Detect whether PR is linked to DN and/or SI via source reference fields."""
+    candidates = []
+    value = (doc.get("bns_inter_company_reference") or "").strip()
+    if value:
+        candidates.append(value)
+
+    has_dn_link = False
+    has_si_link = False
+    dn_names = []
+    si_names = []
+
+    for ref_name in candidates:
+        if frappe.db.exists("Delivery Note", ref_name):
+            has_dn_link = True
+            dn_names.append(ref_name)
+        if frappe.db.exists("Sales Invoice", ref_name):
+            has_si_link = True
+            si_names.append(ref_name)
+
+    return {
+        "has_dn_link": has_dn_link,
+        "has_si_link": has_si_link,
+        "dn_names": dn_names,
+        "si_names": si_names,
+    }
+
+
+def _resolve_pr_gstin_scope(doc, has_dn_link: bool, has_si_link: bool) -> Optional[str]:
+    """Resolve PR GST scope as 'same' or 'different'."""
+    company_gstin = (doc.get("company_gstin") or "").strip()
+    billing_gstin = (doc.get("billing_address_gstin") or "").strip()
+    if company_gstin and billing_gstin:
+        return "same" if company_gstin == billing_gstin else "different"
+    if has_dn_link and not has_si_link:
+        return "same"
+    if has_si_link and not has_dn_link:
+        return "different"
+    return None
+
+
+def _is_bns_internal_same_gstin_delivery_note(doc) -> bool:
+    """Check DN is in scoped BNS internal same-GSTIN flow."""
+    return bool(
+        doc
+        and doc.doctype == "Delivery Note"
+        and doc.docstatus == 1
+        and is_after_internal_validation_cutoff(doc.get("posting_date"))
+        and is_bns_internal_customer(doc)
+        and (doc.get("billing_address_gstin") or "") == (doc.get("company_gstin") or "")
+    )
+
+
+def _is_bns_internal_delivery_note(doc) -> bool:
+    """Check DN is in scoped BNS internal flow (same/different GSTIN)."""
+    return bool(
+        doc
+        and doc.doctype == "Delivery Note"
+        and doc.docstatus == 1
+        and is_after_internal_validation_cutoff(doc.get("posting_date"))
+        and is_bns_internal_customer(doc)
+    )
+
+
+def _is_same_gstin_internal_delivery_note(doc) -> bool:
+    """Return True when internal DN has same billing/company GSTIN.
+
+    Returns False when either GSTIN is empty/None to avoid triggering the
+    same-GSTIN GL rewrite path for non-GST companies or documents where
+    GSTIN hasn't been populated yet.
+    """
+    billing = (doc.get("billing_address_gstin") or "").strip()
+    company = (doc.get("company_gstin") or "").strip()
+    if not billing or not company:
+        return False
+    return billing == company
+
+
+def _is_bns_internal_different_gstin_sales_invoice(doc) -> bool:
+    """Check SI is in scoped BNS internal different-GSTIN flow."""
+    if not doc or getattr(doc, "doctype", "") != "Sales Invoice":
+        return False
+    if not is_bns_internal_customer(doc):
+        return False
+    company_gstin = (doc.get("company_gstin") or "").strip()
+    billing_gstin = (doc.get("billing_address_gstin") or "").strip()
+    return bool(company_gstin and billing_gstin and company_gstin != billing_gstin)
+
+
+def _is_stale_inter_company_ref(doctype: str, docname: str, ref_name: str) -> str:
+    """
+    Check if a bns_inter_company_reference is stale and safe to clear.
+
+    Returns a non-empty reason string if the link is stale, empty string if
+    the link is active and should not be cleared.
+
+    A ref is stale when:
+      - The referenced document does not exist or is cancelled.
+      - The referenced document does not link back (its own
+        bns_inter_company_reference points elsewhere or is empty).
+    """
+    if not ref_name:
+        return "empty"
+
+    counter_doctype = {
+        "Delivery Note": "Purchase Receipt",
+        "Purchase Receipt": "Delivery Note",
+        "Sales Invoice": "Purchase Invoice",
+        "Purchase Invoice": "Sales Invoice",
+    }.get(doctype, "")
+    if not counter_doctype:
+        return ""
+
+    if not frappe.db.exists(counter_doctype, ref_name):
+        return "ref_not_exists"
+
+    ref_status = frappe.db.get_value(counter_doctype, ref_name, "docstatus")
+    if ref_status == 2:
+        return "ref_cancelled"
+
+    back_ref = (
+        frappe.db.get_value(counter_doctype, ref_name, "bns_inter_company_reference") or ""
+    ).strip()
+    if not back_ref:
+        return "ref_has_no_backref"
+    if back_ref != docname:
+        return f"ref_points_to_{back_ref}"
+
+    return ""
+
+
+def _clear_counter_backref(doctype: str, docname: str, old_ref: str) -> None:
+    """
+    When clearing a bns_inter_company_reference on one side, also clear the
+    back-reference on the other document so the pair isn't left half-linked.
+    """
+    counter_doctype = {
+        "Delivery Note": "Purchase Receipt",
+        "Purchase Receipt": "Delivery Note",
+        "Sales Invoice": "Purchase Invoice",
+        "Purchase Invoice": "Sales Invoice",
+    }.get(doctype, "")
+    if not counter_doctype or not old_ref:
+        return
+    if not frappe.db.exists(counter_doctype, old_ref):
+        return
+    back = (
+        frappe.db.get_value(counter_doctype, old_ref, "bns_inter_company_reference") or ""
+    ).strip()
+    if back == docname:
+        frappe.db.set_value(
+            counter_doctype, old_ref,
+            "bns_inter_company_reference", "",
+            update_modified=False,
+        )
+        logger.info(
+            "Cleared counter-backref on %s %s (was %s)",
+            counter_doctype, old_ref, docname,
+        )
+
+
+def _get_linked_delivery_note_for_pr(doc) -> Optional[str]:
+    """Resolve linked Delivery Note for Purchase Receipt in same-GSTIN flow."""
+    candidate = doc.get("bns_inter_company_reference")
+    if candidate and frappe.db.exists("Delivery Note", candidate):
+        return candidate
+    return None
+
+
+def _is_bns_internal_same_gstin_purchase_receipt(doc) -> bool:
+    """Check PR is in scoped BNS internal same-GSTIN DN->PR flow."""
+    if not (
+        doc
+        and doc.doctype == "Purchase Receipt"
+        and doc.docstatus == 1
+        and is_bns_internal_supplier(doc)
+        and is_after_internal_validation_cutoff(doc.get("posting_date"))
+    ):
+        return False
+
+    dn_name = _get_linked_delivery_note_for_pr(doc)
+    if not dn_name:
+        return False
+
+    dn_gstin = frappe.db.get_value("Delivery Note", dn_name, "billing_address_gstin")
+    dn_company_gstin = frappe.db.get_value("Delivery Note", dn_name, "company_gstin")
+    return bool((dn_gstin or "") == (dn_company_gstin or ""))
+
+
+def _is_bns_internal_si_linked_purchase_receipt(doc) -> bool:
+    """Check PR is in scoped SI->PR transfer flow (different GSTIN style)."""
+    if not (
+        doc
+        and doc.doctype == "Purchase Receipt"
+        and doc.docstatus == 1
+        and is_after_internal_validation_cutoff(doc.get("posting_date"))
+    ):
+        return False
+
+    source_ref = (doc.get("bns_inter_company_reference") or doc.get("supplier_delivery_note") or "").strip()
+    return bool(source_ref and frappe.db.exists("Sales Invoice", source_ref))
+
+
+def _is_bns_internal_different_gstin_purchase_invoice(doc) -> bool:
+    """Check PI is in scoped BNS internal different-GSTIN SI->PI flow."""
+    if not (
+        doc
+        and doc.doctype == "Purchase Invoice"
+        and doc.docstatus == 1
+        and is_bns_internal_supplier(doc)
+        and cint(doc.get("update_stock"))
+        and is_after_internal_validation_cutoff(doc.get("posting_date"))
+    ):
+        return False
+    source_ref = (doc.get("bns_inter_company_reference") or "").strip()
+    if not source_ref or not frappe.db.exists("Sales Invoice", source_ref):
+        return False
+    company_gstin = (doc.get("company_gstin") or "").strip()
+    billing_gstin = (doc.get("billing_address_gstin") or "").strip()
+    if not (company_gstin and billing_gstin):
+        si_gstin = frappe.db.get_value(
+            "Sales Invoice",
+            source_ref,
+            ["company_gstin", "billing_address_gstin"],
+            as_dict=True,
+        ) or {}
+        company_gstin = company_gstin or (si_gstin.get("company_gstin") or "").strip()
+        billing_gstin = billing_gstin or (si_gstin.get("billing_address_gstin") or "").strip()
+    return bool(company_gstin and billing_gstin and company_gstin != billing_gstin)
+
+
+def validate_internal_purchase_receipt_linkage(doc, method: Optional[str] = None) -> None:
+    """
+    Enforce PR linkage rules after configured cutoff.
+
+    Rules:
+    - Same GSTIN: PR must be DN-linked only.
+    - Different GSTIN: PR (if used) must be SI-linked only.
+    """
+    if doc.doctype != "Purchase Receipt":
+        return
+    source_ref = (doc.get("bns_inter_company_reference") or "").strip()
+    if not is_bns_internal_supplier(doc) and not source_ref:
+        return
+    # Hard lock PRs that carry BNS source reference, regardless of cutoff.
+    if not is_after_internal_validation_cutoff(doc.get("posting_date")) and not source_ref:
+        return
+
+    link_flags = _get_pr_source_link_flags(doc)
+    has_dn_link = bool(link_flags.get("has_dn_link"))
+    has_si_link = bool(link_flags.get("has_si_link"))
+    gst_scope = _resolve_pr_gstin_scope(doc, has_dn_link=has_dn_link, has_si_link=has_si_link)
+
+    if has_dn_link and has_si_link:
+        frappe.throw(
+            _(
+                "Purchase Receipt cannot be linked to both Delivery Note and Sales Invoice. Keep only one linkage based on GST scope."
+            ),
+            title=_("Invalid Internal PR Linkage"),
+        )
+
+    if gst_scope == "same":
+        if not has_dn_link:
+            frappe.throw(
+                _("For same GSTIN internal flow, Purchase Receipt must be linked to a Delivery Note."),
+                title=_("Invalid Internal PR Linkage"),
+            )
+        if has_si_link:
+            frappe.throw(
+                _("For same GSTIN internal flow, Purchase Receipt cannot be linked to a Sales Invoice."),
+                title=_("Invalid Internal PR Linkage"),
+            )
+        _validate_internal_pr_one_to_one_parity(doc)
+        return
+
+    if gst_scope == "different":
+        if has_dn_link:
+            frappe.throw(
+                _("For different GSTIN internal flow, Purchase Receipt cannot be linked to a Delivery Note."),
+                title=_("Invalid Internal PR Linkage"),
+            )
+        if not has_si_link:
+            frappe.throw(
+                _("For different GSTIN internal flow, Purchase Receipt must be linked to a Sales Invoice."),
+                title=_("Invalid Internal PR Linkage"),
+            )
+        _validate_internal_pr_one_to_one_parity(doc)
+        return
+
+    if not has_dn_link and not has_si_link:
+        frappe.throw(
+            _("Purchase Receipt must be linked to Delivery Note (same GSTIN) or Sales Invoice (different GSTIN)."),
+            title=_("Missing Internal PR Linkage"),
+        )
+
+    _validate_internal_pr_one_to_one_parity(doc)
+
+
+def _validate_internal_pr_one_to_one_parity(doc) -> None:
+    """Validate strict one-to-one parity for internal PR against its source."""
+    source_name = (doc.get("bns_inter_company_reference") or "").strip()
+    if not source_name:
+        return
+
+    source_doctype = None
+    source_link_field = None
+    source_doc = None
+    if frappe.db.exists("Delivery Note", source_name):
+        source_doctype = "Delivery Note"
+        source_link_field = "delivery_note_item"
+        source_doc = frappe.get_doc("Delivery Note", source_name)
+        source_items = [d for d in source_doc.get("items") or [] if flt(d.get("qty") or 0) + flt(d.get("returned_qty") or 0) > 0]
+    elif frappe.db.exists("Sales Invoice", source_name):
+        source_doctype = "Sales Invoice"
+        source_link_field = "sales_invoice_item"
+        source_doc = frappe.get_doc("Sales Invoice", source_name)
+        source_items = [d for d in source_doc.get("items") or [] if flt(d.get("qty") or 0) > 0]
+    else:
+        return
+
+    pr_items = doc.get("items") or []
+    if len(pr_items) != len(source_items):
+        frappe.throw(
+            _(
+                "Strict 1:1 validation failed: Purchase Receipt item count ({0}) must match {1} item count ({2})."
+            ).format(len(pr_items), source_doctype, len(source_items)),
+            title=_("One-to-One Validation Failed"),
+        )
+
+    source_by_name = {d.get("name"): d for d in source_items if d.get("name")}
+    seen_source_rows = set()
+
+    def _same_num(a, b, precision=6):
+        return round(flt(a or 0), precision) == round(flt(b or 0), precision)
+
+    for pr_item in pr_items:
+        src_row_name = pr_item.get(source_link_field)
+        source_item = source_by_name.get(src_row_name)
+        if not source_item:
+            frappe.throw(
+                _(
+                    "Strict 1:1 validation failed: PR item {0} is not linked to a valid {1} item."
+                ).format(pr_item.get("item_code") or pr_item.get("name"), source_doctype),
+                title=_("One-to-One Validation Failed"),
+            )
+        if src_row_name in seen_source_rows:
+            frappe.throw(
+                _("Strict 1:1 validation failed: duplicate mapping for source item {0}.").format(src_row_name),
+                title=_("One-to-One Validation Failed"),
+            )
+        seen_source_rows.add(src_row_name)
+
+        if (pr_item.get("item_code") or "") != (source_item.get("item_code") or ""):
+            frappe.throw(
+                _("Strict 1:1 validation failed: item code mismatch for source row {0}.").format(src_row_name),
+                title=_("One-to-One Validation Failed"),
+            )
+
+        for fieldname, precision in (
+            ("conversion_factor", 6),
+            ("qty", 6),
+            ("stock_qty", 6),
+            ("rate", 6),
+            ("base_rate", 6),
+            ("amount", 2),
+            ("base_amount", 2),
+            ("net_rate", 6),
+            ("base_net_rate", 6),
+            ("net_amount", 2),
+            ("base_net_amount", 2),
+        ):
+            source_val = flt(source_item.get(fieldname) or 0)
+            entered_val = flt(pr_item.get(fieldname) or 0)
+            if not _same_num(entered_val, source_val, precision=precision):
+                source_row_no = cint(source_item.get("idx") or 0)
+                label_map = {
+                    "qty": _("Quantity"),
+                    "stock_qty": _("Stock Quantity"),
+                    "conversion_factor": _("UOM Conversion Factor"),
+                    "rate": _("Rate"),
+                    "base_rate": _("Base Rate"),
+                    "amount": _("Amount"),
+                    "base_amount": _("Base Amount"),
+                    "net_rate": _("Taxable Rate"),
+                    "base_net_rate": _("Base Taxable Rate"),
+                    "net_amount": _("Taxable Amount"),
+                    "base_net_amount": _("Base Taxable Amount"),
+                }
+                value_precision = 6 if fieldname in ("qty", "stock_qty", "conversion_factor", "rate", "base_rate", "net_rate", "base_net_rate") else 2
+                frappe.throw(
+                    _(
+                        "Row {0} ({1}) does not match the source document.\n\nField: {2}\nExpected (source): {3}\nEntered in Purchase Receipt: {4}\n\nPlease make this row exactly same as source document."
+                    ).format(
+                        source_row_no or "-",
+                        pr_item.get("item_code") or pr_item.get("name"),
+                        label_map.get(fieldname, fieldname),
+                        round(source_val, value_precision),
+                        round(entered_val, value_precision),
+                    ),
+                    title=_("One-to-One Validation Failed"),
+                )
+
+        for fieldname in ("uom", "stock_uom"):
+            src_val = (source_item.get(fieldname) or "")
+            pr_val = (pr_item.get(fieldname) or "")
+            if src_val and pr_val and src_val != pr_val:
+                source_row_no = cint(source_item.get("idx") or 0)
+                label_map = {"uom": _("UOM"), "stock_uom": _("Stock UOM")}
+                frappe.throw(
+                    _(
+                        "Row {0} ({1}) does not match the source document.\n\nField: {2}\nExpected (source): {3}\nEntered in Purchase Receipt: {4}\n\nPlease make this row exactly same as source document."
+                    ).format(
+                        source_row_no or "-",
+                        pr_item.get("item_code") or pr_item.get("name"),
+                        label_map.get(fieldname, fieldname),
+                        src_val,
+                        pr_val,
+                    ),
+                    title=_("One-to-One Validation Failed"),
+                )
+
+    if len(seen_source_rows) != len(source_items):
+        frappe.throw(
+            _("Strict 1:1 validation failed: not all source items are mapped."),
+            title=_("One-to-One Validation Failed"),
+        )
+
+    for fieldname in (
+        "total",
+        "base_total",
+        "net_total",
+        "base_net_total",
+        "total_taxes_and_charges",
+        "base_total_taxes_and_charges",
+        "grand_total",
+        "base_grand_total",
+    ):
+        if not _same_num(doc.get(fieldname), source_doc.get(fieldname), precision=2):
+            frappe.throw(
+                _(
+                    "Strict 1:1 validation failed: header field {0} mismatch between Purchase Receipt and {1}."
+                ).format(fieldname, source_doctype),
+                title=_("One-to-One Validation Failed"),
+            )
+
+
+def validate_internal_purchase_invoice_linkage(doc, method: Optional[str] = None) -> None:
+    """Enforce interstate internal PI linkage after configured cutoff."""
+    if doc.doctype != "Purchase Invoice":
+        return
+    if not is_bns_internal_supplier(doc):
+        return
+    if not is_after_internal_validation_cutoff(doc.get("posting_date")):
+        return
+
+    company_gstin = (doc.get("company_gstin") or "").strip()
+    billing_gstin = (doc.get("billing_address_gstin") or "").strip()
+    if not (company_gstin and billing_gstin and company_gstin != billing_gstin):
+        return
+
+    ref_name = (doc.get("bns_inter_company_reference") or "").strip()
+    has_si_link = bool(ref_name and frappe.db.exists("Sales Invoice", ref_name))
+
+    valid_pr_link = False
+    pr_names = sorted(
+        {
+            (item.get("purchase_receipt") or "").strip()
+            for item in (doc.get("items") or [])
+            if item.get("purchase_receipt")
+        }
+    )
+    for pr_name in pr_names:
+        pr_link = frappe.db.get_value(
+            "Purchase Receipt",
+            pr_name,
+            ["bns_inter_company_reference"],
+            as_dict=True,
+        )
+        if not pr_link:
+            continue
+        ref_candidates = [(pr_link.get("bns_inter_company_reference") or "").strip()]
+        pr_has_si = any(ref and frappe.db.exists("Sales Invoice", ref) for ref in ref_candidates)
+        pr_has_dn = any(ref and frappe.db.exists("Delivery Note", ref) for ref in ref_candidates)
+        if pr_has_si and not pr_has_dn:
+            valid_pr_link = True
+            break
+
+    if has_si_link or valid_pr_link:
+        return
+
+    frappe.throw(
+        _(
+            "For different GSTIN internal flow, Purchase Invoice must be linked to Sales Invoice directly or through a PR that is SI-linked."
+        ),
+        title=_("Invalid Internal PI Linkage"),
+    )
+
+
+def validate_internal_purchase_invoice_transfer_rate(doc, method: Optional[str] = None) -> None:
+    """Require PI item transfer-rate for internal SI-linked update-stock PI rows."""
+    if doc.doctype != "Purchase Invoice":
+        return
+    if not cint(doc.get("update_stock")):
+        return
+    if not is_bns_internal_supplier(doc):
+        return
+    if not is_after_internal_validation_cutoff(doc.get("posting_date")):
+        return
+
+    source_ref = (doc.get("bns_inter_company_reference") or "").strip()
+    if not source_ref or not frappe.db.exists("Sales Invoice", source_ref):
+        return
+
+    pii_meta = frappe.get_meta("Purchase Invoice Item")
+    if not pii_meta.has_field("bns_transfer_rate"):
+        return
+
+    missing_rows = []
+    for item in (doc.get("items") or []):
+        if flt(item.get("qty") or 0) <= 0:
+            continue
+        if flt(item.get("bns_transfer_rate") or 0) > 0:
+            continue
+        # Skip non-stock rows in update_stock PI only if item is actually non-stock.
+        if item.get("item_code") and not cint(frappe.db.get_value("Item", item.get("item_code"), "is_stock_item")):
+            continue
+        missing_rows.append(f"#{cint(item.get('idx') or 0) or '?'} {item.get('item_code') or item.get('item_name') or item.get('name')}")
+
+    if missing_rows:
+        frappe.throw(
+            _(
+                "Internal SI->PI transfer-rate is missing for these rows: {0}. "
+                "Please fetch SI incoming_rate into bns_transfer_rate before submit."
+            ).format(", ".join(missing_rows)),
+            title=_("Missing Internal Transfer Rate"),
+        )
+
+
+def _throw_si_dn_mismatch(
+    source_item,
+    entered_item,
+    field_label: str,
+    expected_value,
+    entered_value,
+    precision: int = 2,
+) -> None:
+    row_no = cint(source_item.get("idx") or 0) or "-"
+    item_code = entered_item.get("item_code") or source_item.get("item_code") or entered_item.get("name")
+    expected_out = round(flt(expected_value or 0), precision) if isinstance(expected_value, (int, float)) else expected_value
+    entered_out = round(flt(entered_value or 0), precision) if isinstance(entered_value, (int, float)) else entered_value
+    frappe.throw(
+        _(
+            "Row {0} ({1}) does not match Delivery Note.\n\nField: {2}\nExpected (Delivery Note): {3}\nEntered in Sales Invoice: {4}\n\nPlease make this row exactly same as Delivery Note."
+        ).format(row_no, item_code, field_label, expected_out, entered_out),
+        title=_("One-to-One Validation Failed"),
+    )
+
+
+def _validate_single_internal_si_per_dn(doc, dn_names: List[str]) -> None:
+    """Block creating another internal SI (draft/submitted) for same DN context."""
+    if not dn_names:
+        return
+
+    si_item_rows = frappe.get_all(
+        "Sales Invoice Item",
+        filters={
+            "delivery_note": ("in", dn_names),
+            "parent": ("!=", doc.name or ""),
+            "docstatus": ("in", [0, 1]),
+        },
+        fields=["parent", "delivery_note"],
+    )
+    if not si_item_rows:
+        return
+
+    checked_parents = set()
+    for row in si_item_rows:
+        parent = row.get("parent")
+        if not parent or parent in checked_parents:
+            continue
+        checked_parents.add(parent)
+        parent_meta = frappe.db.get_value(
+            "Sales Invoice",
+            parent,
+            ["name", "docstatus", "is_return", "is_bns_internal_customer", "customer"],
+            as_dict=True,
+        )
+        if not parent_meta or cint(parent_meta.get("is_return")):
+            continue
+        parent_is_internal = bool(parent_meta.get("is_bns_internal_customer"))
+        if not parent_is_internal and parent_meta.get("customer"):
+            parent_is_internal = bool(
+                frappe.db.get_value("Customer", parent_meta.get("customer"), "is_bns_internal_customer")
+            )
+        if not parent_is_internal:
+            continue
+
+        frappe.throw(
+            _(
+                "Delivery Note {0} is already linked to Sales Invoice {1} ({2}). You cannot create another internal Sales Invoice for the same Delivery Note."
+            ).format(
+                row.get("delivery_note"),
+                parent_meta.get("name"),
+                _docstatus_label(parent_meta.get("docstatus")),
+            ),
+            title=_("Duplicate Internal Sales Invoice Not Allowed"),
+        )
+
+
+def _validate_internal_si_dn_one_to_one_parity(doc, dn_names: List[str]) -> None:
+    """Validate strict one-to-one parity for internal SI rows mapped from DN."""
+    if not dn_names:
+        return
+
+    source_dns = [frappe.get_doc("Delivery Note", dn_name) for dn_name in dn_names if frappe.db.exists("Delivery Note", dn_name)]
+    if not source_dns:
+        return
+
+    source_rows = []
+    source_row_map = {}
+    source_totals = defaultdict(float)
+    for dn in source_dns:
+        dn_rows = [d for d in (dn.get("items") or []) if flt(d.get("qty") or 0) > 0]
+        for row in dn_rows:
+            key = (dn.name, row.get("name"))
+            source_rows.append((dn.name, row))
+            source_row_map[key] = row
+        for fieldname in (
+            "total",
+            "base_total",
+            "net_total",
+            "base_net_total",
+            "grand_total",
+            "base_grand_total",
+        ):
+            source_totals[fieldname] += flt(dn.get(fieldname) or 0)
+
+    si_items = [d for d in (doc.get("items") or []) if d.get("delivery_note")]
+    if len(si_items) != len(source_rows):
+        frappe.throw(
+            _(
+                "Strict 1:1 validation failed: Sales Invoice has {0} Delivery Note-linked rows, but source Delivery Note rows are {1}. Please keep rows exactly one-to-one."
+            ).format(len(si_items), len(source_rows)),
+            title=_("One-to-One Validation Failed"),
+        )
+
+    seen_source_rows = set()
+
+    def _same_num(a, b, precision=6):
+        return round(flt(a or 0), precision) == round(flt(b or 0), precision)
+
+    for si_item in si_items:
+        dn_name = (si_item.get("delivery_note") or "").strip()
+        dn_detail = (si_item.get("dn_detail") or "").strip()
+        if not dn_detail:
+            frappe.throw(
+                _(
+                    "Row {0} ({1}) is missing Delivery Note Row reference (dn_detail). Please fetch items from Delivery Note again."
+                ).format(cint(si_item.get("idx") or 0) or "-", si_item.get("item_code") or si_item.get("name")),
+                title=_("One-to-One Validation Failed"),
+            )
+        source_item = source_row_map.get((dn_name, dn_detail))
+        if not source_item:
+            frappe.throw(
+                _(
+                    "Row {0} ({1}) is not linked to a valid Delivery Note row. Please reselect the correct Delivery Note item."
+                ).format(cint(si_item.get("idx") or 0) or "-", si_item.get("item_code") or si_item.get("name")),
+                title=_("One-to-One Validation Failed"),
+            )
+        source_key = (dn_name, dn_detail)
+        if source_key in seen_source_rows:
+            frappe.throw(
+                _(
+                    "Delivery Note row {0} is mapped more than once. Each Delivery Note row can be used only once in Sales Invoice."
+                ).format(cint(source_item.get("idx") or 0) or "-"),
+                title=_("One-to-One Validation Failed"),
+            )
+        seen_source_rows.add(source_key)
+
+        if (si_item.get("item_code") or "") != (source_item.get("item_code") or ""):
+            _throw_si_dn_mismatch(
+                source_item,
+                si_item,
+                _("Item Code"),
+                source_item.get("item_code"),
+                si_item.get("item_code"),
+                precision=0,
+            )
+
+        for fieldname, precision, label in (
+            ("conversion_factor", 6, _("UOM Conversion Factor")),
+            ("qty", 6, _("Quantity")),
+            ("stock_qty", 6, _("Stock Quantity")),
+            ("rate", 6, _("Rate")),
+            ("base_rate", 6, _("Base Rate")),
+            ("amount", 2, _("Amount")),
+            ("base_amount", 2, _("Base Amount")),
+            ("net_rate", 6, _("Taxable Rate")),
+            ("base_net_rate", 6, _("Base Taxable Rate")),
+            ("net_amount", 2, _("Taxable Amount")),
+            ("base_net_amount", 2, _("Base Taxable Amount")),
+        ):
+            if not _same_num(si_item.get(fieldname), source_item.get(fieldname), precision=precision):
+                _throw_si_dn_mismatch(
+                    source_item,
+                    si_item,
+                    label,
+                    source_item.get(fieldname),
+                    si_item.get(fieldname),
+                    precision=precision,
+                )
+
+        for fieldname, label in (("uom", _("UOM")), ("stock_uom", _("Stock UOM"))):
+            src_val = (source_item.get(fieldname) or "")
+            si_val = (si_item.get(fieldname) or "")
+            if src_val and si_val and src_val != si_val:
+                _throw_si_dn_mismatch(source_item, si_item, label, src_val, si_val, precision=0)
+
+    if len(seen_source_rows) != len(source_rows):
+        frappe.throw(
+            _(
+                "Strict 1:1 validation failed: all Delivery Note rows are not mapped in Sales Invoice. Please include every row exactly once."
+            ),
+            title=_("One-to-One Validation Failed"),
+        )
+
+    for fieldname, label in (
+        ("net_total", _("Taxable Total")),
+        ("base_net_total", _("Base Taxable Total")),
+        ("grand_total", _("Grand Total")),
+        ("base_grand_total", _("Base Grand Total")),
+    ):
+        source_val = round(flt(source_totals.get(fieldname) or 0), 2)
+        entered_val = round(flt(doc.get(fieldname) or 0), 2)
+        if source_val != entered_val:
+            frappe.throw(
+                _(
+                    "{0} does not match Delivery Note total.\n\nExpected (Delivery Notes): {1}\nEntered in Sales Invoice: {2}\n\nPlease keep taxable and grand totals exactly same as Delivery Note."
+                ).format(label, source_val, entered_val),
+                title=_("One-to-One Validation Failed"),
+            )
+
+
+def validate_internal_sales_invoice_linkage(doc, method: Optional[str] = None) -> None:
+    """Enforce internal SI different-GSTIN and DN strict parity after cutoff."""
+    if doc.doctype != "Sales Invoice":
+        return
+    if cint(doc.get("is_return")):
+        return
+    if not is_bns_internal_customer(doc):
+        return
+    if not is_after_internal_validation_cutoff(doc.get("posting_date")):
+        return
+
+    company_gstin = (doc.get("company_gstin") or "").strip()
+    billing_gstin = (doc.get("billing_address_gstin") or "").strip()
+    if not company_gstin or not billing_gstin:
+        frappe.throw(
+            _("GSTIN is missing on Sales Invoice. Internal Sales Invoice requires both Company GSTIN and Billing GSTIN."),
+            title=_("GSTIN Required"),
+        )
+    if company_gstin == billing_gstin:
+        frappe.throw(
+            _("Internal Sales Invoice is allowed only when Company GSTIN and Billing GSTIN are different."),
+            title=_("Invalid Internal Sales Invoice"),
+        )
+
+    dn_names = sorted(
+        {
+            (item.get("delivery_note") or "").strip()
+            for item in (doc.get("items") or [])
+            if (item.get("delivery_note") or "").strip()
+        }
+    )
+    if not dn_names:
+        return
+
+    _validate_single_internal_si_per_dn(doc, dn_names)
+    _validate_internal_si_dn_one_to_one_parity(doc, dn_names)
+
+
+@frappe.whitelist()
+def check_existing_internal_si_for_dn(delivery_notes: List[str], current_si: Optional[str] = None) -> Dict[str, Any]:
+    """UI helper to check duplicate internal SI existence for DN context."""
+    dn_names = sorted({(d or "").strip() for d in (delivery_notes or []) if (d or "").strip()})
+    if not dn_names:
+        return {"exists": False}
+
+    si_item_rows = frappe.get_all(
+        "Sales Invoice Item",
+        filters={
+            "delivery_note": ("in", dn_names),
+            "parent": ("!=", current_si or ""),
+            "docstatus": ("in", [0, 1]),
+        },
+        fields=["parent", "delivery_note"],
+        order_by="modified desc",
+    )
+    if not si_item_rows:
+        return {"exists": False}
+
+    seen = set()
+    for row in si_item_rows:
+        si_name = row.get("parent")
+        if not si_name or si_name in seen:
+            continue
+        seen.add(si_name)
+        si_meta = frappe.db.get_value(
+            "Sales Invoice",
+            si_name,
+            ["name", "docstatus", "is_return", "is_bns_internal_customer", "customer"],
+            as_dict=True,
+        )
+        if not si_meta or cint(si_meta.get("is_return")):
+            continue
+        si_internal = bool(si_meta.get("is_bns_internal_customer"))
+        if not si_internal and si_meta.get("customer"):
+            si_internal = bool(
+                frappe.db.get_value("Customer", si_meta.get("customer"), "is_bns_internal_customer")
+            )
+        if not si_internal:
+            continue
+        return {
+            "exists": True,
+            "sales_invoice": si_meta.get("name"),
+            "docstatus": cint(si_meta.get("docstatus")),
+            "docstatus_label": _docstatus_label(si_meta.get("docstatus")),
+            "delivery_note": row.get("delivery_note"),
+        }
+
+    return {"exists": False}
+
+
+# Temporarily disabled unused helper (kept commented for rollback safety).
+# def _get_dn_item_transfer_rate_for_gl(dn_item) -> float:
+#     """Get transfer rate from Delivery Note Item incoming_rate with DB fallback."""
+#     rate = flt(dn_item.get("incoming_rate") or 0)
+#     if rate > 0:
+#         return rate
+#
+#     if dn_item.get("name") and frappe.db.exists("Delivery Note Item", dn_item.get("name")):
+#         return flt(frappe.db.get_value("Delivery Note Item", dn_item.get("name"), "incoming_rate") or 0)
+#
+#     return 0
+
+
+def _resolve_dn_transfer_amount(doc, force_mode: bool = False) -> Tuple[float, str]:
+    """Resolve DN transfer amount from billing rate side (not valuation).
+
+    Zero-rate items (samples, free goods) are skipped without blocking the
+    rewrite — only items with positive qty AND zero rate after all fallbacks
+    are treated as "missing" in non-force mode.
+    """
+    total = 0.0
+    missing = False
+    for item in doc.get("items") or []:
+        line_amount = flt(item.get("base_net_amount") or 0)
+        if line_amount <= 0:
+            line_amount = flt(item.get("base_amount") or 0)
+        if line_amount <= 0:
+            qty = abs(flt(item.get("qty") or 0))
+            rate = flt(item.get("base_net_rate") or item.get("rate") or 0)
+            line_amount = qty * rate
+
+        if line_amount <= 0:
+            item_rate = flt(item.get("rate") or 0)
+            if item_rate <= 0:
+                continue
+            missing = True
+            continue
+        total += line_amount
+
+    if total <= 0:
+        return 0.0, "no_transfer_amount"
+    if missing and not force_mode:
+        return 0.0, "missing_item_transfer_rate"
+    return total, ""
+
+
+def _resolve_pr_transfer_amount(doc, force_mode: bool = False) -> Tuple[float, str]:
+    """Resolve PR transfer amount from billing rate side (not valuation).
+
+    Zero-rate items (samples, free goods) are skipped without blocking the
+    rewrite — only items with positive qty AND zero rate after all fallbacks
+    are treated as "missing" in non-force mode.
+    """
+    total = 0.0
+    missing = False
+    for item in doc.get("items") or []:
+        line_amount = flt(item.get("base_net_amount") or 0)
+        if line_amount <= 0:
+            line_amount = flt(item.get("base_amount") or 0)
+        if line_amount <= 0:
+            qty = abs(flt(item.get("qty") or 0))
+            rate = flt(item.get("base_net_rate") or item.get("rate") or 0)
+            line_amount = qty * rate
+
+        if line_amount <= 0:
+            item_rate = flt(item.get("rate") or 0)
+            if item_rate <= 0:
+                continue
+            missing = True
+            continue
+        total += line_amount
+
+    if total <= 0:
+        return 0.0, "no_transfer_amount"
+    if missing and not force_mode:
+        return 0.0, "missing_item_transfer_rate"
+    return total, ""
+
+
+def _resolve_valuation_from_gl_entries(
+    gl_entries: List[Dict[str, Any]], side: str, company: Optional[str] = None
+) -> Tuple[float, Optional[str], str]:
+    """Resolve valuation amount and stock account from generated GL entries."""
+    if side not in ("debit", "credit"):
+        return 0.0, None, "invalid_side"
+
+    stock_accounts = set()
+    if company:
+        try:
+            from erpnext.stock import get_warehouse_account_map
+
+            warehouse_map = get_warehouse_account_map(company)
+            for row in (warehouse_map or {}).values():
+                account = row.get("account")
+                if account:
+                    stock_accounts.add(account)
+        except Exception:
+            pass
+
+    # Fallback heuristic for setups where warehouse account map is unavailable.
+    if not stock_accounts and gl_entries:
+        for row in gl_entries:
+            account = (row.get("account") or "").strip()
+            if "stock in hand" in account.lower():
+                stock_accounts.add(account)
+    # Strong fallback: detect stock accounts from Account.account_type
+    # so custom account naming does not break BNS rewrite.
+    if not stock_accounts and gl_entries:
+        for row in gl_entries:
+            account = (row.get("account") or "").strip()
+            if not account:
+                continue
+            try:
+                if frappe.get_cached_value("Account", account, "account_type") == "Stock":
+                    stock_accounts.add(account)
+            except Exception:
+                continue
+
+    if not stock_accounts:
+        return 0.0, None, "no_stock_accounts"
+
+    stock_side_entries = [
+        row
+        for row in (gl_entries or [])
+        if row.get("account") in stock_accounts and flt(row.get(side) or 0) > 0
+    ]
+    if not stock_side_entries:
+        return 0.0, None, "no_stock_side_entries"
+
+    accounts = {row.get("account") for row in stock_side_entries if row.get("account")}
+    if len(accounts) != 1:
+        return 0.0, None, "multiple_stock_accounts"
+
+    valuation_amount = sum(flt(row.get(side) or 0) for row in stock_side_entries)
+    if valuation_amount <= 0:
+        return 0.0, None, "non_positive_valuation_amount"
+
+    return valuation_amount, next(iter(accounts)), ""
+
+
+def _make_bns_gl_entry(doc, account: str, debit: float = 0.0, credit: float = 0.0, against: str = "", template: Optional[Dict[str, Any]] = None):
+    """Build GL entry while preserving dimensions from template."""
+    template = template or {}
+    party_type = None
+    party = None
+    cost_center = template.get("cost_center")
+
+    # In BNS rewrite, party fields are allowed only on internal branch debtor/creditor accounts.
+    # Non receivable/payable GL rows (e.g. internal transfer, tax, stock) must not carry party.
+    debtor_account = frappe.db.get_single_value(
+        "BNS Branch Accounting Settings", "internal_branch_debtor_account"
+    )
+    creditor_account = frappe.db.get_single_value(
+        "BNS Branch Accounting Settings", "internal_branch_creditor_account"
+    )
+    if account == debtor_account or account == creditor_account:
+        party_type = template.get("party_type")
+        party = template.get("party")
+        if not party_type or not party:
+            if account == debtor_account:
+                party_type = "Customer"
+                party = getattr(doc, "customer", None)
+            elif account == creditor_account:
+                party_type = "Supplier"
+                party = getattr(doc, "supplier", None)
+
+    # Cost center is mandatory for many P&L account entries in ERPNext.
+    # Keep template value when present; else fall back to document-level and company default.
+    if not cost_center:
+        cost_center = getattr(doc, "cost_center", None) or doc.get("cost_center")
+    if not cost_center:
+        cost_center = frappe.get_cached_value("Company", doc.company, "cost_center") if doc.get("company") else None
+
+    # Preserve ERPNext accounting dimensions on rewritten GL rows.
+    # Precedence: source GL template row value > document-level value.
+    dimension_args: Dict[str, Any] = {}
+    for dimension in get_accounting_dimensions():
+        dim_val = template.get(dimension)
+        if dim_val in (None, ""):
+            dim_val = doc.get(dimension)
+        if dim_val not in (None, ""):
+            dimension_args[dimension] = dim_val
+
+    args = {
+        "account": account,
+        "debit": flt(debit),
+        "credit": flt(credit),
+        "against": against,
+        "party_type": party_type,
+        "party": party,
+        "cost_center": cost_center,
+        "project": template.get("project"),
+        "finance_book": template.get("finance_book"),
+        "remarks": template.get("remarks") or _("BNS internal transfer accounting rewrite"),
+    }
+    args.update(dimension_args)
+    return doc.get_gl_dict(args)
+
+
+def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Rewrite DN GL entries into BNS internal branch-accounting pattern."""
+    if not _is_bns_internal_delivery_note(doc):
+        return gl_entries
+
+    settings = _get_bns_branch_accounting_accounts()
+    if not settings:
+        return gl_entries
+
+    force_mode = bool(settings.get("force_bns_internal_gl_rewrite"))
+    valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
+        gl_entries, side="credit", company=doc.company
+    )
+
+    if valuation_amount <= 0 or not stock_account:
+        logger.warning(
+            "Skipping DN GL rewrite for %s due to valuation_reason=%s",
+            doc.name,
+            valuation_reason or "ok",
+        )
+        return gl_entries
+
+    template = next((row for row in gl_entries if row.get("account") == stock_account and flt(row.get("credit") or 0) > 0), None)
+    if not template and gl_entries:
+        template = gl_entries[0]
+    if not template:
+        return gl_entries
+
+    if _is_same_gstin_internal_delivery_note(doc):
+        if not settings.get("internal_sales_transfer_account"):
+            logger.warning("Skipping DN GL rewrite for %s due to missing internal_sales_transfer_account", doc.name)
+            return gl_entries
+
+        transfer_amount, transfer_reason = _resolve_dn_transfer_amount(doc, force_mode=force_mode)
+        if transfer_amount <= 0:
+            logger.warning(
+                "Skipping DN GL rewrite for %s due to transfer_reason=%s",
+                doc.name,
+                transfer_reason or "ok",
+            )
+            return gl_entries
+
+        rewritten = [
+            _make_bns_gl_entry(doc, settings["internal_branch_debtor_account"], debit=transfer_amount, against=settings["internal_sales_transfer_account"], template=template),
+            _make_bns_gl_entry(doc, settings["stock_in_transit_account"], debit=valuation_amount, against=stock_account, template=template),
+            _make_bns_gl_entry(doc, settings["internal_sales_transfer_account"], credit=transfer_amount, against=settings["internal_branch_debtor_account"], template=template),
+            _make_bns_gl_entry(doc, stock_account, credit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
+        ]
+    else:
+        # Different GSTIN internal DN: keep billing flow unchanged, move valuation to stock-in-transit.
+        if not settings.get("stock_in_transit_account"):
+            logger.warning("Skipping DN GL rewrite for %s due to missing stock_in_transit_account", doc.name)
+            return gl_entries
+        rewritten = [
+            _make_bns_gl_entry(doc, settings["stock_in_transit_account"], debit=valuation_amount, against=stock_account, template=template),
+            _make_bns_gl_entry(doc, stock_account, credit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
+        ]
+
+    debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
+    credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
+    if abs(debit_total - credit_total) > 0.5:
+        logger.error("Skipping DN GL rewrite for %s due to balance mismatch %s vs %s", doc.name, debit_total, credit_total)
+        return gl_entries
+
+    return rewritten
+
+
+def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Rewrite PR GL entries into BNS internal branch-accounting pattern."""
+    is_dn_same_gstin_scope = _is_bns_internal_same_gstin_purchase_receipt(doc)
+    is_si_linked_scope = _is_bns_internal_si_linked_purchase_receipt(doc)
+    if not (is_dn_same_gstin_scope or is_si_linked_scope):
+        return gl_entries
+
+    settings = _get_bns_branch_accounting_accounts()
+    if not settings:
+        return gl_entries
+    if not settings.get("stock_in_transit_account"):
+        logger.warning("Skipping PR GL rewrite for %s due to missing stock_in_transit_account", doc.name)
+        return gl_entries
+    if is_dn_same_gstin_scope and not settings.get("internal_purchase_transfer_account"):
+        logger.warning("Skipping PR GL rewrite for %s due to missing internal_purchase_transfer_account", doc.name)
+        return gl_entries
+
+    force_mode = bool(settings.get("force_bns_internal_gl_rewrite"))
+    transfer_amount, transfer_reason = _resolve_pr_transfer_amount(doc, force_mode=force_mode)
+    valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
+        gl_entries, side="debit", company=doc.company
+    )
+
+    if valuation_amount <= 0 or not stock_account:
+        logger.warning(
+            "Skipping PR GL rewrite for %s due to transfer_reason=%s valuation_reason=%s",
+            doc.name,
+            transfer_reason or "ok",
+            valuation_reason or "ok",
+        )
+        return gl_entries
+
+    template = next((row for row in gl_entries if row.get("account") == stock_account and flt(row.get("debit") or 0) > 0), None)
+    if not template and gl_entries:
+        template = gl_entries[0]
+    if not template:
+        return gl_entries
+
+    if is_dn_same_gstin_scope:
+        if transfer_amount <= 0:
+            logger.warning(
+                "Skipping PR GL rewrite for %s due to transfer_reason=%s",
+                doc.name,
+                transfer_reason or "ok",
+            )
+            return gl_entries
+        rewritten = [
+            _make_bns_gl_entry(doc, settings["internal_purchase_transfer_account"], debit=transfer_amount, against=settings["internal_branch_creditor_account"], template=template),
+            _make_bns_gl_entry(doc, stock_account, debit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
+            _make_bns_gl_entry(doc, settings["internal_branch_creditor_account"], credit=transfer_amount, against=settings["internal_purchase_transfer_account"], template=template),
+            _make_bns_gl_entry(doc, settings["stock_in_transit_account"], credit=valuation_amount, against=stock_account, template=template),
+        ]
+    else:
+        # SI->PR strict valuation leg: Stock In Hand Dr, Stock In Transit Cr.
+        rewritten = [
+            _make_bns_gl_entry(doc, stock_account, debit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
+            _make_bns_gl_entry(doc, settings["stock_in_transit_account"], credit=valuation_amount, against=stock_account, template=template),
+        ]
+
+    debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
+    credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
+    if abs(debit_total - credit_total) > 0.5:
+        logger.error("Skipping PR GL rewrite for %s due to balance mismatch %s vs %s", doc.name, debit_total, credit_total)
+        return gl_entries
+
+    return rewritten
+
+
+def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Rewrite PI GL entries into BNS internal SI->PI stock-transfer pattern."""
+    if not (doc and doc.doctype == "Purchase Invoice" and doc.docstatus == 1):
+        return gl_entries
+    if not _is_bns_internal_purchase_invoice_from_si(doc):
+        return gl_entries
+
+    settings = _get_bns_branch_accounting_accounts()
+    if not settings:
+        return gl_entries
+    if not settings.get("internal_purchase_transfer_account"):
+        logger.warning("Skipping PI GL rewrite for %s due to missing internal_purchase_transfer_account", doc.name)
+        return gl_entries
+
+    is_return = cint(doc.get("is_return"))
+    grand_total = flt(doc.get("base_grand_total") or doc.get("base_rounded_total") or 0)
+    taxable_total = flt(doc.get("base_net_total") or doc.get("base_total") or 0)
+    tax_by_account = _resolve_pi_tax_account_amounts(doc)
+
+    if is_return:
+        grand_total = abs(grand_total)
+        taxable_total = abs(taxable_total)
+
+    if grand_total <= 0 or taxable_total < 0:
+        logger.warning("Skipping PI GL rewrite for %s due to invalid totals", doc.name)
+        return gl_entries
+
+    creditor_side = "debit" if is_return else "credit"
+    transfer_side = "credit" if is_return else "debit"
+
+    creditor_template = next(
+        (
+            row
+            for row in (gl_entries or [])
+            if row.get("account") == settings["internal_branch_creditor_account"] and flt(row.get(creditor_side) or 0) > 0
+        ),
+        None,
+    )
+    if not creditor_template:
+        creditor_template = next((row for row in (gl_entries or []) if flt(row.get(creditor_side) or 0) > 0), None)
+    if not creditor_template and gl_entries:
+        creditor_template = gl_entries[0]
+    if not creditor_template:
+        return gl_entries
+
+    rewritten = [
+        _make_bns_gl_entry(
+            doc,
+            settings["internal_branch_creditor_account"],
+            **{creditor_side: grand_total},
+            against=settings["internal_purchase_transfer_account"],
+            template=creditor_template,
+        ),
+        _make_bns_gl_entry(
+            doc,
+            settings["internal_purchase_transfer_account"],
+            **{transfer_side: taxable_total},
+            against=settings["internal_branch_creditor_account"],
+            template=creditor_template,
+        ),
+    ]
+
+    for tax_account, tax_amount in sorted(tax_by_account.items()):
+        tax_template = next(
+            (
+                row
+                for row in (gl_entries or [])
+                if row.get("account") == tax_account
+                and (flt(row.get("debit") or 0) > 0 or flt(row.get("credit") or 0) > 0)
+            ),
+            creditor_template,
+        )
+        abs_tax = abs(tax_amount)
+        if is_return:
+            tax_positive_side = "credit" if tax_amount > 0 else "debit"
+        else:
+            tax_positive_side = "debit" if tax_amount > 0 else "credit"
+        rewritten.append(
+            _make_bns_gl_entry(
+                doc,
+                tax_account,
+                **{tax_positive_side: abs_tax},
+                against=settings["internal_branch_creditor_account"],
+                template=tax_template,
+            )
+        )
+
+    has_pr_linked_rows = any((row.get("purchase_receipt") or "").strip() for row in (doc.get("items") or []))
+
+    if cint(doc.get("update_stock")) and not has_pr_linked_rows:
+        stock_gl_side = "debit" if not is_return else "credit"
+        valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
+            gl_entries, side=stock_gl_side, company=doc.company
+        )
+        if valuation_amount <= 0 or not stock_account:
+            logger.warning(
+                "Skipping PI stock-leg rewrite for %s due to valuation_reason=%s",
+                doc.name,
+                valuation_reason or "ok",
+            )
+            return gl_entries
+        stock_template = next(
+            (
+                row
+                for row in (gl_entries or [])
+                if row.get("account") == stock_account and flt(row.get(stock_gl_side) or 0) > 0
+            ),
+            creditor_template,
+        )
+        transit_side = "credit" if not is_return else "debit"
+        rewritten.append(
+            _make_bns_gl_entry(
+                doc,
+                stock_account,
+                **{stock_gl_side: valuation_amount},
+                against=settings["stock_in_transit_account"],
+                template=stock_template,
+            )
+        )
+        rewritten.append(
+            _make_bns_gl_entry(
+                doc,
+                settings["stock_in_transit_account"],
+                **{transit_side: valuation_amount},
+                against=stock_account,
+                template=stock_template,
+            )
+        )
+
+    debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
+    credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
+    if abs(debit_total - credit_total) > 0.5:
+        logger.error("Skipping PI GL rewrite for %s due to balance mismatch %s vs %s", doc.name, debit_total, credit_total)
+        return gl_entries
+
+    return rewritten
+
+
+def _resolve_pi_tax_account_amounts(doc) -> Dict[str, float]:
+    """Aggregate PI tax/charge amounts account-wise in base currency."""
+    account_amounts: Dict[str, float] = defaultdict(float)
+    for tax in (doc.get("taxes") or []):
+        account = (tax.get("account_head") or "").strip()
+        if not account:
+            continue
+        base_amount = flt(
+            tax.get("base_tax_amount_after_discount_amount")
+            or tax.get("base_tax_amount")
+            or 0
+        )
+        if abs(base_amount) <= 0.000001:
+            continue
+        account_amounts[account] += base_amount
+    return dict(account_amounts)
+
+
+def _resolve_si_tax_account_amounts(doc) -> Dict[str, float]:
+    """Aggregate SI tax/charge amounts account-wise in base currency."""
+    account_amounts: Dict[str, float] = defaultdict(float)
+    for tax in (doc.get("taxes") or []):
+        account = (tax.get("account_head") or "").strip()
+        if not account:
+            continue
+        base_amount = flt(
+            tax.get("base_tax_amount_after_discount_amount")
+            or tax.get("base_tax_amount")
+            or 0
+        )
+        if abs(base_amount) <= 0.000001:
+            continue
+        account_amounts[account] += base_amount
+    return dict(account_amounts)
+
+
+def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Rewrite SI GL entries into BNS internal different-GSTIN pattern."""
+    if not _is_bns_internal_different_gstin_sales_invoice(doc):
+        return gl_entries
+    if not is_after_internal_validation_cutoff(doc.get("posting_date")):
+        return gl_entries
+
+    settings = _get_bns_branch_accounting_accounts()
+    if not settings:
+        return gl_entries
+    if not settings.get("internal_sales_transfer_account"):
+        logger.warning("Skipping SI GL rewrite for %s due to missing internal_sales_transfer_account", doc.name)
+        return gl_entries
+
+    debtor_account = settings["internal_branch_debtor_account"]
+    transfer_account = settings["internal_sales_transfer_account"]
+    is_return = cint(doc.get("is_return"))
+    grand_total = flt(doc.get("base_grand_total") or doc.get("base_rounded_total") or 0)
+    taxable_total = flt(doc.get("base_net_total") or doc.get("base_total") or 0)
+    tax_by_account = _resolve_si_tax_account_amounts(doc)
+
+    if is_return:
+        grand_total = abs(grand_total)
+        taxable_total = abs(taxable_total)
+
+    if grand_total <= 0 or taxable_total < 0:
+        logger.warning("Skipping SI GL rewrite for %s due to invalid totals", doc.name)
+        return gl_entries
+
+    debtor_side = "credit" if is_return else "debit"
+    transfer_side = "debit" if is_return else "credit"
+
+    debtor_template = next(
+        (
+            row
+            for row in (gl_entries or [])
+            if row.get("account") == debtor_account and flt(row.get(debtor_side) or 0) > 0
+        ),
+        None,
+    )
+    if not debtor_template:
+        debtor_template = next((row for row in (gl_entries or []) if flt(row.get(debtor_side) or 0) > 0), None)
+    if not debtor_template and gl_entries:
+        debtor_template = gl_entries[0]
+    if not debtor_template:
+        return gl_entries
+
+    rewritten = [
+        _make_bns_gl_entry(
+            doc,
+            debtor_account,
+            **{debtor_side: grand_total},
+            against=transfer_account,
+            template=debtor_template,
+        )
+    ]
+
+    for tax_account, tax_amount in sorted(tax_by_account.items()):
+        tax_template = next(
+            (
+                row
+                for row in (gl_entries or [])
+                if row.get("account") == tax_account
+                and (flt(row.get("debit") or 0) > 0 or flt(row.get("credit") or 0) > 0)
+            ),
+            debtor_template,
+        )
+        abs_tax = abs(tax_amount)
+        if is_return:
+            tax_positive_side = "debit" if tax_amount > 0 else "credit"
+        else:
+            tax_positive_side = "credit" if tax_amount > 0 else "debit"
+        rewritten.append(
+            _make_bns_gl_entry(
+                doc,
+                tax_account,
+                **{tax_positive_side: abs_tax},
+                against=debtor_account,
+                template=tax_template,
+            )
+        )
+
+    rewritten.append(
+        _make_bns_gl_entry(
+            doc,
+            transfer_account,
+            **{transfer_side: taxable_total},
+            against=debtor_account,
+            template=debtor_template,
+        )
+    )
+
+    if cint(doc.get("update_stock")):
+        stock_gl_side = "credit" if not is_return else "debit"
+        valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
+            gl_entries, side=stock_gl_side, company=doc.company
+        )
+        if valuation_amount <= 0 or not stock_account:
+            logger.warning(
+                "Skipping SI stock-leg rewrite for %s due to valuation_reason=%s",
+                doc.name,
+                valuation_reason or "ok",
+            )
+            return gl_entries
+        stock_template = next(
+            (
+                row
+                for row in (gl_entries or [])
+                if row.get("account") == stock_account and flt(row.get(stock_gl_side) or 0) > 0
+            ),
+            debtor_template,
+        )
+        transit_side = "debit" if not is_return else "credit"
+        rewritten.append(
+            _make_bns_gl_entry(
+                doc,
+                settings["stock_in_transit_account"],
+                **{transit_side: valuation_amount},
+                against=stock_account,
+                template=stock_template,
+            )
+        )
+        rewritten.append(
+            _make_bns_gl_entry(
+                doc,
+                stock_account,
+                **{stock_gl_side: valuation_amount},
+                against=settings["stock_in_transit_account"],
+                template=stock_template,
+            )
+        )
+
+    debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
+    credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
+    if abs(debit_total - credit_total) > 0.5:
+        logger.error(
+            "Skipping SI GL rewrite for %s due to balance mismatch %s vs %s",
+            doc.name,
+            debit_total,
+            credit_total,
+        )
+        return gl_entries
+
+    logger.info(
+        "Applied BNS SI GL rewrite for %s (update_stock=%s, grand=%s, taxable=%s)",
+        doc.name,
+        cint(doc.get("update_stock")),
+        grand_total,
+        taxable_total,
+    )
+    return rewritten
+
+
+def _apply_bns_internal_gl_rewrite_patch() -> None:
+    """Patch ERPNext GL generation for DN/PR/PI/SI in BNS internal scopes."""
+    global _BNS_INTERNAL_GL_PATCHED
+    if _BNS_INTERNAL_GL_PATCHED:
+        return
+
+    try:
+        from erpnext.accounts.doctype.purchase_invoice.purchase_invoice import PurchaseInvoice
+        from erpnext.accounts.doctype.sales_invoice.sales_invoice import SalesInvoice
+        from erpnext.controllers.stock_controller import StockController
+        from erpnext.stock.doctype.purchase_receipt.purchase_receipt import PurchaseReceipt
+
+        original_stock_get_gl_entries = StockController.get_gl_entries
+        original_pr_get_gl_entries = PurchaseReceipt.get_gl_entries
+        original_pi_get_gl_entries = PurchaseInvoice.get_gl_entries
+        original_si_get_gl_entries = SalesInvoice.get_gl_entries
+
+        if getattr(original_stock_get_gl_entries, "_bns_internal_gl_rewrite_patched", False):
+            _BNS_INTERNAL_GL_PATCHED = True
+            return
+
+        def patched_stock_get_gl_entries(self, warehouse_account=None, default_expense_account=None, default_cost_center=None):
+            gl_entries = original_stock_get_gl_entries(self, warehouse_account, default_expense_account, default_cost_center)
+            if getattr(self, "doctype", None) == "Delivery Note":
+                return _rewrite_bns_internal_dn_gl_entries(self, gl_entries)
+            return gl_entries
+
+        def patched_pr_get_gl_entries(self, warehouse_account=None, via_landed_cost_voucher=False):
+            gl_entries = original_pr_get_gl_entries(self, warehouse_account, via_landed_cost_voucher)
+            return _rewrite_bns_internal_pr_gl_entries(self, gl_entries)
+
+        def patched_pi_get_gl_entries(self, warehouse_account=None):
+            gl_entries = original_pi_get_gl_entries(self, warehouse_account)
+            return _rewrite_bns_internal_pi_gl_entries(self, gl_entries)
+
+        def patched_si_get_gl_entries(self, warehouse_account=None):
+            gl_entries = original_si_get_gl_entries(self, warehouse_account)
+            return _rewrite_bns_internal_si_gl_entries(self, gl_entries)
+
+        patched_stock_get_gl_entries._bns_internal_gl_rewrite_patched = True
+        patched_pr_get_gl_entries._bns_internal_gl_rewrite_patched = True
+        patched_pi_get_gl_entries._bns_internal_gl_rewrite_patched = True
+        patched_si_get_gl_entries._bns_internal_gl_rewrite_patched = True
+        StockController.get_gl_entries = patched_stock_get_gl_entries
+        PurchaseReceipt.get_gl_entries = patched_pr_get_gl_entries
+        PurchaseInvoice.get_gl_entries = patched_pi_get_gl_entries
+        SalesInvoice.get_gl_entries = patched_si_get_gl_entries
+        _BNS_INTERNAL_GL_PATCHED = True
+        logger.info("Applied BNS internal GL rewrite patch for Delivery Note, Purchase Receipt, Purchase Invoice, and Sales Invoice")
+
+    except Exception as e:
+        logger.error("Failed to apply BNS internal GL rewrite patch: %s", str(e))
+
+
+def _run_bns_gl_repost_correction(doc, force_override: bool = False) -> None:
+    """Re-run repost GLE only for scoped DN/PR vouchers as failsafe."""
+    cache_key = f"bns_gl_repost_correction::{doc.name}"
+    if not force_override and frappe.cache().get_value(cache_key):
+        # region agent log
+        _bns_debug_log(
+            "H3",
+            "utils.py:_run_bns_gl_repost_correction",
+            "Skipped by repost_item_valuation cache key",
+            {"doc": doc.name, "cache_key": cache_key},
+        )
+        # endregion
+        return
+
+    scoped_vouchers: Set[Tuple[str, str]] = set()
+
+    if doc.get("based_on") == "Transaction" and doc.get("voucher_type") in ("Delivery Note", "Purchase Receipt"):
+        scoped_vouchers.add((doc.get("voucher_type"), doc.get("voucher_no")))
+
+    try:
+        from erpnext.stock.stock_ledger import get_affected_transactions
+        affected = get_affected_transactions(doc)
+    except Exception:
+        affected = set()
+
+    for voucher_type, voucher_no in affected:
+        if voucher_type not in ("Delivery Note", "Purchase Receipt") or not voucher_no:
+            continue
+        scoped_vouchers.add((voucher_type, voucher_no))
+
+    filtered_vouchers: List[Tuple[str, str]] = []
+    for voucher_type, voucher_no in sorted(scoped_vouchers):
+        if not frappe.db.exists(voucher_type, voucher_no):
+            continue
+        if not force_override and _is_bns_repost_voucher_processed(
+            "repost_item_valuation", doc.name, voucher_type, voucher_no
+        ):
+            continue
+        voucher_doc = frappe.get_doc(voucher_type, voucher_no)
+        if voucher_type == "Delivery Note":
+            is_scope = _is_bns_internal_delivery_note(voucher_doc)
+            # region agent log
+            _bns_debug_log(
+                "H2",
+                "utils.py:_run_bns_gl_repost_correction",
+                "Evaluated DN scope for repost_item_valuation",
+                {"doc": doc.name, "voucher_no": voucher_no, "is_scope": is_scope},
+            )
+            # endregion
+            if is_scope:
+                filtered_vouchers.append((voucher_type, voucher_no))
+        elif voucher_type == "Purchase Receipt" and _is_bns_internal_same_gstin_purchase_receipt(
+            voucher_doc
+        ):
+            filtered_vouchers.append((voucher_type, voucher_no))
+    # region agent log
+    _bns_debug_log(
+        "H4",
+        "utils.py:_run_bns_gl_repost_correction",
+        "Repost item valuation correction prepared voucher lists",
+        {
+            "doc": doc.name,
+            "scoped_count": len(scoped_vouchers),
+            "filtered_count": len(filtered_vouchers),
+            "force_override": bool(force_override),
+        },
+    )
+    # endregion
+
+    if filtered_vouchers:
+        scope = "repost_item_valuation"
+        repost_doc_name = doc.name
+        claimed = []
+        for voucher_type, voucher_no in filtered_vouchers:
+            if _claim_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no):
+                claimed.append((voucher_type, voucher_no))
+        if claimed:
+            _apply_bns_internal_gl_rewrite_patch()
+            settings = _get_bns_branch_accounting_accounts()
+            force_mode = bool(settings and settings.get("force_bns_internal_gl_rewrite")) or bool(force_override)
+            try:
+                if force_mode:
+                    rebuilt = 0
+                    for voucher_type, voucher_no in claimed:
+                        if _force_rebuild_bns_gl_for_voucher(
+                            voucher_type, voucher_no, context="repost_item_valuation"
+                        ):
+                            rebuilt += 1
+                            if not force_override:
+                                _mark_bns_repost_voucher_processed(scope, repost_doc_name, voucher_type, voucher_no)
+                    logger.info("BNS repost GL force-rebuild applied for repost %s on %s/%s vouchers", doc.name, rebuilt, len(claimed))
+                else:
+                    from erpnext.accounts.utils import repost_gle_for_stock_vouchers
+                    before_counts = {(vt, vn): _get_ledger_row_counts_for_voucher(vt, vn) for vt, vn in claimed}
+                    repost_gle_for_stock_vouchers(claimed, doc.posting_date, doc.company, repost_doc=doc)
+                    for voucher_type, voucher_no in claimed:
+                        after_counts = _get_ledger_row_counts_for_voucher(voucher_type, voucher_no)
+                        logger.info("BNS repost audit %s", frappe.as_json({"scope": scope, "mode": "repost_gle_for_stock_vouchers", "repost_doc": repost_doc_name, "voucher_type": voucher_type, "voucher_no": voucher_no, "before_count": before_counts[(voucher_type, voucher_no)], "after_count": after_counts}))
+                        if not force_override:
+                            _mark_bns_repost_voucher_processed(scope, repost_doc_name, voucher_type, voucher_no)
+                    logger.info("BNS repost GL failsafe applied for repost %s on %s vouchers", doc.name, len(claimed))
+            except Exception as e:
+                for voucher_type, voucher_no in claimed:
+                    _mark_bns_repost_tracking_failed(scope, repost_doc_name, voucher_type, voucher_no, str(e))
+                raise
+            finally:
+                for voucher_type, voucher_no in claimed:
+                    _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
+
+    if force_override:
+        frappe.cache().delete_value(cache_key)
+    else:
+        frappe.cache().set_value(cache_key, 1, expires_in_sec=6 * 60 * 60)
+
+
+def _get_ledger_row_counts_for_voucher(voucher_type: str, voucher_no: str) -> Dict[str, int]:
+    """Return per-ledger row counts for one voucher."""
+    filters = {"voucher_type": voucher_type, "voucher_no": voucher_no}
+    counts = {
+        "gl_entry": frappe.db.count("GL Entry", filters),
+        "payment_ledger_entry": 0,
+        "advance_payment_ledger_entry": 0,
+    }
+    if frappe.db.table_exists("Payment Ledger Entry"):
+        counts["payment_ledger_entry"] = frappe.db.count("Payment Ledger Entry", filters)
+    if frappe.db.table_exists("Advance Payment Ledger Entry"):
+        counts["advance_payment_ledger_entry"] = frappe.db.count("Advance Payment Ledger Entry", filters)
+    return counts
+
+
+def _delete_ledger_rows_for_voucher(voucher_type: str, voucher_no: str) -> None:
+    """Delete GL/PLE rows for one voucher before controlled rebuild."""
+    filters = {"voucher_type": voucher_type, "voucher_no": voucher_no}
+    if frappe.db.table_exists("Advance Payment Ledger Entry"):
+        frappe.db.delete("Advance Payment Ledger Entry", filters)
+    if frappe.db.table_exists("Payment Ledger Entry"):
+        frappe.db.delete("Payment Ledger Entry", filters)
+    frappe.db.delete("GL Entry", filters)
+
+
+def _get_repost_doctype_for_scope(scope: str, voucher_type: Optional[str] = None) -> str:
+    """Return the Repost doctype name for a given scope."""
+    m = {
+        "repost_item_valuation": "Repost Item Valuation",
+        "repost_accounting_ledger": "Repost Accounting Ledger",
+        # For generic BNS repost guards, bind tracking to the voucher doctype itself
+        # so tracking keys are always backed by an existing document.
+        "bns_internal_gl_repost": voucher_type or "Repost Item Valuation",
+        "pr_transfer_rate_repost": "Repost Item Valuation",
+        "pi_transfer_rate_repost": "Repost Item Valuation",
+    }
+    return m.get(scope, "Repost Item Valuation")
+
+
+def _is_bns_repost_tracking_available() -> bool:
+    """Check if BNS Repost Tracking doctype and table exist and are usable."""
+    try:
+        return bool(
+            frappe.db.exists("DocType", _BNS_REPOST_TRACKING_DTYPE)
+            and frappe.db.table_exists(_BNS_REPOST_TRACKING_DTYPE)
+        )
+    except Exception:
+        return False
+
+
+def _build_bns_repost_tracking_key(scope: str, repost_doc: str, voucher_type: str, voucher_no: str) -> str:
+    """Build the canonical tracking key for DB-backed repost tracking."""
+    return "bns_repost_voucher::" + scope + "::" + repost_doc + "::" + voucher_type + "::" + voucher_no
+
+
+def _claim_bns_repost_lock(scope, repost_doc, voucher_type, voucher_no, lock_ttl_min=10):
+    """Claim or create a DB-backed lock for repost tracking. Returns True if lock acquired."""
+    key = _build_bns_repost_tracking_key(scope, repost_doc, voucher_type, voucher_no)
+    if not _is_bns_repost_tracking_available():
+        if frappe.cache().get_value(key):
+            return False
+        frappe.cache().set_value(key, 1, expires_in_sec=max(cint(lock_ttl_min), 1) * 60)
+        return True
+
+    lock_expires = add_to_date(now_datetime(), minutes=max(cint(lock_ttl_min), 1), as_datetime=True)
+    try:
+        frappe.db.sql(
+            f"""
+            UPDATE `tab{_BNS_REPOST_TRACKING_DTYPE}`
+            SET status=%s, lock_expires_at=%s, last_error=NULL
+            WHERE tracking_key=%s
+              AND status!=%s
+              AND (status!=%s OR lock_expires_at IS NULL OR lock_expires_at < NOW())
+            """,
+            (
+                _BNS_REPOST_STATUS_IN_PROGRESS,
+                lock_expires,
+                key,
+                _BNS_REPOST_STATUS_PROCESSED,
+                _BNS_REPOST_STATUS_IN_PROGRESS,
+            ),
+        )
+        affected_rows = 0
+        try:
+            affected_rows_fn = getattr(frappe.db, "affected_rows", None)
+            if callable(affected_rows_fn):
+                affected_rows = cint(affected_rows_fn() or 0)
+        except Exception:
+            affected_rows = 0
+        if affected_rows <= 0:
+            try:
+                row_count_result = frappe.db.sql("SELECT ROW_COUNT()", as_list=True) or [[0]]
+                affected_rows = cint((row_count_result[0][0] if row_count_result and row_count_result[0] else 0) or 0)
+            except Exception:
+                affected_rows = 0
+        if affected_rows > 0:
+            return True
+
+        if frappe.db.exists(_BNS_REPOST_TRACKING_DTYPE, {"tracking_key": key}):
+            return False
+
+        frappe.get_doc(
+            {
+                "doctype": _BNS_REPOST_TRACKING_DTYPE,
+                "tracking_key": key,
+                "scope": scope,
+                "repost_doctype": _get_repost_doctype_for_scope(scope, voucher_type),
+                "repost_docname": repost_doc,
+                "voucher_type": voucher_type,
+                "voucher_no": voucher_no,
+                "status": _BNS_REPOST_STATUS_IN_PROGRESS,
+                "lock_expires_at": lock_expires,
+            }
+        ).insert(ignore_permissions=True)
+        return True
+    except Exception as e:
+        logger.warning("BNS repost lock claim failed for %s: %s", key, str(e))
+        return False
+
+
+def _refresh_bns_repost_lock(scope, repost_doc, voucher_type, voucher_no, lock_ttl_min=10):
+    """Refresh the lock expiry for an active repost tracking record."""
+    key = _build_bns_repost_tracking_key(scope, repost_doc, voucher_type, voucher_no)
+    if not _is_bns_repost_tracking_available():
+        frappe.cache().set_value(key, 1, expires_in_sec=max(cint(lock_ttl_min), 1) * 60)
+        return
+    frappe.db.set_value(
+        _BNS_REPOST_TRACKING_DTYPE,
+        {"tracking_key": key, "status": _BNS_REPOST_STATUS_IN_PROGRESS},
+        {"lock_expires_at": add_to_date(now_datetime(), minutes=max(cint(lock_ttl_min), 1), as_datetime=True)},
+        update_modified=True,
+    )
+
+
+def _mark_bns_repost_tracking_processed(scope, repost_doc, voucher_type, voucher_no):
+    """Mark repost tracking as Processed in DB, with cache fallback."""
+    key = _build_bns_repost_tracking_key(scope, repost_doc, voucher_type, voucher_no)
+    if _is_bns_repost_tracking_available():
+        try:
+            if frappe.db.exists(_BNS_REPOST_TRACKING_DTYPE, key):
+                frappe.db.set_value(
+                    _BNS_REPOST_TRACKING_DTYPE,
+                    key,
+                    {
+                        "status": _BNS_REPOST_STATUS_PROCESSED,
+                        "processed_at": now_datetime(),
+                        "lock_expires_at": None,
+                        "last_error": None,
+                    },
+                    update_modified=True,
+                )
+            else:
+                rd = _get_repost_doctype_for_scope(scope, voucher_type)
+                frappe.get_doc(
+                    {
+                        "doctype": _BNS_REPOST_TRACKING_DTYPE,
+                        "tracking_key": key,
+                        "scope": scope,
+                        "repost_doctype": rd,
+                        "repost_docname": repost_doc,
+                        "voucher_type": voucher_type,
+                        "voucher_no": voucher_no,
+                        "status": _BNS_REPOST_STATUS_PROCESSED,
+                        "processed_at": now_datetime(),
+                    }
+                ).insert(ignore_permissions=True)
+        except Exception as e:
+            logger.warning("BNS repost mark processed failed: %s", str(e))
+    _mark_bns_repost_voucher_processed_cache(scope, repost_doc, voucher_type, voucher_no)
+
+
+def _mark_bns_repost_tracking_failed(scope, repost_doc, voucher_type, voucher_no, error):
+    """Mark repost tracking as Failed in DB, with cache fallback."""
+    if _is_bns_repost_tracking_available():
+        key = _build_bns_repost_tracking_key(scope, repost_doc, voucher_type, voucher_no)
+        try:
+            err = str(error)[:1000]
+            if frappe.db.exists(_BNS_REPOST_TRACKING_DTYPE, key):
+                frappe.db.set_value(
+                    _BNS_REPOST_TRACKING_DTYPE,
+                    key,
+                    {
+                        "status": _BNS_REPOST_STATUS_FAILED,
+                        "last_error": err,
+                        "lock_expires_at": None,
+                    },
+                    update_modified=True,
+                )
+            else:
+                rd = _get_repost_doctype_for_scope(scope, voucher_type)
+                frappe.get_doc(
+                    {
+                        "doctype": _BNS_REPOST_TRACKING_DTYPE,
+                        "tracking_key": key,
+                        "scope": scope,
+                        "repost_doctype": rd,
+                        "repost_docname": repost_doc,
+                        "voucher_type": voucher_type,
+                        "voucher_no": voucher_no,
+                        "status": _BNS_REPOST_STATUS_FAILED,
+                        "last_error": err,
+                    }
+                ).insert(ignore_permissions=True)
+        except Exception as e:
+            logger.warning("BNS repost mark failed: %s", str(e))
+
+
+def _release_bns_repost_lock(scope, repost_doc, voucher_type, voucher_no):
+    """Release the DB-backed lock. Defensive cleanup."""
+    key = _build_bns_repost_tracking_key(scope, repost_doc, voucher_type, voucher_no)
+    if not _is_bns_repost_tracking_available():
+        frappe.cache().delete_value(key)
+        return
+    try:
+        if frappe.db.exists(_BNS_REPOST_TRACKING_DTYPE, key):
+            frappe.db.set_value(
+                _BNS_REPOST_TRACKING_DTYPE,
+                key,
+                {"lock_expires_at": None},
+                update_modified=True,
+            )
+    except Exception as e:
+        logger.warning("BNS repost lock release failed: %s", str(e))
+
+
+def _bns_repost_voucher_marker_key(
+    scope: str, repost_doc: str, voucher_type: str, voucher_no: str
+) -> str:
+    return f"bns_repost_voucher::{scope}::{repost_doc}::{voucher_type}::{voucher_no}"
+
+
+def _is_bns_repost_voucher_processed(
+    scope: str, repost_doc: str, voucher_type: str, voucher_no: str
+) -> bool:
+    """Check DB-backed tracking first (status Processed), fallback to cache."""
+    if _is_bns_repost_tracking_available():
+        key = _build_bns_repost_tracking_key(scope, repost_doc, voucher_type, voucher_no)
+        try:
+            status = frappe.db.get_value(_BNS_REPOST_TRACKING_DTYPE, key, "status")
+            if status == _BNS_REPOST_STATUS_PROCESSED:
+                return True
+        except Exception:
+            pass
+    return bool(frappe.cache().get_value(_bns_repost_voucher_marker_key(scope, repost_doc, voucher_type, voucher_no)))
+
+
+def _mark_bns_repost_voucher_processed(
+    scope: str, repost_doc: str, voucher_type: str, voucher_no: str
+) -> None:
+    """Mark voucher as processed via DB-backed tracking (Processed), fallback to cache."""
+    _mark_bns_repost_tracking_processed(scope, repost_doc, voucher_type, voucher_no)
+
+
+def _mark_bns_repost_voucher_processed_cache(
+    scope: str, repost_doc: str, voucher_type: str, voucher_no: str
+) -> None:
+    """Set cache-only marker as fallback when DB tracking unavailable."""
+    frappe.cache().set_value(
+        _bns_repost_voucher_marker_key(scope, repost_doc, voucher_type, voucher_no),
+        1,
+        expires_in_sec=6 * 60 * 60,
+    )
+
+
+def _force_rebuild_bns_gl_for_voucher(
+    voucher_type: str, voucher_no: str, context: str = "manual"
+) -> bool:
+    """Force rebuild GL entries for one internal-transfer voucher using patched get_gl_entries."""
+    if voucher_type not in ("Delivery Note", "Purchase Receipt", "Purchase Invoice", "Sales Invoice") or not voucher_no:
+        return False
+    if not frappe.db.exists(voucher_type, voucher_no):
+        return False
+
+    doc = frappe.get_doc(voucher_type, voucher_no)
+    if doc.docstatus != 1:
+        return False
+
+    if voucher_type == "Delivery Note" and not _is_bns_internal_delivery_note(doc):
+        return False
+    if voucher_type == "Purchase Receipt" and not (
+        _is_bns_internal_same_gstin_purchase_receipt(doc)
+        or _is_bns_internal_si_linked_purchase_receipt(doc)
+    ):
+        return False
+    if voucher_type == "Purchase Invoice":
+        if not _is_bns_internal_purchase_invoice_from_si(doc):
+            return False
+    if voucher_type == "Sales Invoice" and not _is_bns_internal_different_gstin_sales_invoice(doc):
+        return False
+
+    _apply_bns_internal_gl_rewrite_patch()
+    save_point = "bns_force_rebuild_voucher"
+    before_counts = _get_ledger_row_counts_for_voucher(voucher_type, voucher_no)
+    # region agent log
+    _bns_debug_log(
+        "H5",
+        "utils.py:_force_rebuild_bns_gl_for_voucher",
+        "Force rebuild entered",
+        {
+            "context": context,
+            "voucher_type": voucher_type,
+            "voucher_no": voucher_no,
+            "before_count": before_counts,
+        },
+    )
+    # endregion
+
+    try:
+        frappe.db.savepoint(save_point)
+        # Symmetric replacement: remove ledger rows for voucher and rebuild.
+        _delete_ledger_rows_for_voucher(voucher_type, voucher_no)
+        doc.make_gl_entries(from_repost=True)
+        after_counts = _get_ledger_row_counts_for_voucher(voucher_type, voucher_no)
+        # Safety: never accept a rebuild that emptied GL for a previously posted voucher.
+        if before_counts.get("gl_entry", 0) > 0 and after_counts.get("gl_entry", 0) == 0:
+            raise frappe.ValidationError(
+                f"BNS force rebuild produced zero GL rows for {voucher_type} {voucher_no}; rolling back."
+            )
+        logger.info(
+            "BNS repost audit %s",
+            frappe.as_json(
+                {
+                    "scope": context,
+                    "mode": "force_rebuild",
+                    "voucher_type": voucher_type,
+                    "voucher_no": voucher_no,
+                    "before_count": before_counts,
+                    "after_count": after_counts,
+                }
+            ),
+        )
+        logger.info("Force rebuilt BNS GL for %s %s", voucher_type, voucher_no)
+        # region agent log
+        _bns_debug_log(
+            "H5",
+            "utils.py:_force_rebuild_bns_gl_for_voucher",
+            "Force rebuild succeeded",
+            {
+                "context": context,
+                "voucher_type": voucher_type,
+                "voucher_no": voucher_no,
+                "after_count": after_counts,
+            },
+        )
+        # endregion
+        return True
+    except Exception as e:
+        frappe.db.rollback(save_point=save_point)
+        logger.error("Force rebuild failed for %s %s: %s", voucher_type, voucher_no, str(e))
+        # region agent log
+        _bns_debug_log(
+            "H5",
+            "utils.py:_force_rebuild_bns_gl_for_voucher",
+            "Force rebuild failed",
+            {
+                "context": context,
+                "voucher_type": voucher_type,
+                "voucher_no": voucher_no,
+                "error": str(e),
+            },
+        )
+        # endregion
+        return False
+
+
+def _run_bns_gl_repost_accounting_correction(repost_doc_name: str, force_override: bool = False) -> None:
+    """Apply BNS GL correction for vouchers included in Repost Accounting Ledger."""
+    if not repost_doc_name or not frappe.db.exists("Repost Accounting Ledger", repost_doc_name):
+        return
+
+    cache_key = f"bns_gl_accounting_repost_correction::{repost_doc_name}"
+    if not force_override and frappe.cache().get_value(cache_key):
+        # region agent log
+        _bns_debug_log(
+            "H3",
+            "utils.py:_run_bns_gl_repost_accounting_correction",
+            "Skipped by repost_accounting cache key",
+            {"repost_doc_name": repost_doc_name, "cache_key": cache_key},
+        )
+        # endregion
+        return
+
+    repost_doc = frappe.get_doc("Repost Accounting Ledger", repost_doc_name)
+    vouchers = []
+    for row in repost_doc.get("vouchers") or []:
+        if row.voucher_type in ("Delivery Note", "Purchase Receipt") and row.voucher_no:
+            vouchers.append((row.voucher_type, row.voucher_no))
+
+    if not vouchers:
+        if force_override:
+            frappe.cache().delete_value(cache_key)
+        else:
+            frappe.cache().set_value(cache_key, 1, expires_in_sec=6 * 60 * 60)
+        return
+
+    filtered = []
+    for voucher_type, voucher_no in sorted(set(vouchers)):
+        if not frappe.db.exists(voucher_type, voucher_no):
+            continue
+        if not force_override and _is_bns_repost_voucher_processed(
+            "repost_accounting_ledger", repost_doc_name, voucher_type, voucher_no
+        ):
+            # region agent log
+            _bns_debug_log(
+                "H3",
+                "utils.py:_run_bns_gl_repost_accounting_correction",
+                "Voucher skipped by per-voucher accounting marker",
+                {
+                    "repost_doc_name": repost_doc_name,
+                    "voucher_type": voucher_type,
+                    "voucher_no": voucher_no,
+                },
+            )
+            # endregion
+            continue
+        doc = frappe.get_doc(voucher_type, voucher_no)
+        if voucher_type == "Delivery Note":
+            is_scope = _is_bns_internal_delivery_note(doc)
+            # region agent log
+            _bns_debug_log(
+                "H2",
+                "utils.py:_run_bns_gl_repost_accounting_correction",
+                "Evaluated DN scope for repost_accounting",
+                {
+                    "repost_doc_name": repost_doc_name,
+                    "voucher_no": voucher_no,
+                    "is_scope": is_scope,
+                },
+            )
+            # endregion
+            if is_scope:
+                filtered.append((voucher_type, voucher_no))
+        elif voucher_type == "Purchase Receipt" and _is_bns_internal_same_gstin_purchase_receipt(doc):
+            filtered.append((voucher_type, voucher_no))
+
+    # region agent log
+    _bns_debug_log(
+        "H4",
+        "utils.py:_run_bns_gl_repost_accounting_correction",
+        "Repost accounting correction prepared voucher lists",
+        {
+            "repost_doc_name": repost_doc_name,
+            "input_count": len(vouchers),
+            "filtered_count": len(filtered),
+            "force_override": bool(force_override),
+        },
+    )
+    # endregion
+
+    if not filtered:
+        if force_override:
+            frappe.cache().delete_value(cache_key)
+        else:
+            frappe.cache().set_value(cache_key, 1, expires_in_sec=6 * 60 * 60)
+        return
+
+    scope = "repost_accounting_ledger"
+    claimed = []
+    for voucher_type, voucher_no in filtered:
+        if _claim_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no):
+            claimed.append((voucher_type, voucher_no))
+    if not claimed:
+        if force_override:
+            frappe.cache().delete_value(cache_key)
+        else:
+            frappe.cache().set_value(cache_key, 1, expires_in_sec=6 * 60 * 60)
+        return
+
+    _apply_bns_internal_gl_rewrite_patch()
+    settings = _get_bns_branch_accounting_accounts()
+    force_mode = bool(settings and settings.get("force_bns_internal_gl_rewrite")) or bool(force_override)
+    # Different-GSTIN internal DN must not drift to default COGS/SIH on repost;
+    # force controlled rebuild for this subset.
+    if not force_mode:
+        for voucher_type, voucher_no in claimed:
+            if voucher_type != "Delivery Note":
+                continue
+            try:
+                voucher_doc = frappe.get_doc(voucher_type, voucher_no)
+            except Exception:
+                continue
+            if _is_bns_internal_delivery_note(voucher_doc) and not _is_same_gstin_internal_delivery_note(
+                voucher_doc
+            ):
+                force_mode = True
+                break
+    try:
+        if force_mode:
+            rebuilt = 0
+            for voucher_type, voucher_no in claimed:
+                if _force_rebuild_bns_gl_for_voucher(
+                    voucher_type, voucher_no, context="repost_accounting_ledger"
+                ):
+                    rebuilt += 1
+                    if not force_override:
+                        _mark_bns_repost_voucher_processed(scope, repost_doc_name, voucher_type, voucher_no)
+            logger.info("BNS Repost Accounting Ledger force-rebuild applied for %s on %s/%s vouchers", repost_doc_name, rebuilt, len(claimed))
+        else:
+            from erpnext.accounts.utils import repost_gle_for_stock_vouchers
+            before_counts = {(vt, vn): _get_ledger_row_counts_for_voucher(vt, vn) for vt, vn in claimed}
+            repost_gle_for_stock_vouchers(claimed, repost_doc.posting_date, repost_doc.company, repost_doc=repost_doc)
+            for voucher_type, voucher_no in claimed:
+                after_counts = _get_ledger_row_counts_for_voucher(voucher_type, voucher_no)
+                logger.info("BNS repost audit %s", frappe.as_json({"scope": scope, "mode": "repost_gle_for_stock_vouchers", "repost_doc": repost_doc_name, "voucher_type": voucher_type, "voucher_no": voucher_no, "before_count": before_counts[(voucher_type, voucher_no)], "after_count": after_counts}))
+                if not force_override:
+                    _mark_bns_repost_voucher_processed(scope, repost_doc_name, voucher_type, voucher_no)
+            logger.info("BNS Repost Accounting Ledger correction applied for %s on %s vouchers", repost_doc_name, len(claimed))
+    except Exception as e:
+        for voucher_type, voucher_no in claimed:
+            _mark_bns_repost_tracking_failed(scope, repost_doc_name, voucher_type, voucher_no, str(e))
+        raise
+    finally:
+        for voucher_type, voucher_no in claimed:
+            _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
+
+    if force_override:
+        frappe.cache().delete_value(cache_key)
+    else:
+        frappe.cache().set_value(cache_key, 1, expires_in_sec=6 * 60 * 60)
+
+
+@frappe.whitelist()
+def bns_force_rewrite_gl_for_repost_accounting_ledger(repost_doc_name: str) -> Dict[str, Any]:
+    """
+    Force-correct GL for DN/PR vouchers included in a Repost Accounting Ledger doc.
+    This bypasses setting-based force flag and executes hard rebuild path.
+    """
+    if not repost_doc_name:
+        return {"ok": False, "message": "Missing repost_doc_name"}
+    if not frappe.db.exists("Repost Accounting Ledger", repost_doc_name):
+        return {"ok": False, "message": f"Repost Accounting Ledger {repost_doc_name} not found"}
+
+    repost_doc = frappe.get_doc("Repost Accounting Ledger", repost_doc_name)
+    processed = []
+    for row in repost_doc.get("vouchers") or []:
+        if row.voucher_type in ("Delivery Note", "Purchase Receipt") and row.voucher_no:
+            if _force_rebuild_bns_gl_for_voucher(
+                row.voucher_type, row.voucher_no, context="manual_repost_accounting_ledger"
+            ):
+                processed.append(f"{row.voucher_type}:{row.voucher_no}")
+
+    return {
+        "ok": True,
+        "message": f"BNS force GL rewrite completed for {repost_doc_name}",
+        "processed": processed,
+    }
+
+
+@frappe.whitelist()
+def bns_force_rewrite_gl_for_repost_item_valuation(repost_doc_name: str) -> Dict[str, Any]:
+    """
+    Force-correct GL for DN/PR vouchers affected by a Repost Item Valuation doc.
+    This bypasses setting-based force flag and executes hard rebuild path.
+    """
+    if not repost_doc_name:
+        return {"ok": False, "message": "Missing repost_doc_name"}
+    if not frappe.db.exists("Repost Item Valuation", repost_doc_name):
+        return {"ok": False, "message": f"Repost Item Valuation {repost_doc_name} not found"}
+
+    doc = frappe.get_doc("Repost Item Valuation", repost_doc_name)
+    _run_bns_gl_repost_correction(doc, force_override=True)
+    return {"ok": True, "message": f"BNS force GL rewrite completed for {repost_doc_name}"}
+
+
+@frappe.whitelist()
+def bns_debug_internal_gl_scope(voucher_type: str, voucher_no: str) -> Dict[str, Any]:
+    """Debug helper to inspect BNS GL rewrite scope and amount resolution."""
+    if voucher_type not in ("Delivery Note", "Purchase Receipt") or not voucher_no:
+        return {"ok": False, "message": "Invalid voucher_type/voucher_no"}
+    if not frappe.db.exists(voucher_type, voucher_no):
+        return {"ok": False, "message": f"{voucher_type} {voucher_no} not found"}
+
+    doc = frappe.get_doc(voucher_type, voucher_no)
+    gl_entries = frappe.get_all(
+        "GL Entry",
+        filters={"voucher_type": voucher_type, "voucher_no": voucher_no, "is_cancelled": 0},
+        fields=["account", "debit", "credit"],
+        order_by="creation asc",
+    )
+    settings = _get_bns_branch_accounting_accounts()
+    force_mode = bool(settings and settings.get("force_bns_internal_gl_rewrite"))
+    out = {
+        "ok": True,
+        "voucher_type": voucher_type,
+        "voucher_no": voucher_no,
+        "settings_loaded": bool(settings),
+        "force_mode_setting": force_mode,
+        "is_dn_scope": _is_bns_internal_delivery_note(doc) if voucher_type == "Delivery Note" else None,
+        "is_dn_same_gstin_scope": _is_bns_internal_same_gstin_delivery_note(doc) if voucher_type == "Delivery Note" else None,
+        "is_pr_scope": _is_bns_internal_same_gstin_purchase_receipt(doc) if voucher_type == "Purchase Receipt" else None,
+        "gl_entries": gl_entries,
+        "doc_get_gl_entries_qualname": getattr(getattr(doc, "get_gl_entries", None), "__qualname__", None),
+        "doc_get_gl_entries_module": getattr(getattr(doc, "get_gl_entries", None), "__module__", None),
+    }
+
+    try:
+        from erpnext.controllers.stock_controller import StockController
+        out["stock_controller_patched"] = bool(
+            getattr(StockController.get_gl_entries, "_bns_internal_gl_rewrite_patched", False)
+        )
+        out["stock_controller_get_gl_entries_qualname"] = getattr(
+            StockController.get_gl_entries, "__qualname__", None
+        )
+    except Exception:
+        pass
+
+    if voucher_type == "Purchase Receipt":
+        try:
+            from erpnext.stock.doctype.purchase_receipt.purchase_receipt import PurchaseReceipt
+            out["purchase_receipt_patched"] = bool(
+                getattr(PurchaseReceipt.get_gl_entries, "_bns_internal_gl_rewrite_patched", False)
+            )
+            out["purchase_receipt_get_gl_entries_qualname"] = getattr(
+                PurchaseReceipt.get_gl_entries, "__qualname__", None
+            )
+        except Exception:
+            pass
+
+    if voucher_type == "Delivery Note":
+        try:
+            from erpnext.stock import get_warehouse_account_map
+            out["computed_gl_entries"] = doc.get_gl_entries(get_warehouse_account_map(doc.company))
+        except Exception as e:
+            out["computed_gl_entries_error"] = str(e)
+
+        transfer_amount, transfer_reason = _resolve_dn_transfer_amount(doc, force_mode=True)
+        valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
+            gl_entries, side="credit", company=doc.company
+        )
+        out.update(
+            {
+                "transfer_amount": transfer_amount,
+                "transfer_reason": transfer_reason,
+                "valuation_amount": valuation_amount,
+                "valuation_reason": valuation_reason,
+                "stock_account": stock_account,
+            }
+        )
+    else:
+        try:
+            from erpnext.stock import get_warehouse_account_map
+            out["computed_gl_entries"] = doc.get_gl_entries(get_warehouse_account_map(doc.company))
+        except Exception as e:
+            out["computed_gl_entries_error"] = str(e)
+
+        transfer_amount, transfer_reason = _resolve_pr_transfer_amount(doc, force_mode=True)
+        valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
+            gl_entries, side="debit", company=doc.company
+        )
+        out.update(
+            {
+                "transfer_amount": transfer_amount,
+                "transfer_reason": transfer_reason,
+                "valuation_amount": valuation_amount,
+                "valuation_reason": valuation_reason,
+                "stock_account": stock_account,
+            }
+        )
+
+    return out
+
+
+@frappe.whitelist()
+def bns_force_rebuild_gl_for_voucher(voucher_type: str, voucher_no: str) -> Dict[str, Any]:
+    """Force rebuild GL for one DN/PR voucher and return result."""
+    try:
+        result = _force_rebuild_bns_gl_for_voucher(voucher_type, voucher_no)
+        return {"ok": bool(result), "voucher_type": voucher_type, "voucher_no": voucher_no}
+    except Exception as e:
+        return {"ok": False, "voucher_type": voucher_type, "voucher_no": voucher_no, "error": str(e)}
+
+
+def _apply_bns_repost_gl_failsafe_patch() -> None:
+    """Patch Repost Item Valuation GL phase to run BNS-scoped failsafe correction."""
+    global _BNS_REPOST_GL_FAILSAFE_PATCHED
+    if _BNS_REPOST_GL_FAILSAFE_PATCHED:
+        return
+
+    try:
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as riv
+        original_repost_gl_entries = riv.repost_gl_entries
+
+        if getattr(original_repost_gl_entries, "_bns_repost_gl_failsafe_patched", False):
+            _BNS_REPOST_GL_FAILSAFE_PATCHED = True
+            return
+
+        def patched_repost_gl_entries(doc):
+            doc_lock_scope = "repost_item_valuation"
+            doc_lock_repost = doc.name if doc else ""
+            doc_lock_voucher_type = "Repost Item Valuation"
+            doc_lock_voucher_no = doc.name if doc else ""
+            original_repost_gl_entries(doc)
+            try:
+                _run_bns_gl_repost_correction(doc)
+            except Exception as e:
+                logger.error("BNS repost GL failsafe error for %s: %s", doc.name, str(e))
+            finally:
+                if doc_lock_repost:
+                    _release_bns_repost_lock(
+                        doc_lock_scope,
+                        doc_lock_repost,
+                        doc_lock_voucher_type,
+                        doc_lock_voucher_no,
+                    )
+
+        patched_repost_gl_entries._bns_repost_gl_failsafe_patched = True
+        riv.repost_gl_entries = patched_repost_gl_entries
+        _BNS_REPOST_GL_FAILSAFE_PATCHED = True
+        logger.info("Applied BNS repost GL failsafe patch")
+
+    except Exception as e:
+        logger.error("Failed to apply BNS repost GL failsafe patch: %s", str(e))
+
+
+def _apply_bns_repost_accounting_ledger_patch() -> None:
+    """Patch Repost Accounting Ledger start_repost to run BNS correction after ERPNext repost."""
+    global _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED
+    if _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED:
+        return
+
+    try:
+        from erpnext.accounts.doctype.repost_accounting_ledger import repost_accounting_ledger as ral
+        original_start_repost = ral.start_repost
+
+        if getattr(original_start_repost, "_bns_repost_accounting_patched", False):
+            _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = True
+            return
+
+        def patched_start_repost(account_repost_doc=str):
+            result = original_start_repost(account_repost_doc)
+            doc_lock_scope = "repost_accounting_ledger"
+            doc_lock_repost = str(account_repost_doc or "")
+            doc_lock_voucher_type = "Repost Accounting Ledger"
+            doc_lock_voucher_no = str(account_repost_doc or "")
+            try:
+                _run_bns_gl_repost_accounting_correction(account_repost_doc)
+            except Exception as e:
+                logger.error("BNS repost accounting correction failed for %s: %s", account_repost_doc, str(e))
+            finally:
+                if doc_lock_repost:
+                    _release_bns_repost_lock(
+                        doc_lock_scope,
+                        doc_lock_repost,
+                        doc_lock_voucher_type,
+                        doc_lock_voucher_no,
+                    )
+            return result
+
+        patched_start_repost._bns_repost_accounting_patched = True
+        ral.start_repost = patched_start_repost
+        _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = True
+        logger.info("Applied BNS Repost Accounting Ledger patch")
+    except Exception as e:
+        logger.error("Failed to apply BNS Repost Accounting Ledger patch: %s", str(e))
+
+
+def _trigger_bns_internal_gl_repost(doc, source: str) -> bool:
+    """Run a guarded repost so custom BNS GL rewrite is applied reliably."""
+    if not doc or doc.docstatus != 1:
+        return False
+
+    scope = "bns_internal_gl_repost"
+    # Keep tracking anchored to a real document to avoid lock/doc lookup failures.
+    repost_doc = doc.name
+    voucher_type = doc.doctype
+    voucher_no = doc.name
+    if not _claim_bns_repost_lock(scope, repost_doc, voucher_type, voucher_no):
+        return False
+
+    try:
+        _apply_bns_internal_gl_rewrite_patch()
+        doc.repost_future_sle_and_gle(force=True)
+        _mark_bns_repost_tracking_processed(scope, repost_doc, voucher_type, voucher_no)
+        logger.info("Triggered guarded BNS GL repost for %s %s (%s)", doc.doctype, doc.name, source)
+        return True
+    except Exception as e:
+        _mark_bns_repost_tracking_failed(scope, repost_doc, voucher_type, voucher_no, str(e))
+        logger.error("Failed guarded BNS GL repost for %s %s (%s): %s", doc.doctype, doc.name, source, str(e))
+        return False
+
+
+# Best-effort eager patching on module import.
+_apply_bns_transfer_rate_stock_ledger_patch()
+_apply_bns_internal_gl_rewrite_patch()
+_apply_bns_repost_gl_failsafe_patch()
+_apply_bns_repost_accounting_ledger_patch()
+
+
+def apply_bns_runtime_patches() -> None:
+    """
+    Ensure BNS runtime monkey patches are applied in every process (web/worker).
+    Hooked from after_app_init so repost workers don't miss patch load.
+    """
+    _apply_bns_transfer_rate_stock_ledger_patch()
+    _apply_bns_internal_gl_rewrite_patch()
+    _apply_bns_repost_gl_failsafe_patch()
+    _apply_bns_repost_accounting_ledger_patch()
 
 
 def is_bns_internal_customer(doc) -> bool:
@@ -124,7 +3037,7 @@ def validate_inter_company_party(doctype: str, party: str, company: str, inter_c
     """
     Validate inter-company party relationships.
     
-    Checks that represents_company matches between parties.
+    Checks that bns_represents_company matches between parties.
     Note: Skips "Allowed To Transact With" check as per BNS requirements.
     
     Args:
@@ -164,16 +3077,12 @@ def validate_inter_company_party(doctype: str, party: str, company: str, inter_c
         
         # Check that party represents the reference document's company
         party_represents = frappe.db.get_value(partytype, {"name": party}, "bns_represents_company")
-        if not party_represents:
-            party_represents = frappe.db.get_value(partytype, {"name": party}, "represents_company")
         
         if not party_represents or party_represents != doc.company:
             raise BNSValidationError(_("Invalid {0} for Inter Company Transaction.").format(_(partytype)))
         
         # Check that reference party represents the target company
         ref_party_represents = frappe.get_cached_value(ref_partytype, ref_party, "bns_represents_company")
-        if not ref_party_represents:
-            ref_party_represents = frappe.get_cached_value(ref_partytype, ref_party, "represents_company")
         
         if not ref_party_represents or ref_party_represents != company:
             raise BNSValidationError(_("Invalid Company for Inter Company Transaction."))
@@ -222,34 +3131,22 @@ def validate_internal_transfer_qty(doc) -> None:
     if doc.doctype not in ["Purchase Invoice", "Purchase Receipt"]:
         return
     
-    # For Purchase Receipt, check if it's from SI (supplier_delivery_note) or DN (bns_inter_company_reference)
-    inter_company_reference = doc.get("bns_inter_company_reference")
-    supplier_delivery_note = doc.get("supplier_delivery_note")
-    
-    # Determine source document
-    if doc.doctype == "Purchase Receipt" and supplier_delivery_note:
-        # Check if supplier_delivery_note is a Sales Invoice
-        if frappe.db.exists("Sales Invoice", supplier_delivery_note):
-            inter_company_reference = supplier_delivery_note
+    inter_company_reference = (doc.get("bns_inter_company_reference") or "").strip()
+    if not inter_company_reference:
+        return
+
+    if doc.doctype == "Purchase Receipt":
+        if frappe.db.exists("Sales Invoice", inter_company_reference):
             parent_doctype = "Sales Invoice"
             reference_fieldname = "sales_invoice_item"
-        elif frappe.db.exists("Delivery Note", supplier_delivery_note):
-            inter_company_reference = supplier_delivery_note
+        elif frappe.db.exists("Delivery Note", inter_company_reference):
             parent_doctype = "Delivery Note"
             reference_fieldname = "delivery_note_item"
         else:
             return
-    elif inter_company_reference:
-        parent_doctype = {
-            "Purchase Receipt": "Delivery Note",
-            "Purchase Invoice": "Sales Invoice",
-        }.get(doc.doctype)
-        reference_fieldname = "delivery_note_item" if doc.doctype == "Purchase Receipt" else "sales_invoice_item"
     else:
-        return
-    
-        if not parent_doctype or not inter_company_reference:
-            return
+        parent_doctype = "Sales Invoice"
+        reference_fieldname = "sales_invoice_item"
     
     # Get item-wise transfer quantities from source document
     child_doctype = parent_doctype + " Item"
@@ -283,28 +3180,8 @@ def validate_internal_transfer_qty(doc) -> None:
             available_qty = flt(item.qty or 0)
         item_wise_transfer_qty[key] = available_qty
     
-    # Get already received quantities
-    # For PR from SI, use supplier_delivery_note to find other PRs (requires sales_invoice_item on PR Item)
-    pr_item_has_si_item = frappe.get_meta("Purchase Receipt Item").has_field("sales_invoice_item")
-    if doc.doctype == "Purchase Receipt" and supplier_delivery_note and frappe.db.exists("Sales Invoice", supplier_delivery_note) and pr_item_has_si_item:
-        received_items = {}
-        pr_list = frappe.get_all(
-            "Purchase Receipt",
-            filters={"supplier_delivery_note": supplier_delivery_note, "docstatus": 1, "name": ("!=", doc.name)},
-            fields=["name"]
-        )
-        if pr_list:
-            pr_names = [pr.name for pr in pr_list]
-            pr_items = frappe.get_all(
-                "Purchase Receipt Item",
-                filters={"parent": ("in", pr_names)},
-                fields=["sales_invoice_item", "item_code", "qty"]
-            )
-            for item in pr_items:
-                key = (item.get("sales_invoice_item"), item.item_code)
-                received_items[key] = received_items.get(key, 0) + flt(item.qty)
-    else:
-        received_items = get_received_items(inter_company_reference, doc.doctype, reference_fieldname)
+    # Get already received quantities using canonical BNS source linkage.
+    received_items = get_received_items(inter_company_reference, doc.doctype, reference_fieldname)
     
     # Calculate total received quantities including current document
     precision = frappe.get_precision(doc.doctype + " Item", "qty")
@@ -345,6 +3222,251 @@ def validate_internal_transfer_qty(doc) -> None:
             )
 
 
+def _has_any_positive_received_qty(received_items: Dict[Tuple[str, str], float]) -> bool:
+    """Return True if any already-received quantity exists for source item keys."""
+    return any(flt(qty or 0) > 0 for qty in (received_items or {}).values())
+
+
+def _validate_batch_serial_parity(source_item, target_item, source_label: str, target_label: str) -> None:
+    """
+    Verify batch/serial information is consistent between paired source and target items.
+
+    For SBB-based items, compares both batch and serial entries between bundles.
+    For legacy field items, compares batch_no/serial_no strings.
+    Non-batch/serial items are skipped.
+
+    Cross-fiscal-year note: if one side has batch/serial info and the other
+    doesn't (e.g. source submitted before batch tracking was enabled), this
+    function logs a warning instead of throwing — the mismatch is expected
+    during the transition period.
+
+    Args:
+        source_item: Source document item row
+        target_item: Target document item row
+        source_label: Human-readable source doc label (e.g. "Delivery Note")
+        target_label: Human-readable target doc label (e.g. "Purchase Receipt")
+    """
+    source_bundle = source_item.get("serial_and_batch_bundle")
+    target_bundle = target_item.get("serial_and_batch_bundle")
+
+    if source_bundle and target_bundle:
+        _validate_sbb_batch_parity(source_bundle, target_bundle, source_item, source_label, target_label)
+        _validate_sbb_serial_parity(source_bundle, target_bundle, source_item, source_label, target_label)
+        return
+
+    if (source_bundle and not target_bundle) or (not source_bundle and target_bundle):
+        logger.warning(
+            "SBB parity skip for item %s in %s -> %s: one side has "
+            "serial_and_batch_bundle and the other does not "
+            "(source=%s, target=%s). Expected during cross-fiscal-year transitions.",
+            source_item.item_code, source_label, target_label,
+            source_bundle or "None", target_bundle or "None",
+        )
+        return
+
+    source_batch = (source_item.get("batch_no") or "").strip()
+    target_batch = (target_item.get("batch_no") or "").strip()
+
+    if source_batch and target_batch and source_batch != target_batch:
+        frappe.throw(
+            _(
+                "Batch mismatch in {0} -> {1} for item {2}: "
+                "source batch {3}, target batch {4}."
+            ).format(source_label, target_label, bold(source_item.item_code), bold(source_batch), bold(target_batch)),
+            title=_("Batch Parity Failed"),
+        )
+
+    if source_batch and not target_batch:
+        logger.warning(
+            "Batch parity skip for item %s in %s -> %s: source has batch_no "
+            "%s but target has none. Expected during cross-FY transitions.",
+            source_item.item_code, source_label, target_label, source_batch,
+        )
+
+
+def _validate_sbb_batch_parity(source_bundle, target_bundle, source_item, source_label, target_label):
+    """Compare batch entries between two Serial and Batch Bundles."""
+    from erpnext.stock.serial_batch_bundle import get_batches_from_bundle
+
+    source_batches = get_batches_from_bundle(source_bundle)
+    target_batches = get_batches_from_bundle(target_bundle)
+
+    if not source_batches or not target_batches:
+        return
+
+    source_set = set(source_batches.keys())
+    target_set = set(target_batches.keys())
+    missing = source_set - target_set
+    if missing:
+        frappe.throw(
+            _(
+                "Batch mismatch in {0} -> {1} for item {2}: "
+                "batches {3} present in source but missing in target."
+            ).format(source_label, target_label, bold(source_item.item_code), ", ".join(missing)),
+            title=_("Batch Parity Failed"),
+        )
+
+
+def _validate_sbb_serial_parity(source_bundle, target_bundle, source_item, source_label, target_label):
+    """Compare serial number entries between two Serial and Batch Bundles."""
+    from erpnext.stock.serial_batch_bundle import get_serial_nos_from_bundle
+
+    source_serials = get_serial_nos_from_bundle(source_bundle)
+    target_serials = get_serial_nos_from_bundle(target_bundle)
+
+    if not source_serials or not target_serials:
+        return
+
+    source_set = set(source_serials)
+    target_set = set(target_serials)
+    missing = source_set - target_set
+    if missing:
+        display = ", ".join(list(missing)[:5])
+        if len(missing) > 5:
+            display += f" (+{len(missing) - 5} more)"
+        frappe.throw(
+            _(
+                "Serial number mismatch in {0} -> {1} for item {2}: "
+                "serial nos {3} present in source but missing in target."
+            ).format(source_label, target_label, bold(source_item.item_code), display),
+            title=_("Serial Parity Failed"),
+        )
+
+
+def _enforce_one_to_one_item_and_amount_parity(
+    source_doc,
+    target_doc,
+    source_link_field: str,
+    source_item_filter,
+    source_label: str,
+    target_label: str,
+) -> None:
+    """Ensure mapped target document is a strict one-to-one mirror of source."""
+    source_items = [d for d in (source_doc.get("items") or []) if source_item_filter(d)]
+    target_items = target_doc.get("items") or []
+
+    if len(target_items) != len(source_items):
+        frappe.throw(
+            _(
+                "Strict 1:1 mapping failed for {0} -> {1}. Source items: {2}, target items: {3}."
+            ).format(source_label, target_label, len(source_items), len(target_items)),
+            title=_("One-to-One Validation Failed"),
+        )
+
+    source_by_name = {d.get("name"): d for d in source_items if d.get("name")}
+    for target_item in target_items:
+        source_item_name = target_item.get(source_link_field)
+        source_item = source_by_name.get(source_item_name)
+        if not source_item:
+            frappe.throw(
+                _(
+                    "Strict 1:1 mapping failed: target item {0} is not linked to a valid source item."
+                ).format(target_item.get("item_code") or target_item.get("name")),
+                title=_("One-to-One Validation Failed"),
+            )
+
+        # Force parity for key item identity/quantity/UOM/conversion/amount fields.
+        target_item.item_code = source_item.get("item_code")
+        target_item.uom = source_item.get("uom")
+        if hasattr(source_item, "stock_uom"):
+            target_item.stock_uom = source_item.get("stock_uom")
+        target_item.conversion_factor = flt(source_item.get("conversion_factor") or target_item.get("conversion_factor") or 1)
+
+        _validate_batch_serial_parity(source_item, target_item, source_label, target_label)
+
+        numeric_fields = (
+            "qty",
+            "stock_qty",
+            "rate",
+            "base_rate",
+            "amount",
+            "base_amount",
+            "net_rate",
+            "base_net_rate",
+            "net_amount",
+            "base_net_amount",
+        )
+        for fieldname in numeric_fields:
+            if hasattr(source_item, fieldname):
+                setattr(target_item, fieldname, flt(source_item.get(fieldname) or 0))
+
+    # Recalculate totals after forcing item parity, then verify key totals.
+    target_doc.set_missing_values()
+
+    header_fields = (
+        # Taxable totals
+        "total",
+        "base_total",
+        "net_total",
+        "base_net_total",
+        # Tax totals
+        "total_taxes_and_charges",
+        "base_total_taxes_and_charges",
+        # Grand totals
+        "grand_total",
+        "base_grand_total",
+    )
+    for fieldname in header_fields:
+        source_val = round(flt(source_doc.get(fieldname) or 0), 2)
+        target_val = round(flt(target_doc.get(fieldname) or 0), 2)
+        if source_val != target_val:
+            frappe.throw(
+                _(
+                    "Strict 1:1 totals mismatch on {0} ({1}: {2}, {3}: {4})."
+                ).format(fieldname, source_label, source_val, target_label, target_val),
+                title=_("One-to-One Validation Failed"),
+            )
+
+
+def _docstatus_label(docstatus: int) -> str:
+    """Return human-friendly docstatus label."""
+    return {0: _("Draft"), 1: _("Submitted"), 2: _("Cancelled")}.get(cint(docstatus), str(docstatus))
+
+
+def _get_existing_pr_for_source(source_name: str) -> Optional[Dict[str, Any]]:
+    """Find existing non-cancelled PR linked to the given source DN/SI."""
+    if not source_name:
+        return None
+
+    pr_name = frappe.db.get_value(
+        "Purchase Receipt",
+        {"bns_inter_company_reference": source_name, "docstatus": ["in", [0, 1]]},
+        "name",
+    )
+    if not pr_name:
+        return None
+
+    pr_meta = frappe.db.get_value(
+        "Purchase Receipt",
+        pr_name,
+        ["name", "docstatus"],
+        as_dict=True,
+    )
+    return pr_meta
+
+
+def _get_existing_pi_for_source(source_name: str) -> Optional[Dict[str, Any]]:
+    """Find existing non-cancelled PI linked to the given source SI."""
+    if not source_name:
+        return None
+
+    pi_name = frappe.db.get_value(
+        "Purchase Invoice",
+        {"bns_inter_company_reference": source_name, "docstatus": ["in", [0, 1]]},
+        "name",
+    )
+    if not pi_name:
+        return None
+
+    pi_meta = frappe.db.get_value(
+        "Purchase Invoice",
+        pi_name,
+        ["name", "docstatus"],
+        as_dict=True,
+    )
+    return pi_meta
+
+
 @frappe.whitelist()
 def make_bns_internal_purchase_receipt(source_name: str, target_doc: Optional[Dict] = None) -> Dict:
     """
@@ -362,10 +3484,19 @@ def make_bns_internal_purchase_receipt(source_name: str, target_doc: Optional[Di
         BNSInternalTransferError: If internal transfer setup fails
     """
     try:
+        frappe.lock_doc("Delivery Note", source_name)
         dn = frappe.get_doc("Delivery Note", source_name)
-        
-        # Validate delivery note for internal customer
+
         _validate_internal_delivery_note(dn)
+
+        existing_pr = _get_existing_pr_for_source(dn.name)
+        if existing_pr:
+            frappe.throw(
+                _(
+                    "A Purchase Receipt ({0}) already exists for this Delivery Note in {1} state. You cannot create another one."
+                ).format(existing_pr.get("name"), _docstatus_label(existing_pr.get("docstatus"))),
+                title=_("Cannot Create Purchase Receipt"),
+            )
         
         # Get representing company
         represents_company = _get_representing_company(dn.customer)
@@ -381,13 +3512,19 @@ def make_bns_internal_purchase_receipt(source_name: str, target_doc: Optional[Di
             target_doc,
             _set_missing_values,
         )
+
+        _enforce_one_to_one_item_and_amount_parity(
+            source_doc=dn,
+            target_doc=doclist,
+            source_link_field="delivery_note_item",
+            source_item_filter=lambda d: flt(d.get("qty") or 0) + flt(d.get("returned_qty") or 0) > 0,
+            source_label="Delivery Note",
+            target_label="Purchase Receipt",
+        )
         
         # Validate quantities
         validate_internal_transfer_qty(doclist)
-        
-        # Update delivery note with reference (this needs to be done after the document is created)
-        _update_delivery_note_reference(dn.name, doclist.name)
-        
+
         logger.info(f"Successfully created internal Purchase Receipt from Delivery Note {source_name}")
         return doclist
         
@@ -427,8 +3564,6 @@ def _get_delivery_note_mapping() -> Dict[str, Any]:
             "field_map": {
                 "name": "delivery_note_item",
                 "target_warehouse": "from_warehouse",
-                "serial_no": "serial_no",
-                "batch_no": "batch_no",
             },
             # Deliberately exclude purchase_order / purchase_order_item:
             # The DN items may reference a PO whose supplier differs from
@@ -436,9 +3571,17 @@ def _get_delivery_note_mapping() -> Dict[str, Any]:
             # triggers ERPNext's validate_with_previous_doc() which
             # compares PR.supplier against PO.supplier and throws
             # "Incorrect value: Supplier must be equal to …".
+            # serial_no, batch_no, serial_and_batch_bundle are handled in
+            # _update_item() via _duplicate_serial_and_batch_bundle() — each
+            # target document needs its own SBB, so raw copying is forbidden.
             "field_no_map": ["warehouse", "rejected_warehouse", "expense_account", "cost_center", "project", "location",
-                             "purchase_order", "purchase_order_item"],
-            "condition": lambda item: flt(item.qty) + flt(item.returned_qty or 0) - flt(item.received_qty or 0) > 0,
+                             "purchase_order", "purchase_order_item",
+                             "serial_no", "batch_no", "serial_and_batch_bundle"],
+            # Do not depend on DN item.received_qty here; it can drift from
+            # actual submitted PR linkage in amendment/relink scenarios.
+            # Remaining qty is finalized in _set_missing_values() via
+            # get_received_items() against submitted PR documents.
+            "condition": lambda item: flt(item.qty) + flt(item.returned_qty or 0) > 0,
             "postprocess": _update_item,
         },
     }
@@ -451,26 +3594,12 @@ def _set_missing_values(source, target) -> None:
     # Get received items to track partial receipts
     received_items = get_received_items(source.name, "Purchase Receipt", "delivery_note_item")
     
-    # Filter items that have already been fully received
-    if received_items and target.get("items"):
-        items_to_keep = []
-        for item in target.items:
-            source_item_name = item.get("delivery_note_item")
-            item_code = item.get("item_code")
-            if source_item_name and item_code:
-                received_qty = received_items.get((source_item_name, item_code), 0)
-                source_qty = flt(item.get("qty", 0))
-                returned_qty = flt(item.get("returned_qty", 0))
-                remaining_qty = source_qty + returned_qty - received_qty
-                if remaining_qty > 0:
-                    item.qty = remaining_qty
-                    items_to_keep.append(item)
-            else:
-                items_to_keep.append(item)
-        target.items = items_to_keep
-    
-    if not target.get("items"):
-        raise BNSValidationError(_("All items have already been received"))
+    # Strict one-to-one mode: do not allow partial PR generation.
+    if _has_any_positive_received_qty(received_items):
+        frappe.throw(
+            _("Strict one-to-one mode: Purchase Receipt already exists for this Delivery Note. Partial creation is not allowed."),
+            title=_("Cannot Create Purchase Receipt"),
+        )
     
     # Clear document level warehouses and accounting dimensions
     _clear_document_level_fields(target)
@@ -511,7 +3640,6 @@ def _update_details(source_doc, target_doc, source_parent) -> None:
         
         # Set internal transfer fields
         target_doc.buying_price_list = source_doc.selling_price_list
-        target_doc.is_internal_supplier = 1
         target_doc.bns_inter_company_reference = source_doc.name
         
         # Set supplier_delivery_note = DN name (TRANSFER UNDER SAME GSTIN)
@@ -529,15 +3657,15 @@ def _update_details(source_doc, target_doc, source_parent) -> None:
         _update_taxes(target_doc)
     else:
         # This is being called from the main function with proper parameters
-        target_doc.company = source_parent.get("represents_company")
+        represents_company = _get_representing_company(source_doc.customer)
+        target_doc.company = represents_company
         
         # Find supplier representing the delivery note's company
-        supplier = _find_internal_supplier(source_parent.company)
+        supplier = _find_internal_supplier(represents_company)
         target_doc.supplier = supplier
         
         # Set internal transfer fields
         target_doc.buying_price_list = source_doc.selling_price_list
-        target_doc.is_internal_supplier = 1
         target_doc.bns_inter_company_reference = source_doc.name
         
         # Set supplier_delivery_note = DN name (TRANSFER UNDER SAME GSTIN)
@@ -560,7 +3688,6 @@ def _update_details(source_doc, target_doc, source_parent) -> None:
 
 def _find_internal_supplier(company: str) -> str:
     """Find supplier that represents the given company."""
-    # First try to find supplier with bns_represents_company
     supplier = frappe.get_all(
         "Supplier",
         filters={
@@ -569,17 +3696,6 @@ def _find_internal_supplier(company: str) -> str:
         },
         limit=1
     )
-    
-    # If not found, try with represents_company as fallback
-    if not supplier:
-        supplier = frappe.get_all(
-            "Supplier",
-            filters={
-                "is_bns_internal_supplier": 1,
-                "represents_company": company
-            },
-            limit=1
-        )
     
     if not supplier:
         raise BNSInternalTransferError(_("No supplier found for Inter Company Transactions which represents company {0}").format(company))
@@ -723,21 +3839,27 @@ def _update_taxes(target_doc) -> None:
 
 def _update_item(source, target, source_parent) -> None:
     """Update item details for the purchase receipt item."""
-    # Calculate quantity considering returned_qty and received_qty
     source_qty = flt(source.qty or 0)
     returned_qty = flt(source.returned_qty or 0)
     received_qty = flt(source.received_qty or 0)
     target.qty = source_qty + returned_qty - received_qty
-    
-    # Calculate stock_qty similarly
+
+    conversion_factor = flt(source.conversion_factor or 1)
     source_stock_qty = flt(source.stock_qty or source_qty)
-    target.stock_qty = source_stock_qty + returned_qty - received_qty
+    returned_stock_qty = returned_qty * conversion_factor
+    received_stock_qty = received_qty * conversion_factor
+    target.stock_qty = source_stock_qty + returned_stock_qty - received_stock_qty
     
     # Map net_rate and base_net_rate from source (taxable rate)
     if source.get("net_rate"):
         target.net_rate = flt(source.net_rate)
     if source.get("base_net_rate"):
         target.base_net_rate = flt(source.base_net_rate)
+
+    # BNS transfer rate is the source DN item's outgoing valuation mirror (incoming_rate on DN Item).
+    # Keep this separate from billing/net rate.
+    if getattr(target, "meta", None) and target.meta.has_field("bns_transfer_rate"):
+        target.bns_transfer_rate = _get_dn_item_transfer_rate(source)
     
     target.received_qty = 0
 
@@ -748,11 +3870,44 @@ def _update_item(source, target, source_parent) -> None:
     target.purchase_order = None
     target.purchase_order_item = None
     
+    target_wh = target.warehouse or target.rejected_warehouse
+
     # Clear accounting fields to let system auto-populate
     _clear_item_level_fields(target)
-    
-    if source.get("use_serial_batch_fields"):
-        target.set("use_serial_batch_fields", 1)
+
+    _duplicate_serial_and_batch_bundle(
+        source, target,
+        target_warehouse=target_wh,
+        transaction_type="Inward",
+    )
+
+
+def _get_dn_item_transfer_rate(dn_item) -> float:
+    """Get outgoing valuation mirror for a Delivery Note Item."""
+    rate = flt(dn_item.get("incoming_rate") or 0)
+    if rate:
+        return rate
+
+    # Fallback to DB in case mapper source did not carry incoming_rate.
+    if dn_item.get("name"):
+        return flt(
+            frappe.db.get_value("Delivery Note Item", dn_item.get("name"), "incoming_rate") or 0
+        )
+    return 0.0
+
+
+def _get_si_item_transfer_rate(si_item) -> float:
+    """Get outgoing valuation mirror for a Sales Invoice Item."""
+    rate = flt(si_item.get("incoming_rate") or 0)
+    if rate:
+        return rate
+
+    # Fallback to DB in case mapper source did not carry incoming_rate.
+    if si_item.get("name"):
+        return flt(
+            frappe.db.get_value("Sales Invoice Item", si_item.get("name"), "incoming_rate") or 0
+        )
+    return 0.0
 
 
 def _clear_item_level_fields(target) -> None:
@@ -814,6 +3969,9 @@ def update_delivery_note_status_for_bns_internal(doc, method: Optional[str] = No
                 doc.db_set("status", "BNS Internally Transferred", update_modified=False)
                 doc.db_set("per_billed", per_billed, update_modified=False)
                 doc.db_set("is_bns_internal_customer", 1, update_modified=False)
+                # Ensure GL gets rebuilt with BNS rewrite even if initial submit happened
+                # before patch load in this process.
+                _trigger_bns_internal_gl_repost(doc, source="dn_on_submit_status_update")
                 frappe.clear_cache(doctype="Delivery Note")
                 logger.info(f"Updated Delivery Note {doc.name} status to BNS Internally Transferred (same GSTIN)")
             else:
@@ -853,24 +4011,29 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
         return
 
     try:
-        # Check if PR is from DN (same GSTIN) or SI (different GSTIN)
-        # Check supplier_delivery_note to determine source
+        # Resolve source with canonical priority:
+        # 1) bns_inter_company_reference (authoritative)
+        # 2) supplier_delivery_note (legacy fallback only when canonical is empty)
         is_bns_internal = is_bns_internal_supplier(doc)
+        source_ref = (doc.get("bns_inter_company_reference") or "").strip()
+        legacy_ref = (doc.get("supplier_delivery_note") or "").strip()
+        source_dn = None
+        source_si = None
 
-        # If supplier_delivery_note exists, check if it's a DN or SI
-        if doc.supplier_delivery_note:
-            # Check if supplier_delivery_note is a DN
-            dn_exists = frappe.db.exists("Delivery Note", doc.supplier_delivery_note)
-            if dn_exists:
-                # From DN - same GSTIN
+        if source_ref:
+            if frappe.db.exists("Delivery Note", source_ref):
+                source_dn = source_ref
                 is_bns_internal = True
-                # Do not set standard represents_company on PR; use BNS fields only.
-            else:
-                # Check if it's a Sales Invoice
-                si_exists = frappe.db.exists("Sales Invoice", doc.supplier_delivery_note)
-                if si_exists:
-                    # From SI - different GSTIN
-                    is_bns_internal = False
+            elif frappe.db.exists("Sales Invoice", source_ref):
+                source_si = source_ref
+                is_bns_internal = False
+        elif legacy_ref:
+            if frappe.db.exists("Delivery Note", legacy_ref):
+                source_dn = legacy_ref
+                is_bns_internal = True
+            elif frappe.db.exists("Sales Invoice", legacy_ref):
+                source_si = legacy_ref
+                is_bns_internal = False
         
         # Update is_bns_internal_supplier field
         if is_bns_internal != doc.get("is_bns_internal_supplier"):
@@ -882,9 +4045,17 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
             doc.db_set("status", "BNS Internally Transferred", update_modified=False)
             doc.db_set("per_billed", per_billed, update_modified=False)
             doc.db_set("is_bns_internal_supplier", 1, update_modified=False)
+            # Keep item-level BNS transfer rates aligned with DN item incoming_rate.
+            if source_dn:
+                _sync_pr_item_transfer_rate_from_dn(source_dn, pr_name=doc.name)
+                _mirror_pr_item_valuation_from_transfer_rate(doc.name)
+                _sync_pr_sle_from_transfer_rate(doc.name)
+            # Ensure GL gets rebuilt with BNS rewrite even if initial submit happened
+            # before patch load in this process.
+            _trigger_bns_internal_gl_repost(doc, source="pr_on_submit_status_update")
             # Ensure Delivery Note is updated with linked PR (bidirectional link)
-            if doc.supplier_delivery_note and frappe.db.exists("Delivery Note", doc.supplier_delivery_note):
-                _update_delivery_note_reference(doc.supplier_delivery_note, doc.name)
+            if source_dn:
+                _update_delivery_note_reference(source_dn, doc.name)
                 frappe.clear_cache(doctype="Delivery Note")
             frappe.clear_cache(doctype="Purchase Receipt")
             logger.info(f"Updated Purchase Receipt {doc.name} status to BNS Internally Transferred (from DN)")
@@ -894,6 +4065,11 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
             if doc.status != "To Bill":
                 doc.db_set("status", "To Bill", update_modified=False)
             doc.db_set("is_bns_internal_supplier", 0, update_modified=False)
+            if source_si:
+                _sync_pr_item_transfer_rate_from_si(source_si, pr_name=doc.name)
+                _mirror_pr_item_valuation_from_transfer_rate(doc.name)
+                _sync_pr_sle_from_transfer_rate(doc.name)
+                _trigger_bns_internal_gl_repost(doc, source="pr_si_on_submit_transfer_rate_sync")
             frappe.clear_cache(doctype="Purchase Receipt")
             logger.info(f"Updated Purchase Receipt {doc.name} status to To Bill (from SI)")
         
@@ -902,42 +4078,1033 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
         raise
 
 
-def _should_update_internal_status(doc, field_name: str, check_reference: bool = False) -> bool:
-    """Check if the document status should be updated for internal transfers."""
-    if doc.docstatus != 1:
+# Temporarily disabled unused helper (kept commented for rollback safety).
+# def _should_update_internal_status(doc, field_name: str, check_reference: bool = False) -> bool:
+#     """Check if the document status should be updated for internal transfers."""
+#     if doc.docstatus != 1:
+#         return False
+#
+#     if check_reference:
+#         return bool(doc.bns_inter_company_reference or getattr(doc, field_name, False))
+#
+#     return bool(getattr(doc, field_name, False))
+
+
+def _get_submitted_prs_for_dn(dn_name: str) -> list[str]:
+    """Get submitted Purchase Receipts linked to a Delivery Note for DN->PR flow."""
+    pr_names = set(
+        frappe.get_all(
+            "Purchase Receipt",
+            filters={"supplier_delivery_note": dn_name, "docstatus": 1},
+            pluck="name",
+        )
+    )
+
+    pr_names.update(
+        frappe.get_all(
+            "Purchase Receipt",
+            filters={"bns_inter_company_reference": dn_name, "docstatus": 1},
+            pluck="name",
+        )
+    )
+    return list(pr_names)
+
+
+def _get_submitted_prs_for_si(si_name: str) -> list[str]:
+    """Get submitted Purchase Receipts linked to a Sales Invoice for SI->PR flow."""
+    pr_names = set(
+        frappe.get_all(
+            "Purchase Receipt",
+            filters={"bns_inter_company_reference": si_name, "docstatus": 1},
+            pluck="name",
+        )
+    )
+    pr_names.update(
+        frappe.get_all(
+            "Purchase Receipt",
+            filters={"supplier_delivery_note": si_name, "docstatus": 1},
+            pluck="name",
+        )
+    )
+    return list(pr_names)
+
+
+def _get_submitted_pis_for_si(si_name: str) -> list[str]:
+    """Get submitted Purchase Invoices linked to a Sales Invoice for SI->PI flow."""
+    pi_names = set(
+        frappe.get_all(
+            "Purchase Invoice",
+            filters={"bns_inter_company_reference": si_name, "docstatus": 1},
+            pluck="name",
+        )
+    )
+    pr_names = _get_submitted_prs_for_si(si_name)
+    if pr_names:
+        linked_pi_names = frappe.get_all(
+            "Purchase Invoice Item",
+            filters={"purchase_receipt": ("in", pr_names), "docstatus": 1},
+            pluck="parent",
+        )
+        if linked_pi_names:
+            pi_names.update(linked_pi_names)
+    return sorted(pi_names)
+
+
+def _mirror_pr_item_valuation_from_transfer_rate(pr_name: str) -> int:
+    """Mirror PR item valuation_rate from bns_transfer_rate for DN->PR same-GSTIN flow."""
+    if not pr_name or not frappe.db.exists("Purchase Receipt", pr_name):
+        return 0
+
+    pr_meta = frappe.get_meta("Purchase Receipt Item")
+    if not pr_meta.has_field("bns_transfer_rate"):
+        return 0
+
+    pr = frappe.get_doc("Purchase Receipt", pr_name)
+    if pr.docstatus != 1:
+        return 0
+    source_ref = (pr.get("bns_inter_company_reference") or pr.get("supplier_delivery_note") or "").strip()
+    if not source_ref:
+        return 0
+    if not (
+        (pr.get("is_bns_internal_supplier") and frappe.db.exists("Delivery Note", source_ref))
+        or frappe.db.exists("Sales Invoice", source_ref)
+    ):
+        return 0
+
+    updated_count = 0
+    pr_items = frappe.get_all(
+        "Purchase Receipt Item",
+        filters={"parent": pr_name},
+        fields=["name", "bns_transfer_rate", "valuation_rate"],
+    )
+    for item in pr_items:
+        transfer_rate = flt(item.get("bns_transfer_rate") or 0)
+        if transfer_rate <= 0:
+            continue
+        if flt(item.get("valuation_rate") or 0) != transfer_rate:
+            frappe.db.set_value(
+                "Purchase Receipt Item",
+                item.get("name"),
+                "valuation_rate",
+                transfer_rate,
+                update_modified=False,
+            )
+            updated_count += 1
+
+    if updated_count:
+        frappe.clear_cache(doctype="Purchase Receipt")
+        logger.info("Mirrored valuation_rate from bns_transfer_rate for %s PR item rows in %s", updated_count, pr_name)
+
+    return updated_count
+
+
+def _sync_pr_sle_from_transfer_rate(pr_name: str) -> int:
+    """Sync PR Stock Ledger Entry incoming values from PR Item transfer-rate."""
+    if not pr_name or not frappe.db.exists("Purchase Receipt", pr_name):
+        return 0
+
+    pr = frappe.get_doc("Purchase Receipt", pr_name)
+    if pr.docstatus != 1:
+        return 0
+
+    source_ref = (pr.get("bns_inter_company_reference") or pr.get("supplier_delivery_note") or "").strip()
+    if not source_ref:
+        return 0
+    if not (
+        (pr.get("is_bns_internal_supplier") and frappe.db.exists("Delivery Note", source_ref))
+        or frappe.db.exists("Sales Invoice", source_ref)
+    ):
+        return 0
+
+    transfer_rate_by_item = {}
+    for row in (pr.items or []):
+        transfer_rate = flt(row.get("bns_transfer_rate") or 0)
+        if transfer_rate > 0:
+            transfer_rate_by_item[row.name] = transfer_rate
+    if not transfer_rate_by_item:
+        return 0
+
+    sle_rows = frappe.get_all(
+        "Stock Ledger Entry",
+        filters={"voucher_type": "Purchase Receipt", "voucher_no": pr_name},
+        fields=["name", "voucher_detail_no", "actual_qty", "incoming_rate", "stock_value_difference"],
+    )
+    if not sle_rows:
+        return 0
+
+    updated_count = 0
+    for sle in sle_rows:
+        if flt(sle.get("actual_qty") or 0) <= 0:
+            continue
+        transfer_rate = transfer_rate_by_item.get(sle.get("voucher_detail_no"))
+        if not transfer_rate:
+            continue
+
+        expected_svd = flt(sle.get("actual_qty") or 0) * transfer_rate
+        updates = {}
+        if flt(sle.get("incoming_rate") or 0) != transfer_rate:
+            updates["incoming_rate"] = transfer_rate
+        if flt(sle.get("stock_value_difference") or 0) != expected_svd:
+            updates["stock_value_difference"] = expected_svd
+
+        if updates:
+            frappe.db.set_value("Stock Ledger Entry", sle.get("name"), updates, update_modified=False)
+            updated_count += 1
+
+    if updated_count:
+        frappe.clear_cache(doctype="Stock Ledger Entry")
+        logger.info(
+            "Synced PR SLE incoming/stock diff from transfer-rate for %s rows in %s",
+            updated_count,
+            pr_name,
+        )
+    _force_rebuild_bns_gl_for_voucher("Purchase Receipt", pr_name, context="pr_transfer_rate_sle_sync")
+    return updated_count
+
+
+def _mirror_pi_item_valuation_from_transfer_rate(pi_name: str) -> int:
+    """Mirror PI item valuation_rate from bns_transfer_rate for SI->PI flow."""
+    if not pi_name or not frappe.db.exists("Purchase Invoice", pi_name):
+        return 0
+
+    pi_meta = frappe.get_meta("Purchase Invoice Item")
+    if not pi_meta.has_field("bns_transfer_rate"):
+        return 0
+
+    pi = frappe.get_doc("Purchase Invoice", pi_name)
+    if pi.docstatus != 1 or not pi.get("is_bns_internal_supplier"):
+        return 0
+    if not cint(pi.get("update_stock")):
+        return 0
+    source_ref = (pi.get("bns_inter_company_reference") or "").strip()
+    if not source_ref or not frappe.db.exists("Sales Invoice", source_ref):
+        return 0
+
+    updated_count = 0
+    pi_items = frappe.get_all(
+        "Purchase Invoice Item",
+        filters={"parent": pi_name},
+        fields=["name", "bns_transfer_rate", "valuation_rate"],
+    )
+    for item in pi_items:
+        transfer_rate = flt(item.get("bns_transfer_rate") or 0)
+        if transfer_rate <= 0:
+            continue
+        if flt(item.get("valuation_rate") or 0) != transfer_rate:
+            frappe.db.set_value(
+                "Purchase Invoice Item",
+                item.get("name"),
+                "valuation_rate",
+                transfer_rate,
+                update_modified=False,
+            )
+            updated_count += 1
+
+    if updated_count:
+        frappe.clear_cache(doctype="Purchase Invoice")
+        logger.info("Mirrored valuation_rate from bns_transfer_rate for %s PI item rows in %s", updated_count, pi_name)
+
+    return updated_count
+
+
+def _sync_pi_sle_from_transfer_rate(pi_name: str) -> int:
+    """Sync PI Stock Ledger Entry incoming values from PI Item transfer-rate."""
+    if not pi_name or not frappe.db.exists("Purchase Invoice", pi_name):
+        return 0
+
+    pi = frappe.get_doc("Purchase Invoice", pi_name)
+    if pi.docstatus != 1 or not cint(pi.get("update_stock")):
+        return 0
+
+    transfer_rate_by_item = {}
+    for row in (pi.items or []):
+        transfer_rate = flt(row.get("bns_transfer_rate") or 0)
+        if transfer_rate > 0:
+            transfer_rate_by_item[row.name] = transfer_rate
+    if not transfer_rate_by_item:
+        return 0
+
+    sle_rows = frappe.get_all(
+        "Stock Ledger Entry",
+        filters={"voucher_type": "Purchase Invoice", "voucher_no": pi_name},
+        fields=["name", "voucher_detail_no", "actual_qty", "incoming_rate", "stock_value_difference"],
+    )
+    if not sle_rows:
+        return 0
+
+    updated_count = 0
+    for sle in sle_rows:
+        if flt(sle.get("actual_qty") or 0) <= 0:
+            continue
+        transfer_rate = transfer_rate_by_item.get(sle.get("voucher_detail_no"))
+        if not transfer_rate:
+            continue
+
+        expected_svd = flt(sle.get("actual_qty") or 0) * transfer_rate
+        updates = {}
+        if flt(sle.get("incoming_rate") or 0) != transfer_rate:
+            updates["incoming_rate"] = transfer_rate
+        if flt(sle.get("stock_value_difference") or 0) != expected_svd:
+            updates["stock_value_difference"] = expected_svd
+
+        if updates:
+            frappe.db.set_value("Stock Ledger Entry", sle.get("name"), updates, update_modified=False)
+            updated_count += 1
+
+    if updated_count:
+        frappe.clear_cache(doctype="Stock Ledger Entry")
+        logger.info(
+            "Synced PI SLE incoming/stock diff from transfer-rate for %s rows in %s",
+            updated_count,
+            pi_name,
+        )
+    # Keep accounting ledger in lockstep with SLE transfer-rate authority.
+    _force_rebuild_bns_gl_for_voucher(
+        "Purchase Invoice",
+        pi_name,
+        context="pi_transfer_rate_sle_sync",
+    )
+    return updated_count
+
+
+def _sync_pr_item_transfer_rate_from_dn(dn_name: str, pr_name: Optional[str] = None) -> int:
+    """Sync Purchase Receipt Item.bns_transfer_rate from Delivery Note Item.incoming_rate."""
+    if not dn_name or not frappe.db.exists("Delivery Note", dn_name):
+        return 0
+
+    pr_item_meta = frappe.get_meta("Purchase Receipt Item")
+    if not pr_item_meta.has_field("bns_transfer_rate"):
+        return 0
+
+    dn_items = frappe.get_all(
+        "Delivery Note Item",
+        filters={"parent": dn_name},
+        fields=["name", "incoming_rate"],
+    )
+    if not dn_items:
+        return 0
+
+    dn_rate_by_item = {d.name: flt(d.incoming_rate or 0) for d in dn_items}
+
+    if pr_name:
+        pr_names = [pr_name] if frappe.db.exists("Purchase Receipt", pr_name) else []
+    else:
+        pr_names = _get_submitted_prs_for_dn(dn_name)
+
+    if not pr_names:
+        return 0
+
+    updated_count = 0
+    for current_pr in pr_names:
+        pr_items = frappe.get_all(
+            "Purchase Receipt Item",
+            filters={"parent": current_pr},
+            fields=["name", "delivery_note_item", "bns_transfer_rate"],
+        )
+        for item in pr_items:
+            source_dn_item = item.get("delivery_note_item")
+            if not source_dn_item:
+                continue
+
+            source_rate = dn_rate_by_item.get(source_dn_item)
+            if source_rate is None:
+                continue
+
+            if flt(item.get("bns_transfer_rate") or 0) != flt(source_rate):
+                frappe.db.set_value(
+                    "Purchase Receipt Item",
+                    item.get("name"),
+                    "bns_transfer_rate",
+                    flt(source_rate),
+                    update_modified=False,
+                )
+                updated_count += 1
+        _sync_pr_sle_from_transfer_rate(current_pr)
+
+    if updated_count:
+        frappe.clear_cache(doctype="Purchase Receipt")
+        logger.info("Synced bns_transfer_rate for %s PR items from Delivery Note %s", updated_count, dn_name)
+
+    return updated_count
+
+
+def _sync_si_item_incoming_rate_from_dn(
+    dn_name: str, si_name: Optional[str] = None
+) -> Tuple[int, Set[str]]:
+    """
+    Sync Sales Invoice Item.incoming_rate from Delivery Note Item.incoming_rate.
+
+    This is required for DN->SI chains where ERPNext repost updates DN valuation
+    but does not always push updated incoming_rate into existing SI item rows.
+    """
+    if not dn_name or not frappe.db.exists("Delivery Note", dn_name):
+        return 0, set()
+
+    dn_items = frappe.get_all(
+        "Delivery Note Item",
+        filters={"parent": dn_name},
+        fields=["name", "incoming_rate"],
+    )
+    if not dn_items:
+        return 0, set()
+
+    dn_rate_by_item = {d.name: flt(d.incoming_rate or 0) for d in dn_items}
+    if not dn_rate_by_item:
+        return 0, set()
+
+    si_filters: Dict[str, Any] = {"delivery_note": dn_name}
+    if si_name:
+        si_filters["parent"] = si_name
+
+    si_items = frappe.get_all(
+        "Sales Invoice Item",
+        filters=si_filters,
+        fields=["name", "parent", "dn_detail", "incoming_rate"],
+    )
+    if not si_items:
+        return 0, set()
+
+    submitted_sis = set(
+        frappe.get_all(
+            "Sales Invoice",
+            filters={"name": ("in", sorted({row.parent for row in si_items})), "docstatus": 1},
+            pluck="name",
+        )
+    )
+    if not submitted_sis:
+        return 0, set()
+
+    updated_count = 0
+    impacted_sis: Set[str] = set()
+    for row in si_items:
+        if row.parent not in submitted_sis:
+            continue
+        dn_detail = (row.get("dn_detail") or "").strip()
+        if not dn_detail:
+            continue
+        source_rate = dn_rate_by_item.get(dn_detail)
+        if source_rate is None:
+            continue
+        if flt(row.get("incoming_rate") or 0) != flt(source_rate):
+            frappe.db.set_value(
+                "Sales Invoice Item",
+                row.get("name"),
+                "incoming_rate",
+                flt(source_rate),
+                update_modified=False,
+            )
+            updated_count += 1
+            impacted_sis.add(row.parent)
+
+    if updated_count:
+        frappe.clear_cache(doctype="Sales Invoice")
+        logger.info(
+            "Synced SI incoming_rate from Delivery Note %s for %s SI item rows across %s SI docs",
+            dn_name,
+            updated_count,
+            len(impacted_sis),
+        )
+
+    return updated_count, impacted_sis
+
+
+def _sync_pr_item_transfer_rate_from_si(si_name: str, pr_name: Optional[str] = None) -> int:
+    """Sync Purchase Receipt Item.bns_transfer_rate from Sales Invoice Item.incoming_rate."""
+    if not si_name or not frappe.db.exists("Sales Invoice", si_name):
+        return 0
+
+    pr_item_meta = frappe.get_meta("Purchase Receipt Item")
+    if not pr_item_meta.has_field("bns_transfer_rate"):
+        return 0
+
+    si_items = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"parent": si_name},
+        fields=["name", "incoming_rate"],
+    )
+    if not si_items:
+        return 0
+
+    si_rate_by_item = {d.name: flt(d.incoming_rate or 0) for d in si_items}
+    if pr_name:
+        pr_names = [pr_name] if frappe.db.exists("Purchase Receipt", pr_name) else []
+    else:
+        pr_names = _get_submitted_prs_for_si(si_name)
+    if not pr_names:
+        return 0
+
+    updated_count = 0
+    for current_pr in pr_names:
+        pr_items = frappe.get_all(
+            "Purchase Receipt Item",
+            filters={"parent": current_pr},
+            fields=["name", "sales_invoice_item", "bns_transfer_rate"],
+        )
+        for item in pr_items:
+            source_si_item = item.get("sales_invoice_item")
+            if not source_si_item:
+                continue
+            source_rate = si_rate_by_item.get(source_si_item)
+            if source_rate is None:
+                continue
+            if flt(item.get("bns_transfer_rate") or 0) != flt(source_rate):
+                frappe.db.set_value(
+                    "Purchase Receipt Item",
+                    item.get("name"),
+                    "bns_transfer_rate",
+                    flt(source_rate),
+                    update_modified=False,
+                )
+                updated_count += 1
+        _sync_pr_sle_from_transfer_rate(current_pr)
+
+    if updated_count:
+        frappe.clear_cache(doctype="Purchase Receipt")
+        logger.info("Synced bns_transfer_rate for %s PR items from Sales Invoice %s", updated_count, si_name)
+
+    return updated_count
+
+
+def _sync_pi_item_transfer_rate_from_si(si_name: str, pi_name: Optional[str] = None) -> int:
+    """Sync Purchase Invoice Item.bns_transfer_rate from Sales Invoice Item.incoming_rate."""
+    if not si_name or not frappe.db.exists("Sales Invoice", si_name):
+        return 0
+
+    pi_item_meta = frappe.get_meta("Purchase Invoice Item")
+    if not pi_item_meta.has_field("bns_transfer_rate"):
+        return 0
+
+    si_items = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"parent": si_name},
+        fields=["name", "incoming_rate"],
+    )
+    if not si_items:
+        return 0
+
+    si_rate_by_item = {d.name: flt(d.incoming_rate or 0) for d in si_items}
+    if pi_name:
+        pi_names = [pi_name] if frappe.db.exists("Purchase Invoice", pi_name) else []
+    else:
+        pi_names = _get_submitted_pis_for_si(si_name)
+    if not pi_names:
+        return 0
+
+    updated_count = 0
+    for current_pi in pi_names:
+        current_pi_updated = False
+        pi_items = frappe.get_all(
+            "Purchase Invoice Item",
+            filters={"parent": current_pi},
+            fields=["name", "sales_invoice_item", "purchase_receipt", "pr_detail", "bns_transfer_rate"],
+        )
+
+        pr_item_rates: Dict[str, float] = {}
+        pr_detail_names = sorted(
+            {
+                (item.get("pr_detail") or "").strip()
+                for item in pi_items
+                if (item.get("pr_detail") or "").strip()
+            }
+        )
+        if pr_detail_names:
+            pr_rows = frappe.get_all(
+                "Purchase Receipt Item",
+                filters={"name": ("in", pr_detail_names)},
+                fields=["name", "bns_transfer_rate"],
+            )
+            pr_item_rates = {row.name: flt(row.bns_transfer_rate or 0) for row in pr_rows}
+
+        for item in pi_items:
+            source_rate = None
+            source_si_item = (item.get("sales_invoice_item") or "").strip()
+            if source_si_item:
+                source_rate = si_rate_by_item.get(source_si_item)
+
+            # For SI->PR->PI chain, keep PI transfer-rate aligned from PR item linkage.
+            # PR owns stock SLE/GL legs, but PI transfer-rate should remain consistent.
+            if source_rate is None:
+                pr_detail = (item.get("pr_detail") or "").strip()
+                if pr_detail:
+                    source_rate = pr_item_rates.get(pr_detail)
+
+            if source_rate is None:
+                continue
+            if flt(item.get("bns_transfer_rate") or 0) != flt(source_rate):
+                frappe.db.set_value(
+                    "Purchase Invoice Item",
+                    item.get("name"),
+                    "bns_transfer_rate",
+                    flt(source_rate),
+                    update_modified=False,
+                )
+                updated_count += 1
+                current_pi_updated = True
+
+        if current_pi_updated:
+            _sync_pi_sle_from_transfer_rate(current_pi)
+
+    if updated_count:
+        frappe.clear_cache(doctype="Purchase Invoice")
+        logger.info("Synced bns_transfer_rate for %s PI items from Sales Invoice %s", updated_count, si_name)
+
+    return updated_count
+
+
+def _trigger_pr_repost_for_transfer_rate(pr_name: str, source_repost_name: str) -> bool:
+    """Trigger PR repost after transfer-rate mirror with lock-first and finally cleanup."""
+    if not pr_name or not frappe.db.exists("Purchase Receipt", pr_name):
         return False
-        
-    if check_reference:
-        return bool(doc.bns_inter_company_reference or getattr(doc, field_name, False))
-    
-    return bool(getattr(doc, field_name, False))
+    per_repost_key = f"bns_transfer_rate_pr_repost::{source_repost_name}::{pr_name}"
+    if frappe.cache().get_value(per_repost_key):
+        return False
+    is_real_repost_doc = bool(
+        source_repost_name and frappe.db.exists("Repost Item Valuation", source_repost_name)
+    )
+    scope = "pr_transfer_rate_repost" if is_real_repost_doc else "bns_internal_gl_repost"
+    repost_doc_name = source_repost_name if is_real_repost_doc else pr_name
+    voucher_type = "Purchase Receipt"
+    voucher_no = pr_name
+    if not _claim_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no):
+        return False
+    pr = frappe.get_doc("Purchase Receipt", pr_name)
+    if pr.docstatus != 1:
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
+        return False
+    source_ref = (pr.get("bns_inter_company_reference") or pr.get("supplier_delivery_note") or "").strip()
+    if not source_ref:
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
+        return False
+    if not (
+        (pr.get("is_bns_internal_supplier") and frappe.db.exists("Delivery Note", source_ref))
+        or frappe.db.exists("Sales Invoice", source_ref)
+    ):
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
+        return False
+    try:
+        _apply_bns_transfer_rate_stock_ledger_patch()
+        pr.repost_future_sle_and_gle(force=True)
+        _mark_bns_repost_tracking_processed(scope, repost_doc_name, voucher_type, voucher_no)
+        frappe.cache().set_value(per_repost_key, 1, expires_in_sec=6 * 60 * 60)
+        logger.info("Triggered PR repost for transfer-rate sync: %s (source repost: %s)", pr_name, source_repost_name)
+        return True
+    except Exception as e:
+        _mark_bns_repost_tracking_failed(scope, repost_doc_name, voucher_type, voucher_no, str(e))
+        logger.error("PR repost for transfer-rate failed %s: %s", pr_name, str(e))
+        return False
+    finally:
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
 
 
-def _calculate_per_billed(doc) -> int:
-    """Calculate the per_billed value based on GSTIN comparison."""
-    per_billed = 100
-    billing_address_gstin = getattr(doc, 'billing_address_gstin', None)
-    company_gstin = getattr(doc, 'company_gstin', None)
-    
-    if billing_address_gstin is not None and company_gstin is not None:
-        if billing_address_gstin != company_gstin:
-            per_billed = 0
-            
-    return per_billed
+def _trigger_pi_repost_for_transfer_rate(pi_name: str, source_repost_name: str) -> bool:
+    """Trigger PI repost after transfer-rate mirror with lock-first and finally cleanup."""
+    if not pi_name or not frappe.db.exists("Purchase Invoice", pi_name):
+        return False
+    per_repost_key = f"bns_transfer_rate_pi_repost::{source_repost_name}::{pi_name}"
+    if frappe.cache().get_value(per_repost_key):
+        return False
+    is_real_repost_doc = bool(
+        source_repost_name and frappe.db.exists("Repost Item Valuation", source_repost_name)
+    )
+    scope = "pi_transfer_rate_repost" if is_real_repost_doc else "bns_internal_gl_repost"
+    repost_doc_name = source_repost_name if is_real_repost_doc else pi_name
+    voucher_type = "Purchase Invoice"
+    voucher_no = pi_name
+    if not _claim_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no):
+        return False
+    pi = frappe.get_doc("Purchase Invoice", pi_name)
+    if pi.docstatus != 1:
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
+        return False
+    if not pi.get("is_bns_internal_supplier") or not cint(pi.get("update_stock")):
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
+        return False
+    source_ref = (pi.get("bns_inter_company_reference") or "").strip()
+    if not source_ref or not frappe.db.exists("Sales Invoice", source_ref):
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
+        return False
+    try:
+        _apply_bns_transfer_rate_stock_ledger_patch()
+        pi.repost_future_sle_and_gle(force=True)
+        _mark_bns_repost_tracking_processed(scope, repost_doc_name, voucher_type, voucher_no)
+        frappe.cache().set_value(per_repost_key, 1, expires_in_sec=6 * 60 * 60)
+        logger.info("Triggered PI repost for transfer-rate sync: %s (source repost: %s)", pi_name, source_repost_name)
+        return True
+    except Exception as e:
+        _mark_bns_repost_tracking_failed(scope, repost_doc_name, voucher_type, voucher_no, str(e))
+        logger.error("PI repost for transfer-rate failed %s: %s", pi_name, str(e))
+        return False
+    finally:
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
 
 
-def _update_document_status(doc, doctype: str, per_billed: int) -> None:
-    """Update document status and per_billed value."""
-    update_fields = {
-        "status": "BNS Internally Transferred"
+def _resolve_impacted_vouchers_for_repost(
+    doc, target_voucher_type: str
+) -> Tuple[List[str], Dict[str, int]]:
+    """
+    Resolve impacted vouchers for repost callbacks across both repost modes.
+
+    Sources:
+    - direct transaction metadata on repost doc
+    - get_affected_transactions(doc)
+    - item+warehouse fallback via get_future_stock_vouchers
+    """
+    discovered: Set[str] = set()
+    source_counts = {
+        "transaction": 0,
+        "affected_transactions": 0,
+        "item_warehouse_fallback": 0,
     }
-    
-    # Only set per_billed for doctypes that have this field (Delivery Note, Purchase Receipt)
-    if doctype in ["Delivery Note", "Purchase Receipt"]:
-        update_fields["per_billed"] = per_billed
-    
-    frappe.db.set_value(doctype, doc.name, update_fields)
-    frappe.clear_cache(doctype=doctype) 
+
+    def _add_if_valid(voucher_no: Optional[str], source_key: str) -> None:
+        if (
+            voucher_no
+            and voucher_no not in discovered
+            and frappe.db.exists(target_voucher_type, voucher_no)
+        ):
+            discovered.add(voucher_no)
+            source_counts[source_key] += 1
+
+    if (
+        doc.get("based_on") == "Transaction"
+        and doc.get("voucher_type") == target_voucher_type
+        and doc.get("voucher_no")
+    ):
+        _add_if_valid(doc.get("voucher_no"), "transaction")
+
+    try:
+        from erpnext.stock.stock_ledger import get_affected_transactions
+
+        affected = get_affected_transactions(doc)
+    except Exception:
+        affected = set()
+
+    for voucher_type, voucher_no in affected:
+        if voucher_type == target_voucher_type:
+            _add_if_valid(voucher_no, "affected_transactions")
+
+    # Item+warehouse repost can miss direct transaction context for SI/DN source docs.
+    if (
+        doc.get("based_on") == "Item and Warehouse"
+        and doc.get("item_code")
+        and doc.get("warehouse")
+        and doc.get("company")
+        and doc.get("posting_date")
+    ):
+        try:
+            from erpnext.accounts.utils import get_future_stock_vouchers
+
+            fallback_vouchers = get_future_stock_vouchers(
+                posting_date=doc.get("posting_date"),
+                posting_time=doc.get("posting_time") or "00:00:00",
+                for_warehouses=[doc.get("warehouse")],
+                for_items=[doc.get("item_code")],
+                company=doc.get("company"),
+            )
+        except Exception:
+            fallback_vouchers = []
+
+        for voucher_type, voucher_no in fallback_vouchers:
+            if voucher_type == target_voucher_type:
+                _add_if_valid(voucher_no, "item_warehouse_fallback")
+
+    return sorted(discovered), source_counts
+
+
+def refresh_pr_transfer_rate_after_repost(doc, method: Optional[str] = None) -> None:
+    """Refresh PR item bns_transfer_rate after repost completion (DN->PR same GSTIN)."""
+    if doc.doctype != "Repost Item Valuation":
+        return
+    if doc.docstatus != 1 or doc.status != "Completed":
+        return
+
+    _apply_bns_transfer_rate_stock_ledger_patch()
+
+    cache_key = f"bns_transfer_rate_repost_done::{doc.name}"
+    if frappe.cache().get_value(cache_key):
+        return
+
+    dn_names, source_counts = _resolve_impacted_vouchers_for_repost(doc, "Delivery Note")
+
+    if not dn_names:
+        logger.info(
+            "Repost %s: no Delivery Note sources resolved (sources=%s)",
+            doc.name,
+            source_counts,
+        )
+        frappe.cache().set_value(cache_key, 1, expires_in_sec=_BNS_REPOST_CACHE_TTL_SEC)
+        return
+
+    logger.info(
+        "Repost %s: resolved Delivery Note sources=%s (count=%s)",
+        doc.name,
+        source_counts,
+        len(dn_names),
+    )
+
+    total_updated = 0
+    total_mirrored = 0
+    si_incoming_sync_count = 0
+    impacted_sis_from_dn: Set[str] = set()
+    affected_prs = set()
+    for dn_name in dn_names:
+        si_updated, impacted_sis = _sync_si_item_incoming_rate_from_dn(dn_name)
+        si_incoming_sync_count += si_updated
+        impacted_sis_from_dn.update(impacted_sis)
+        for pr_name in _get_submitted_prs_for_dn(dn_name):
+            updated = _sync_pr_item_transfer_rate_from_dn(dn_name, pr_name=pr_name)
+            mirrored = _mirror_pr_item_valuation_from_transfer_rate(pr_name)
+            total_updated += updated
+            total_mirrored += mirrored
+            if updated or mirrored:
+                affected_prs.add(pr_name)
+
+    # DN->SI->PR chain: once SI incoming_rate is synced from DN, propagate SI->PR transfer-rate.
+    for si_name in sorted(impacted_sis_from_dn):
+        for pr_name in _get_submitted_prs_for_si(si_name):
+            updated = _sync_pr_item_transfer_rate_from_si(si_name, pr_name=pr_name)
+            mirrored = _mirror_pr_item_valuation_from_transfer_rate(pr_name)
+            total_updated += updated
+            total_mirrored += mirrored
+            if updated or mirrored:
+                affected_prs.add(pr_name)
+
+    triggered_count = 0
+    for pr_name in sorted(affected_prs):
+        if _trigger_pr_repost_for_transfer_rate(pr_name, source_repost_name=doc.name):
+            triggered_count += 1
+
+    if total_updated or total_mirrored or triggered_count:
+        logger.info(
+            "Repost %s: DN->SI incoming sync=%s (%s SI docs), transfer-rate sync=%s, valuation mirror=%s, PR repost triggered=%s for %s Delivery Notes and %s PRs",
+            doc.name,
+            si_incoming_sync_count,
+            len(impacted_sis_from_dn),
+            total_updated,
+            total_mirrored,
+            triggered_count,
+            len(dn_names),
+            len(affected_prs),
+        )
+
+    frappe.cache().set_value(cache_key, 1, expires_in_sec=_BNS_REPOST_CACHE_TTL_SEC)
+
+
+def refresh_si_transfer_rate_after_repost(doc, method: Optional[str] = None) -> None:
+    """Refresh PI/PR item transfer-rate after SI repost completion (SI->PI/SI->PR)."""
+    if doc.doctype != "Repost Item Valuation":
+        return
+    if doc.docstatus != 1 or doc.status != "Completed":
+        return
+
+    _apply_bns_transfer_rate_stock_ledger_patch()
+
+    cache_key = f"bns_transfer_rate_si_repost_done::{doc.name}"
+    if frappe.cache().get_value(cache_key):
+        return
+
+    si_names, source_counts = _resolve_impacted_vouchers_for_repost(doc, "Sales Invoice")
+
+    if not si_names:
+        logger.info(
+            "Repost %s: no Sales Invoice sources resolved (sources=%s)",
+            doc.name,
+            source_counts,
+        )
+        frappe.cache().set_value(cache_key, 1, expires_in_sec=_BNS_REPOST_CACHE_TTL_SEC)
+        return
+
+    logger.info(
+        "Repost %s: resolved Sales Invoice sources=%s (count=%s)",
+        doc.name,
+        source_counts,
+        len(si_names),
+    )
+
+    pi_total_updated = 0
+    pi_total_mirrored = 0
+    pi_triggered_count = 0
+    pr_total_updated = 0
+    pr_total_mirrored = 0
+    affected_prs = set()
+
+    for si_name in si_names:
+        for pi_name in _get_submitted_pis_for_si(si_name):
+            updated = _sync_pi_item_transfer_rate_from_si(si_name, pi_name=pi_name)
+            mirrored = _mirror_pi_item_valuation_from_transfer_rate(pi_name)
+            pi_total_updated += updated
+            pi_total_mirrored += mirrored
+            # Repost PI immediately when transfer-rate/valuation mirror changes so SLE is corrected right away.
+            if updated or mirrored:
+                if _trigger_pi_repost_for_transfer_rate(pi_name, source_repost_name=doc.name):
+                    pi_triggered_count += 1
+
+        for pr_name in _get_submitted_prs_for_si(si_name):
+            updated = _sync_pr_item_transfer_rate_from_si(si_name, pr_name=pr_name)
+            mirrored = _mirror_pr_item_valuation_from_transfer_rate(pr_name)
+            pr_total_updated += updated
+            pr_total_mirrored += mirrored
+            if updated or mirrored:
+                affected_prs.add(pr_name)
+
+    pr_triggered_count = 0
+    for pr_name in sorted(affected_prs):
+        if _trigger_pr_repost_for_transfer_rate(pr_name, source_repost_name=doc.name):
+            pr_triggered_count += 1
+
+    if (
+        pi_total_updated
+        or pi_total_mirrored
+        or pr_total_updated
+        or pr_total_mirrored
+        or pi_triggered_count
+        or pr_triggered_count
+    ):
+        logger.info(
+            "Repost %s: SI transfer-rate PI(sync=%s mirror=%s repost=%s) PR(sync=%s mirror=%s repost=%s) across %s SI docs",
+            doc.name,
+            pi_total_updated,
+            pi_total_mirrored,
+            pi_triggered_count,
+            pr_total_updated,
+            pr_total_mirrored,
+            pr_triggered_count,
+            len(si_names),
+        )
+
+    frappe.cache().set_value(cache_key, 1, expires_in_sec=_BNS_REPOST_CACHE_TTL_SEC)
+
+
+def _is_bns_internal_purchase_invoice_from_si(doc) -> bool:
+    """Return True when submitted PI belongs to BNS internal SI->PI/SI->PR flow."""
+    if not doc or doc.doctype != "Purchase Invoice" or doc.docstatus != 1:
+        return False
+
+    if is_bns_internal_supplier(doc):
+        return True
+
+    si_ref = (doc.get("bns_inter_company_reference") or "").strip()
+    if si_ref and frappe.db.exists("Sales Invoice", si_ref):
+        return True
+
+    bill_no = (doc.get("bill_no") or "").strip()
+    if bill_no and frappe.db.exists("Sales Invoice", {"name": bill_no, "docstatus": 1}):
+        return True
+
+    pr_names = {row.get("purchase_receipt") for row in (doc.items or []) if row.get("purchase_receipt")}
+    if pr_names:
+        linked_si = frappe.get_all(
+            "Purchase Receipt",
+            filters={"name": ("in", list(pr_names)), "docstatus": 1},
+            fields=["bns_inter_company_reference"],
+        )
+        for pr in linked_si:
+            if pr.get("bns_inter_company_reference") and frappe.db.exists("Sales Invoice", pr.bns_inter_company_reference):
+                return True
+
+    return False
+
+
+def _reassert_sales_invoice_bns_internal_status(si_name: str) -> bool:
+    """Re-apply BNS internal status for SI after ERPNext repost status recomputation."""
+    if not si_name or not frappe.db.exists("Sales Invoice", si_name):
+        return False
+
+    si = frappe.get_doc("Sales Invoice", si_name)
+    if not _should_update_sales_invoice_status(si):
+        return False
+    if si.status == "BNS Internally Transferred":
+        return False
+
+    si.db_set("status", "BNS Internally Transferred", update_modified=False)
+    return True
+
+
+def _reassert_purchase_invoice_bns_internal_status(pi_name: str) -> bool:
+    """Re-apply BNS internal status for PI after ERPNext repost status recomputation."""
+    if not pi_name or not frappe.db.exists("Purchase Invoice", pi_name):
+        return False
+
+    pi = frappe.get_doc("Purchase Invoice", pi_name)
+    if not _is_bns_internal_purchase_invoice_from_si(pi):
+        return False
+
+    changed = False
+    if not pi.get("is_bns_internal_supplier"):
+        pi.db_set("is_bns_internal_supplier", 1, update_modified=False)
+        changed = True
+    if pi.status != "BNS Internally Transferred":
+        pi.db_set("status", "BNS Internally Transferred", update_modified=False)
+        changed = True
+
+    return changed
+
+
+def refresh_bns_internal_status_after_repost(doc, method: Optional[str] = None) -> None:
+    """
+    Re-assert BNS internal status after repost completion.
+
+    ERPNext repost flow recomputes outstanding and runs set_status(), which can set
+    SI/PI status to Unpaid/Overdue because core status logic does not know BNS flags.
+    """
+    if doc.doctype != "Repost Item Valuation":
+        return
+    if doc.docstatus != 1 or doc.status != "Completed":
+        return
+
+    cache_key = f"bns_internal_status_repost_done::{doc.name}"
+    if frappe.cache().get_value(cache_key):
+        return
+
+    si_names, si_sources = _resolve_impacted_vouchers_for_repost(doc, "Sales Invoice")
+    pi_names, pi_sources = _resolve_impacted_vouchers_for_repost(doc, "Purchase Invoice")
+
+    linked_pi_names: Set[str] = set()
+    for si_name in si_names:
+        linked_pi_names.update(_get_submitted_pis_for_si(si_name))
+
+    all_pi_names = set(pi_names) | linked_pi_names
+
+    si_updated = sum(1 for si_name in sorted(si_names) if _reassert_sales_invoice_bns_internal_status(si_name))
+    pi_updated = sum(1 for pi_name in sorted(all_pi_names) if _reassert_purchase_invoice_bns_internal_status(pi_name))
+
+    if si_updated or pi_updated:
+        logger.info(
+            "Repost %s: reasserted BNS internal status SI=%s PI=%s (si_sources=%s pi_sources=%s)",
+            doc.name,
+            si_updated,
+            pi_updated,
+            si_sources,
+            pi_sources,
+        )
+
+    frappe.cache().set_value(cache_key, 1, expires_in_sec=_BNS_REPOST_CACHE_TTL_SEC)
+
+
+# Temporarily disabled unused helpers (kept commented for rollback safety).
+# def _calculate_per_billed(doc) -> int:
+#     """Calculate the per_billed value based on GSTIN comparison."""
+#     per_billed = 100
+#     billing_address_gstin = getattr(doc, "billing_address_gstin", None)
+#     company_gstin = getattr(doc, "company_gstin", None)
+#
+#     if billing_address_gstin is not None and company_gstin is not None:
+#         if billing_address_gstin != company_gstin:
+#             per_billed = 0
+#
+#     return per_billed
+#
+#
+# def _update_document_status(doc, doctype: str, per_billed: int) -> None:
+#     """Update document status and per_billed value."""
+#     update_fields = {"status": "BNS Internally Transferred"}
+#
+#     # Only set per_billed for doctypes that have this field (Delivery Note, Purchase Receipt)
+#     if doctype in ["Delivery Note", "Purchase Receipt"]:
+#         update_fields["per_billed"] = per_billed
+#
+#     frappe.db.set_value(doctype, doc.name, update_fields)
+#     frappe.clear_cache(doctype=doctype)
 
 
 @frappe.whitelist()
@@ -957,20 +5124,27 @@ def make_bns_internal_purchase_invoice(source_name: str, target_doc: Optional[Di
         BNSInternalTransferError: If internal transfer setup fails
     """
     try:
+        frappe.lock_doc("Sales Invoice", source_name)
         si = frappe.get_doc("Sales Invoice", source_name)
-        
-        # Validate sales invoice for internal customer
+
         _validate_internal_sales_invoice(si)
-        
-        # Block PI creation when PR already exists from this SI (SI->PR flow takes precedence)
-        pr_name = frappe.db.get_value(
-            "Purchase Receipt",
-            {"supplier_delivery_note": si.name, "docstatus": 1},
-            "name"
-        )
-        if pr_name:
+
+        existing_pi = _get_existing_pi_for_source(si.name)
+        if existing_pi:
             frappe.throw(
-                _("A Purchase Receipt ({0}) already exists for this Sales Invoice. Purchase Invoice cannot be created when a Purchase Receipt exists. Use the existing Purchase Receipt or unlink it first.").format(pr_name),
+                _(
+                    "A Purchase Invoice ({0}) already exists for this Sales Invoice in {1} state. You cannot create another one."
+                ).format(existing_pi.get("name"), _docstatus_label(existing_pi.get("docstatus"))),
+                title=_("Cannot Create Purchase Invoice"),
+            )
+
+        # Block PI creation when PR already exists from this SI (SI->PR flow takes precedence)
+        existing_pr = _get_existing_pr_for_source(si.name)
+        if existing_pr:
+            frappe.throw(
+                _(
+                    "A Purchase Receipt ({0}) already exists for this Sales Invoice in {1} state. Purchase Invoice cannot be created when a Purchase Receipt exists."
+                ).format(existing_pr.get("name"), _docstatus_label(existing_pr.get("docstatus"))),
                 title=_("Cannot Create Purchase Invoice")
             )
         
@@ -988,13 +5162,19 @@ def make_bns_internal_purchase_invoice(source_name: str, target_doc: Optional[Di
             target_doc,
             _set_missing_values_pi,
         )
+
+        _enforce_one_to_one_item_and_amount_parity(
+            source_doc=si,
+            target_doc=doclist,
+            source_link_field="sales_invoice_item",
+            source_item_filter=lambda d: flt(d.get("qty") or 0) != 0,
+            source_label="Sales Invoice",
+            target_label="Purchase Invoice",
+        )
         
         # Validate quantities
         validate_internal_transfer_qty(doclist)
-        
-        # Update sales invoice with reference (this needs to be done after the document is created)
-        _update_sales_invoice_reference(si.name, doclist.name)
-        
+
         logger.info(f"Successfully created internal Purchase Invoice from Sales Invoice {source_name}")
         return doclist
         
@@ -1051,14 +5231,15 @@ def _get_sales_invoice_mapping() -> Dict[str, Any]:
             "field_map": {
                 "name": "sales_invoice_item",
             },
-            "field_no_map": ["expense_account", "cost_center", "project", "location"],
-            "condition": lambda item: flt(item.qty or 0) > 0,
+            # serial_no, batch_no, serial_and_batch_bundle are handled in
+            # _update_item_pi() via _duplicate_serial_and_batch_bundle().
+            "field_no_map": ["expense_account", "cost_center", "project", "location",
+                             "serial_no", "batch_no", "serial_and_batch_bundle"],
+            "condition": lambda item: flt(item.qty or 0) != 0,
             "postprocess": _update_item_pi,
         },
     }
-    
-    # Add warehouse, serial_no, batch_no mapping if update_stock is enabled
-    # Note: We'll check this in postprocess, but prepare the mapping structure
+
     return mapping
 
 
@@ -1069,26 +5250,12 @@ def _set_missing_values_pi(source, target) -> None:
     # Get received items to track partial receipts
     received_items = get_received_items(source.name, "Purchase Invoice", "sales_invoice_item")
     
-    # Filter items that have already been fully received
-    if received_items and target.get("items"):
-        items_to_keep = []
-        for item in target.items:
-            source_item_name = item.get("sales_invoice_item")
-            item_code = item.get("item_code")
-            if source_item_name and item_code:
-                received_qty = received_items.get((source_item_name, item_code), 0)
-                source_qty = flt(item.get("qty", 0))
-                returned_qty = flt(item.get("returned_qty", 0))
-                remaining_qty = source_qty + returned_qty - received_qty
-                if remaining_qty > 0:
-                    item.qty = remaining_qty
-                    items_to_keep.append(item)
-            else:
-                items_to_keep.append(item)
-        target.items = items_to_keep
-            
-    if not target.get("items"):
-        raise BNSValidationError(_("All items have already been received"))
+    # Strict one-to-one mode: do not allow partial PI generation.
+    if _has_any_positive_received_qty(received_items):
+        frappe.throw(
+            _("Strict one-to-one mode: Purchase Invoice already exists for this Sales Invoice. Partial creation is not allowed."),
+            title=_("Cannot Create Purchase Invoice"),
+        )
     
     # Clear document level warehouses and accounting dimensions
     _clear_document_level_fields_pi(target)
@@ -1113,62 +5280,49 @@ def _update_details_pi(source_doc, target_doc, source_parent) -> None:
     - is_bns_internal_supplier = 1
     - supplier_invoice_number (bill_no) = SI name
     """
-    # Handle case where source_parent might be None (when called as postprocess)
-    if source_parent is None:
-        # This is being called as a postprocess function, so we need to get the data differently
-        # The source_doc is the Sales Invoice, and target_doc is the Purchase Invoice
-        represents_company = _get_representing_company_from_customer(source_doc.customer)
-        target_doc.company = represents_company
-        
-        # Find supplier representing the sales invoice's company
-        supplier = _find_internal_supplier(represents_company)
-        target_doc.supplier = supplier
-        
-        # Set internal transfer fields
-        target_doc.buying_price_list = source_doc.selling_price_list
-        # Do NOT set is_internal_supplier - only set is_bns_internal_supplier for BNS internal transfers
-        # Use bns_inter_company_reference instead of inter_company_invoice_reference to avoid ERPNext validation
-        target_doc.bns_inter_company_reference = source_doc.name
-        
-        # Set is_bns_internal_supplier = 1 (TRANSFER UNDER DIFFERENT GSTIN)
-        target_doc.is_bns_internal_supplier = 1
-        
-        # Set supplier_invoice_number (bill_no) = SI name (TRANSFER UNDER DIFFERENT GSTIN)
-        target_doc.bill_no = source_doc.name
+    represents_company = _get_representing_company_from_customer(source_doc.customer)
+    target_doc.company = represents_company
 
-        # Handle addresses
-        _update_addresses_pi(target_doc, source_doc)
-        
-        # Handle taxes
-        _update_taxes_pi(target_doc)
-    else:
-        # This is being called from the main function with proper parameters
-        target_doc.company = source_parent.get("represents_company")
-        
-        # Find supplier representing the sales invoice's company
-        supplier = _find_internal_supplier(source_parent.company)
-        target_doc.supplier = supplier
-        
-        # Set internal transfer fields
-        target_doc.buying_price_list = source_doc.selling_price_list
-        # Do NOT set is_internal_supplier - only set is_bns_internal_supplier for BNS internal transfers
-        # Use bns_inter_company_reference instead of inter_company_invoice_reference to avoid ERPNext validation
-        target_doc.bns_inter_company_reference = source_doc.name
-        
-        # Set is_bns_internal_supplier = 1 (TRANSFER UNDER DIFFERENT GSTIN)
-        target_doc.is_bns_internal_supplier = 1
+    supplier = _find_internal_supplier(represents_company)
+    target_doc.supplier = supplier
 
-        # Set supplier_invoice_number (bill_no) = SI name (TRANSFER UNDER DIFFERENT GSTIN)
-        target_doc.bill_no = source_doc.name
-        
-        # Update sales invoice with reference
+    target_doc.buying_price_list = source_doc.selling_price_list
+    target_doc.bns_inter_company_reference = source_doc.name
+    target_doc.is_bns_internal_supplier = 1
+    target_doc.bill_no = source_doc.name
+
+    if cint(source_doc.get("is_return")):
+        target_doc.is_return = 1
+        original_pi = _find_return_against_pi(source_doc.get("return_against"))
+        if original_pi:
+            target_doc.return_against = original_pi
+
+    if source_parent is not None:
         _update_sales_invoice_reference(source_doc.name, target_doc.name)
-        
-        # Handle addresses
-        _update_addresses_pi(target_doc, source_doc)
-        
-        # Handle taxes
-        _update_taxes_pi(target_doc)
+
+    _update_addresses_pi(target_doc, source_doc)
+    _update_taxes_pi(target_doc)
+
+
+def _find_return_against_pi(original_si_name: Optional[str]) -> Optional[str]:
+    """
+    Find the Purchase Invoice created from the original Sales Invoice
+    so it can be used as return_against for the debit note.
+
+    Args:
+        original_si_name: Name of the original SI that the credit note returns against.
+
+    Returns:
+        PI name if found, else None.
+    """
+    if not original_si_name:
+        return None
+    pi_name = frappe.db.get_value(
+        "Purchase Invoice",
+        {"bns_inter_company_reference": original_si_name, "docstatus": 1, "is_return": 0},
+        "name",
+    )
+    return pi_name
 
 
 def _update_addresses_pi(target_doc, source_doc) -> None:
@@ -1229,17 +5383,20 @@ def _update_item_pi(source, target, source_parent) -> None:
     if source.get("base_net_rate"):
         target.base_net_rate = flt(source.base_net_rate)
     
-    # Map serial_no and batch_no if they exist (for stock items)
-    if source.get("serial_no"):
-        target.serial_no = source.serial_no
-    if source.get("batch_no"):
-        target.batch_no = source.batch_no
-    
+    # For internal SI->PI stock flow, use SI item costing mirror as transfer-rate.
+    if getattr(target, "meta", None) and target.meta.has_field("bns_transfer_rate"):
+        target.bns_transfer_rate = _get_si_item_transfer_rate(source)
+
+    target_wh = target.warehouse
+
     # Clear accounting fields to let system auto-populate
     _clear_item_level_fields_pi(target)
-    
-    if source.get("use_serial_batch_fields"):
-        target.set("use_serial_batch_fields", 1)
+
+    _duplicate_serial_and_batch_bundle(
+        source, target,
+        target_warehouse=target_wh,
+        transaction_type="Inward",
+    )
 
 
 def _clear_item_level_fields_pi(target) -> None:
@@ -1295,32 +5452,24 @@ def make_bns_internal_purchase_receipt_from_si(source_name: str, target_doc: Opt
             raise BNSValidationError(_("Sales Invoice must have 'Update Stock' enabled to create Purchase Receipt, or must be created from a Delivery Note"))
         
         _validate_internal_sales_invoice(si)
+
+        existing_pr = _get_existing_pr_for_source(si.name)
+        if existing_pr:
+            frappe.throw(
+                _(
+                    "A Purchase Receipt ({0}) already exists for this Sales Invoice in {1} state. You cannot create another one."
+                ).format(existing_pr.get("name"), _docstatus_label(existing_pr.get("docstatus"))),
+                title=_("Cannot Create Purchase Receipt"),
+            )
         
         # Check if Purchase Invoice already exists for this Sales Invoice
         # If PI exists, PR should not be created (PI is for non-stock items, PR is for stock items)
-        pi_exists = frappe.db.exists("Purchase Invoice", {
-            "bns_inter_company_reference": si.name,
-            "docstatus": 1
-        })
-        if not pi_exists:
-            # Also check inter_company_invoice_reference for backward compatibility
-            pi_exists = frappe.db.exists("Purchase Invoice", {
-                "inter_company_invoice_reference": si.name,
-                "docstatus": 1
-            })
-        
-        if pi_exists:
-            pi_name = pi_exists if isinstance(pi_exists, str) else frappe.db.get_value(
-                "Purchase Invoice",
-                {"bns_inter_company_reference": si.name, "docstatus": 1},
-                "name"
-            ) or frappe.db.get_value(
-                "Purchase Invoice",
-                {"inter_company_invoice_reference": si.name, "docstatus": 1},
-                "name"
-            )
+        existing_pi = _get_existing_pi_for_source(si.name)
+        if existing_pi:
             frappe.throw(
-                _("A Purchase Invoice ({0}) already exists for this Sales Invoice. Purchase Receipt cannot be created when a Purchase Invoice exists. Use the existing Purchase Invoice or unlink it first.").format(pi_name or ""),
+                _(
+                    "A Purchase Invoice ({0}) already exists for this Sales Invoice in {1} state. Purchase Receipt cannot be created when a Purchase Invoice exists."
+                ).format(existing_pi.get("name"), _docstatus_label(existing_pi.get("docstatus"))),
                 title=_("Cannot Create Purchase Receipt")
             )
 
@@ -1337,6 +5486,15 @@ def make_bns_internal_purchase_receipt_from_si(source_name: str, target_doc: Opt
             _get_sales_invoice_to_pr_mapping(),
             target_doc,
             _set_missing_values_pr_from_si,
+        )
+
+        _enforce_one_to_one_item_and_amount_parity(
+            source_doc=si,
+            target_doc=doclist,
+            source_link_field="sales_invoice_item",
+            source_item_filter=lambda d: flt(d.get("qty") or 0) > 0,
+            source_label="Sales Invoice",
+            target_label="Purchase Receipt",
         )
         
         # Validate quantities (using supplier_delivery_note as reference)
@@ -1374,11 +5532,12 @@ def _get_sales_invoice_to_pr_mapping() -> Dict[str, Any]:
             "field_map": {
                 "name": "sales_invoice_item",
                 "warehouse": "from_warehouse",
-                "serial_no": "serial_no",
-                "batch_no": "batch_no",
             },
-            "field_no_map": ["warehouse", "rejected_warehouse", "expense_account", "cost_center", "project", "location"],
-            "condition": lambda item: flt(item.qty or 0) > 0,  # Sales Invoice Item doesn't have returned_qty or received_qty
+            # serial_no, batch_no, serial_and_batch_bundle are handled in
+            # _update_item_pr_from_si() via _duplicate_serial_and_batch_bundle().
+            "field_no_map": ["warehouse", "rejected_warehouse", "expense_account", "cost_center", "project", "location",
+                             "serial_no", "batch_no", "serial_and_batch_bundle"],
+            "condition": lambda item: flt(item.qty or 0) > 0,
             "postprocess": _update_item_pr_from_si,
         },
     }
@@ -1409,46 +5568,12 @@ def _set_missing_values_pr_from_si(source, target) -> None:
                 key = (item.get("sales_invoice_item"), item.item_code)
                 received_items[key] = received_items.get(key, 0) + flt(item.qty)
     
-    # Filter items that have already been fully received
-    if received_items and target.get("items"):
-        items_to_keep = []
-        for item in target.items:
-            source_item_name = item.get("sales_invoice_item")
-            item_code = item.get("item_code")
-            if source_item_name and item_code:
-                received_qty = received_items.get((source_item_name, item_code), 0)
-                source_qty = flt(item.get("qty", 0))
-                returned_qty = flt(item.get("returned_qty", 0))
-                remaining_qty = source_qty + returned_qty - received_qty
-                if remaining_qty > 0:
-                    item.qty = remaining_qty
-                    items_to_keep.append(item)
-            else:
-                items_to_keep.append(item)
-        target.items = items_to_keep
-            
-    if not target.get("items"):
-        # Check if Purchase Invoice exists - if yes, show that in error
-        pi_name = frappe.db.get_value(
-            "Purchase Invoice",
-            {"bns_inter_company_reference": source.name, "docstatus": 1},
-            "name"
-        ) or frappe.db.get_value(
-            "Purchase Invoice",
-            {"inter_company_invoice_reference": source.name, "docstatus": 1},
-            "name"
+    # Strict one-to-one mode: do not allow partial PR generation from SI.
+    if _has_any_positive_received_qty(received_items):
+        frappe.throw(
+            _("Strict one-to-one mode: Purchase Receipt already exists for this Sales Invoice. Partial creation is not allowed."),
+            title=_("Cannot Create Purchase Receipt"),
         )
-        
-        if pi_name:
-            frappe.throw(
-                _("A Purchase Invoice ({0}) already exists for this Sales Invoice. Purchase Receipt cannot be created when a Purchase Invoice exists.").format(pi_name),
-                title=_("Cannot Create Purchase Receipt")
-            )
-        else:
-            frappe.throw(
-                _("All items have already been received. Purchase Receipt cannot be created."),
-                title=_("Cannot Create Purchase Receipt")
-            )
     
     # Clear document level warehouses and accounting dimensions
     _clear_document_level_fields(target)
@@ -1483,8 +5608,9 @@ def _update_details_pr_from_si(source_doc, target_doc, source_parent) -> None:
         _update_addresses(target_doc, source_doc)
         _update_taxes(target_doc)
     else:
-        target_doc.company = source_parent.get("represents_company")
-        supplier = _find_internal_supplier(source_parent.company)
+        represents_company = _get_representing_company_from_customer(source_doc.customer)
+        target_doc.company = represents_company
+        supplier = _find_internal_supplier(represents_company)
         target_doc.supplier = supplier
         
         target_doc.buying_price_list = source_doc.selling_price_list
@@ -1518,13 +5644,22 @@ def _update_item_pr_from_si(source, target, source_parent) -> None:
         target.net_rate = flt(source.net_rate)
     if source.get("base_net_rate"):
         target.base_net_rate = flt(source.base_net_rate)
-    
+
+    # For internal SI->PR flow, keep transfer-rate separate from billing/net rate.
+    if getattr(target, "meta", None) and target.meta.has_field("bns_transfer_rate"):
+        target.bns_transfer_rate = _get_si_item_transfer_rate(source)
+
     target.received_qty = 0
-    
+
+    target_wh = target.warehouse or target.rejected_warehouse
+
     _clear_item_level_fields(target)
-    
-    if source.get("use_serial_batch_fields"):
-        target.set("use_serial_batch_fields", 1)
+
+    _duplicate_serial_and_batch_bundle(
+        source, target,
+        target_warehouse=target_wh,
+        transaction_type="Inward",
+    )
 
 
 def _update_sales_invoice_pr_reference(si_name: str, pr_name: str) -> None:
@@ -1609,8 +5744,8 @@ def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] =
     when submitted for a BNS internal supplier with inter company reference.
     
     This handles:
-    1. PI created directly from SI (has inter_company_invoice_reference)
-    2. PI created from PR that was created from SI (check PR's supplier_delivery_note or bns_inter_company_reference)
+    1. PI created directly from SI (via bns_inter_company_reference)
+    2. PI created from PR that was created from SI (via PR.bns_inter_company_reference)
     
     Args:
         doc: The Purchase Invoice document
@@ -1634,9 +5769,6 @@ def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] =
         # Check if bns_inter_company_reference points to a Sales Invoice
         if frappe.db.exists("Sales Invoice", doc.bns_inter_company_reference):
             is_from_si = True
-    elif doc.inter_company_invoice_reference:
-        # Also check standard inter_company_invoice_reference for backward compatibility
-        is_from_si = True
     elif doc.items:
         # Check if PI is created from PR that was created from SI
         # Get Purchase Receipt references from items
@@ -1648,14 +5780,9 @@ def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] =
         # Check if any PR was created from SI
         if pr_names:
             for pr_name in pr_names:
-                pr_supplier_dn = frappe.db.get_value("Purchase Receipt", pr_name, "supplier_delivery_note")
                 pr_bns_ref = frappe.db.get_value("Purchase Receipt", pr_name, "bns_inter_company_reference")
-                
-                # Check if supplier_delivery_note or bns_inter_company_reference points to a Sales Invoice
-                if pr_supplier_dn and frappe.db.exists("Sales Invoice", pr_supplier_dn):
-                    is_from_si = True
-                    break
-                elif pr_bns_ref and frappe.db.exists("Sales Invoice", pr_bns_ref):
+
+                if pr_bns_ref and frappe.db.exists("Sales Invoice", pr_bns_ref):
                     is_from_si = True
                     break
     
@@ -1686,13 +5813,6 @@ def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] =
             # Set PI's bns_inter_company_reference if not already set
             if not doc.bns_inter_company_reference:
                 doc.db_set("bns_inter_company_reference", si_name, update_modified=False)
-        # Check inter_company_invoice_reference for backward compatibility
-        elif doc.inter_company_invoice_reference and frappe.db.exists("Sales Invoice", doc.inter_company_invoice_reference):
-            si_name = doc.inter_company_invoice_reference
-            # Set PI's bns_inter_company_reference if not already set
-            if not doc.bns_inter_company_reference:
-                doc.db_set("bns_inter_company_reference", si_name, update_modified=False)
-        
         # Update SI's bns_inter_company_reference to point back to PI
         if si_name:
             si = frappe.get_doc("Sales Invoice", si_name)
@@ -1703,6 +5823,12 @@ def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] =
                     si.db_set("status", "BNS Internally Transferred", update_modified=False)
                 frappe.clear_cache(doctype="Sales Invoice")
                 logger.info(f"Updated Sales Invoice {si_name} bns_inter_company_reference to {doc.name}")
+
+        if si_name:
+            _sync_pi_item_transfer_rate_from_si(si_name, pi_name=doc.name)
+            _mirror_pi_item_valuation_from_transfer_rate(doc.name)
+            _trigger_pi_repost_for_transfer_rate(doc.name, source_repost_name=f"pi_submit::{doc.name}")
+            _trigger_bns_internal_gl_repost(doc, source="pi_on_submit_transfer_rate_sync")
         
         frappe.clear_cache(doctype="Purchase Invoice")
         logger.info(f"Updated Purchase Invoice {doc.name} status to BNS Internally Transferred")
@@ -2139,7 +6265,9 @@ def convert_sales_invoice_to_bns_internal(sales_invoice: str, purchase_invoice: 
             if pi.supplier:
                 pi_supplier_company = frappe.db.get_value("Supplier", pi.supplier, "bns_represents_company")
                 if not pi_supplier_company:
-                    pi_supplier_company = frappe.db.get_value("Supplier", pi.supplier, "represents_company")
+                    raise BNSValidationError(
+                        _("Supplier {0} is missing bns_represents_company.").format(pi.supplier)
+                    )
             
             # Validate companies match (PI supplier should represent SI's company)
             if si_customer_company and pi_supplier_company:
@@ -2296,7 +6424,9 @@ def convert_purchase_invoice_to_bns_internal(purchase_invoice: str, sales_invoic
             if pi.supplier:
                 pi_supplier_company = frappe.db.get_value("Supplier", pi.supplier, "bns_represents_company")
                 if not pi_supplier_company:
-                    pi_supplier_company = frappe.db.get_value("Supplier", pi.supplier, "represents_company")
+                    raise BNSValidationError(
+                        _("Supplier {0} is missing bns_represents_company.").format(pi.supplier)
+                    )
             
             # Validate companies match (PI supplier should represent SI's company)
             if si_customer_company and pi_supplier_company:
@@ -2482,11 +6612,31 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
                 )
             )
         
-        # Check if already fully converted (both flag and status are set)
-        if dn.get("is_bns_internal_customer") and dn.status == "BNS Internally Transferred":
-            # Already converted, but still return success for bulk operations
+        # Clear stale/wrong DN reference before checking "already converted"
+        dn_ref = (dn.get("bns_inter_company_reference") or "").strip()
+        if dn_ref:
+            stale = _is_stale_inter_company_ref("Delivery Note", dn.name, dn_ref)
+            if stale:
+                logger.info("Clearing stale ref %s on DN %s (reason: %s)", dn_ref, dn.name, stale)
+                _clear_counter_backref("Delivery Note", dn.name, dn_ref)
+                dn.db_set("bns_inter_company_reference", "", update_modified=False)
+                dn.bns_inter_company_reference = ""
+                dn_ref = ""
+
+        # Check if already fully converted (flag, status, AND reference are all set)
+        if (
+            dn.get("is_bns_internal_customer")
+            and dn.status == "BNS Internally Transferred"
+            and dn_ref
+        ):
             return {"success": True, "message": _("Already converted")}
         
+        # Auto-discover matching PR when none is provided
+        if not purchase_receipt:
+            pr_names = _get_submitted_prs_for_dn(dn.name)
+            if pr_names:
+                purchase_receipt = pr_names[0]
+
         # Update Delivery Note (even if flag is already set, ensure status is updated)
         dn.db_set("is_bns_internal_customer", 1, update_modified=False)
         dn.db_set("status", "BNS Internally Transferred", update_modified=False)
@@ -2501,7 +6651,7 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
             "delivery_note": dn.name
         }
         
-        # If Purchase Receipt is provided, validate and link
+        # If Purchase Receipt is provided (or auto-discovered), validate and link
         if purchase_receipt:
             pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
             
@@ -2509,8 +6659,10 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
             if pr.docstatus != 1:
                 raise BNSValidationError(_("Purchase Receipt {0} must be submitted before linking").format(purchase_receipt))
             
-            # Validate PR's supplier_delivery_note matches DN name
-            if pr.supplier_delivery_note != dn.name:
+            # Validate PR traces back to this DN via supplier_delivery_note or bns_inter_company_reference
+            pr_sdn = (pr.supplier_delivery_note or "").strip()
+            pr_ref = (pr.get("bns_inter_company_reference") or "").strip()
+            if pr_sdn != dn.name and pr_ref != dn.name:
                 raise BNSValidationError(
                     _("Purchase Receipt {0} is not linked to Delivery Note {1}").format(
                         purchase_receipt, dn.name
@@ -2528,26 +6680,44 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
                     )
                 )
             
-            # Check if PR already linked to another DN
-            existing_ref = pr.get("bns_inter_company_reference")
+            # Check if PR already linked to another DN — clear stale/wrong links
+            existing_ref = (pr.get("bns_inter_company_reference") or "").strip()
             if existing_ref and existing_ref != dn.name:
-                raise BNSValidationError(
-                    _("Purchase Receipt {0} is already linked to Delivery Note {1}").format(
-                        purchase_receipt, existing_ref
-                    )
+                pr_sdn = (pr.get("supplier_delivery_note") or "").strip()
+                stale = _is_stale_inter_company_ref(
+                    "Purchase Receipt", pr.name, existing_ref
                 )
+                # supplier_delivery_note is the authoritative ERPNext link;
+                # if it points to our DN, the bns ref is simply wrong.
+                if stale or pr_sdn == dn.name:
+                    reason = stale or f"supplier_delivery_note={pr_sdn}_matches_dn"
+                    logger.info(
+                        "Clearing wrong bns_inter_company_reference %s on PR %s (reason: %s)",
+                        existing_ref, pr.name, reason,
+                    )
+                    _clear_counter_backref("Purchase Receipt", pr.name, existing_ref)
+                    pr.db_set("bns_inter_company_reference", "", update_modified=False)
+                    pr.bns_inter_company_reference = ""
+                else:
+                    raise BNSValidationError(
+                        _("Purchase Receipt {0} is already linked to Delivery Note {1}").format(
+                            purchase_receipt, existing_ref
+                        )
+                    )
             
             # Update Purchase Receipt document-level fields
             pr.db_set("is_bns_internal_supplier", 1, update_modified=False)
             pr.db_set("status", "BNS Internally Transferred", update_modified=False)
             pr.db_set("per_billed", 100, update_modified=False)
-            if not pr.get("bns_inter_company_reference"):
+            if (pr.get("bns_inter_company_reference") or "") != dn.name:
                 pr.db_set("bns_inter_company_reference", dn.name, update_modified=False)
             
-            # Then update Delivery Note reference
-            if not dn.get("bns_inter_company_reference"):
+            # Update Delivery Note reference
+            if (dn.get("bns_inter_company_reference") or "") != pr.name:
                 dn.db_set("bns_inter_company_reference", pr.name, update_modified=False)
             
+            _remap_pr_delivery_note_items(dn, pr)
+
             # Clear cache for both documents
             frappe.clear_cache(doctype="Purchase Receipt")
             frappe.clear_cache(doctype="Delivery Note")
@@ -2645,11 +6815,20 @@ def convert_purchase_receipt_to_bns_internal(purchase_receipt: str, delivery_not
                 )
             )
         
+        # Clear stale/wrong bns_inter_company_reference on PR before setting
+        pr_existing_ref = (pr.get("bns_inter_company_reference") or "").strip()
+        if pr_existing_ref and pr_existing_ref != linked_dn:
+            logger.info(
+                "Overriding wrong bns_inter_company_reference %s on PR %s with %s (supplier_delivery_note is authoritative)",
+                pr_existing_ref, pr.name, linked_dn,
+            )
+            _clear_counter_backref("Purchase Receipt", pr.name, pr_existing_ref)
+
         # Update Purchase Receipt (even if flag is already set, ensure status is updated)
         pr.db_set("is_bns_internal_supplier", 1, update_modified=False)
         pr.db_set("status", "BNS Internally Transferred", update_modified=False)
         pr.db_set("per_billed", 100, update_modified=False)
-        if not pr.get("bns_inter_company_reference"):
+        if (pr.get("bns_inter_company_reference") or "") != linked_dn:
             pr.db_set("bns_inter_company_reference", linked_dn, update_modified=False)
         
         result = {
@@ -2658,10 +6837,13 @@ def convert_purchase_receipt_to_bns_internal(purchase_receipt: str, delivery_not
             "purchase_receipt": pr.name
         }
         
-        # Update Delivery Note if not already updated
+        # Update Delivery Note
         if linked_dn:
             dn_reload = frappe.get_doc("Delivery Note", linked_dn)
-            if not dn_reload.get("bns_inter_company_reference"):
+            if (dn_reload.get("bns_inter_company_reference") or "") != pr.name:
+                old_dn_ref = (dn_reload.get("bns_inter_company_reference") or "").strip()
+                if old_dn_ref:
+                    _clear_counter_backref("Delivery Note", dn_reload.name, old_dn_ref)
                 dn_reload.db_set("bns_inter_company_reference", pr.name, update_modified=False)
             if dn_reload.status != "BNS Internally Transferred":
                 dn_reload.db_set("status", "BNS Internally Transferred", update_modified=False)
@@ -2670,6 +6852,8 @@ def convert_purchase_receipt_to_bns_internal(purchase_receipt: str, delivery_not
             if dn_reload.per_billed != 100:
                 dn_reload.db_set("per_billed", 100, update_modified=False)
             
+            _remap_pr_delivery_note_items(dn_reload, pr)
+
             result["delivery_note"] = linked_dn
             result["message"] = _("Purchase Receipt and Delivery Note linked successfully")
             
@@ -2686,144 +6870,250 @@ def convert_purchase_receipt_to_bns_internal(purchase_receipt: str, delivery_not
         frappe.throw(str(e))
 
 
+def _cancel_submitted_docs(
+    doctype: str, names: List[str], ignore_linked_doctypes: Optional[List[str]] = None
+) -> int:
+    """Cancel submitted documents safely and return cancelled count."""
+    cancelled = 0
+    ignore_linked_doctypes = ignore_linked_doctypes or []
+
+    for name in names:
+        if not name or not frappe.db.exists(doctype, name):
+            continue
+
+        linked_doc = frappe.get_doc(doctype, name)
+        if linked_doc.docstatus != 1:
+            continue
+
+        linked_doc.ignore_linked_doctypes = ignore_linked_doctypes
+        linked_doc.flags.ignore_linked_doctypes = ignore_linked_doctypes
+        linked_doc.cancel()
+        cancelled += 1
+
+    return cancelled
+
+
+def ignore_parent_cancellation_links_for_bns_internal(doc, method: Optional[str] = None) -> None:
+    """
+    On PR/PI cancel, skip backlink-enforced parent cancellation.
+
+    Desired behavior:
+    - Cancelling PR/PI should NOT force-cancel linked DN/SI.
+    - Cancelling DN/SI should still be allowed to cancel linked PR/PI.
+    """
+    if doc.doctype == "Purchase Receipt":
+        ignore_linked_doctypes = [
+            # Keep core PR cancel ignores
+            "GL Entry",
+            "Stock Ledger Entry",
+            "Repost Item Valuation",
+            "Serial and Batch Bundle",
+            # BNS parent-link policy
+            "Delivery Note",
+            "Sales Invoice",
+            # Payment-ledger link safety
+            "Payment Ledger Entry",
+            "Advance Payment Ledger Entry",
+        ]
+    elif doc.doctype == "Purchase Invoice":
+        ignore_linked_doctypes = [
+            "GL Entry",
+            "Stock Ledger Entry",
+            "Repost Item Valuation",
+            "Serial and Batch Bundle",
+            "Sales Invoice",
+            "Payment Ledger Entry",
+            "Advance Payment Ledger Entry",
+        ]
+    else:
+        return
+
+    doc.ignore_linked_doctypes = ignore_linked_doctypes
+    doc.flags.ignore_linked_doctypes = ignore_linked_doctypes
+
+
+def unlink_references_on_purchase_cancel(doc, method: Optional[str] = None) -> None:
+    """
+    On PR/PI cancel, only remove BNS links; never cancel parent SI/DN.
+
+    Policy:
+    - Cancel PR/PI -> unlink references on both sides.
+    - Cancel SI/DN -> handled by dedicated parent-side cascade methods.
+    """
+    # Re-apply ignore list after core on_cancel execution.
+    # ERPNext checks backlinks after all on_cancel handlers, so this must be set here too.
+    ignore_parent_cancellation_links_for_bns_internal(doc, method=method)
+
+    if doc.docstatus != 2:
+        return
+
+    try:
+        if doc.doctype == "Purchase Receipt":
+            si_name = None
+            dn_name = None
+
+            # Resolve potential parent refs before clearing PR side.
+            ref_name = doc.get("bns_inter_company_reference")
+            supplier_ref = doc.get("supplier_delivery_note")
+            if ref_name and frappe.db.exists("Sales Invoice", ref_name):
+                si_name = ref_name
+            elif ref_name and frappe.db.exists("Delivery Note", ref_name):
+                dn_name = ref_name
+
+            if supplier_ref and frappe.db.exists("Sales Invoice", supplier_ref):
+                si_name = si_name or supplier_ref
+            elif supplier_ref and frappe.db.exists("Delivery Note", supplier_ref):
+                dn_name = dn_name or supplier_ref
+
+            # Clear PR-side links.
+            if doc.get("bns_inter_company_reference"):
+                doc.db_set("bns_inter_company_reference", "", update_modified=False)
+            if doc.get("supplier_delivery_note"):
+                doc.db_set("supplier_delivery_note", "", update_modified=False)
+
+            # Clear SI-side backlink (SI->PR flow) if this PR is currently referenced.
+            if si_name and frappe.db.exists("Sales Invoice", si_name):
+                si = frappe.get_doc("Sales Invoice", si_name)
+                if si.meta.has_field("bns_purchase_receipt_reference") and si.get("bns_purchase_receipt_reference") == doc.name:
+                    si.db_set("bns_purchase_receipt_reference", "", update_modified=False)
+                frappe.clear_cache(doctype="Sales Invoice")
+
+            # Clear DN-side backlink only when it points to this PR.
+            if dn_name and frappe.db.exists("Delivery Note", dn_name):
+                dn = frappe.get_doc("Delivery Note", dn_name)
+                if dn.get("bns_inter_company_reference") == doc.name:
+                    dn.db_set("bns_inter_company_reference", "", update_modified=False)
+                frappe.clear_cache(doctype="Delivery Note")
+
+            frappe.clear_cache(doctype="Purchase Receipt")
+
+        elif doc.doctype == "Purchase Invoice":
+            si_name = doc.get("bns_inter_company_reference")
+
+            # Clear PI-side link.
+            if doc.get("bns_inter_company_reference"):
+                doc.db_set("bns_inter_company_reference", "", update_modified=False)
+
+            # Clear SI-side backlink only when it points to this PI.
+            if si_name and frappe.db.exists("Sales Invoice", si_name):
+                si = frappe.get_doc("Sales Invoice", si_name)
+                if si.get("bns_inter_company_reference") == doc.name:
+                    si.db_set("bns_inter_company_reference", "", update_modified=False)
+                frappe.clear_cache(doctype="Sales Invoice")
+
+            frappe.clear_cache(doctype="Purchase Invoice")
+
+    except Exception as e:
+        # Do not block parent cancellation flow if unlink cleanup fails.
+        logger.error("Failed unlink cleanup on %s cancel (%s): %s", doc.doctype, doc.name, str(e))
+
+
 def validate_delivery_note_cancellation(doc, method: Optional[str] = None) -> None:
     """
-    Validate that Delivery Note cannot be cancelled if Purchase Receipt exists.
-    
-    Args:
-        doc: The Delivery Note document
-        method (Optional[str]): The method being called
+    Cancel linked submitted Purchase Receipts when cancelling Delivery Note.
+
+    One-way policy:
+    - DN cancel -> cancel linked PRs
+    - PR cancel -> does not cancel DN
     """
-    if doc.docstatus != 1:
+    if doc.docstatus != 2:
         return
-    
-    try:
-        # Check if any Purchase Receipt references this Delivery Note
-        pr_list = frappe.get_all(
-            "Purchase Receipt",
-            filters={
-                "supplier_delivery_note": doc.name,
-                "docstatus": ["!=", 2]  # Not cancelled
-            },
-            fields=["name", "docstatus"],
-            limit=1
+
+    linked_pr_names = set()
+
+    for row in frappe.get_all(
+        "Purchase Receipt",
+        filters={"supplier_delivery_note": doc.name, "docstatus": 1},
+        pluck="name",
+    ):
+        linked_pr_names.add(row)
+
+    for row in frappe.get_all(
+        "Purchase Receipt",
+        filters={"bns_inter_company_reference": doc.name, "docstatus": 1},
+        pluck="name",
+    ):
+        linked_pr_names.add(row)
+
+    if not linked_pr_names:
+        return
+
+    cancelled = _cancel_submitted_docs(
+        "Purchase Receipt",
+        sorted(linked_pr_names),
+        ignore_linked_doctypes=["Delivery Note", "Sales Invoice"],
+    )
+    logger.info(
+        "Cancelled %s linked Purchase Receipt(s) for Delivery Note %s",
+        cancelled,
+        doc.name,
+    )
+
+
+def cancel_linked_purchase_docs_for_sales_invoice(doc, method: Optional[str] = None) -> None:
+    """
+    Cancel linked submitted PI/PR when cancelling Sales Invoice.
+
+    One-way policy:
+    - SI cancel -> cancel linked PI/PR
+    - PI/PR cancel -> does not cancel SI
+    """
+    if doc.docstatus != 2:
+        return
+
+    linked_pi_names = set(
+        frappe.get_all(
+            "Purchase Invoice",
+            filters={"bns_inter_company_reference": doc.name, "docstatus": 1},
+            pluck="name",
         )
-        
-        if pr_list:
-            pr_name = pr_list[0].name
-            pr_status = "Submitted" if pr_list[0].docstatus == 1 else "Draft"
-            frappe.throw(
-                _("Cannot cancel Delivery Note {0} because Purchase Receipt {1} ({2}) references it. Please cancel the Purchase Receipt first.").format(
-                    doc.name, pr_name, pr_status
-                ),
-                title=_("Cancellation Not Allowed")
-            )
-        
-        # Also check via bns_inter_company_reference
-        pr_list_bns = frappe.get_all(
+    )
+    linked_pr_names = set(
+        frappe.get_all(
             "Purchase Receipt",
-            filters={
-                "bns_inter_company_reference": doc.name,
-                "docstatus": ["!=", 2]  # Not cancelled
-            },
-            fields=["name", "docstatus"],
-            limit=1
+            filters={"supplier_delivery_note": doc.name, "docstatus": 1},
+            pluck="name",
         )
-        
-        if pr_list_bns:
-            pr_name = pr_list_bns[0].name
-            pr_status = "Submitted" if pr_list_bns[0].docstatus == 1 else "Draft"
-            frappe.throw(
-                _("Cannot cancel Delivery Note {0} because Purchase Receipt {1} ({2}) references it. Please cancel the Purchase Receipt first.").format(
-                    doc.name, pr_name, pr_status
-                ),
-                title=_("Cancellation Not Allowed")
-            )
-        
-    except frappe.ValidationError:
-        raise
-    except Exception as e:
-        logger.error(f"Error validating Delivery Note cancellation: {str(e)}")
-        # Don't block cancellation if there's an error, but log it
-        pass
+    )
+
+    pi_cancelled = _cancel_submitted_docs(
+        "Purchase Invoice",
+        sorted(linked_pi_names),
+        ignore_linked_doctypes=["Sales Invoice"],
+    )
+    pr_cancelled = _cancel_submitted_docs(
+        "Purchase Receipt",
+        sorted(linked_pr_names),
+        ignore_linked_doctypes=["Delivery Note", "Sales Invoice"],
+    )
+
+    if pi_cancelled or pr_cancelled:
+        logger.info(
+            "Cancelled linked docs for Sales Invoice %s: PI=%s, PR=%s",
+            doc.name,
+            pi_cancelled,
+            pr_cancelled,
+        )
 
 
 def validate_bns_internal_customer_return(doc, method: Optional[str] = None) -> None:
     """
-    Block return entries (Credit Notes) for BNS internal customers.
-    
-    Args:
-        doc: The Sales Invoice document
-        method (Optional[str]): The method being called
+    Validate return entries (Credit Notes) for BNS internal customers.
+
+    Previously blocked all returns; now allows them so that
+    SI credit notes can be converted to PI debit notes.
     """
-    if not doc.is_return or not doc.return_against:
-        return
-    
-    try:
-        # Get the original Sales Invoice
-        original_si = frappe.get_doc("Sales Invoice", doc.return_against)
-        
-        # Check if original SI is for BNS internal customer
-        is_bns_internal = original_si.get("is_bns_internal_customer") or False
-        if not is_bns_internal:
-            # Check customer's is_bns_internal_customer field
-            customer_internal = frappe.db.get_value("Customer", original_si.customer, "is_bns_internal_customer")
-            if customer_internal:
-                is_bns_internal = True
-        
-        if is_bns_internal:
-            frappe.throw(
-                _("Returns (Credit Notes) are not allowed for BNS Internal Customers. Original Sales Invoice {0} is for a BNS Internal Customer.").format(
-                    get_link_to_form("Sales Invoice", doc.return_against)
-                ),
-                title=_("Return Not Allowed")
-            )
-    except frappe.DoesNotExistError:
-        # Original document doesn't exist, let ERPNext handle this validation
-        pass
-    except Exception as e:
-        logger.error(f"Error validating BNS internal customer return for Sales Invoice: {str(e)}")
-        # Don't block if there's an error, but log it
-        pass
+    pass
 
 
 def validate_bns_internal_delivery_note_return(doc, method: Optional[str] = None) -> None:
     """
-    Block return entries for Delivery Notes with BNS internal customers.
-    
-    Args:
-        doc: The Delivery Note document
-        method (Optional[str]): The method being called
+    Validate return entries for Delivery Notes with BNS internal customers.
+
+    Previously blocked all returns; now allows them so that
+    DN returns can be converted to PR returns.
     """
-    if not doc.is_return or not doc.return_against:
-        return
-    
-    try:
-        # Get the original Delivery Note
-        original_dn = frappe.get_doc("Delivery Note", doc.return_against)
-        
-        # Check if original DN is for BNS internal customer
-        is_bns_internal = original_dn.get("is_bns_internal_customer") or False
-        if not is_bns_internal:
-            # Check customer's is_bns_internal_customer field
-            customer_internal = frappe.db.get_value("Customer", original_dn.customer, "is_bns_internal_customer")
-            if customer_internal:
-                is_bns_internal = True
-        
-        if is_bns_internal:
-            frappe.throw(
-                _("Returns are not allowed for BNS Internal Customers. Original Delivery Note {0} is for a BNS Internal Customer.").format(
-                    get_link_to_form("Delivery Note", doc.return_against)
-                ),
-                title=_("Return Not Allowed")
-            )
-    except frappe.DoesNotExistError:
-        # Original document doesn't exist, let ERPNext handle this validation
-        pass
-    except Exception as e:
-        logger.error(f"Error validating BNS internal customer return for Delivery Note: {str(e)}")
-        # Don't block if there's an error, but log it
-        pass
+    pass
 
 
 @frappe.whitelist()
@@ -3023,6 +7313,8 @@ def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
         Dict: Result with success message
     """
     try:
+        frappe.lock_doc("Delivery Note", delivery_note)
+        frappe.lock_doc("Purchase Receipt", purchase_receipt)
         dn = frappe.get_doc("Delivery Note", delivery_note)
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
         
@@ -3064,21 +7356,35 @@ def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
             frappe.msgprint(_("Delivery Note and Purchase Receipt are already linked"))
             return {"success": True, "message": _("Already linked")}
         
-        # Check if DN is already linked to another PR
-        if dn.get("bns_inter_company_reference") and dn.get("bns_inter_company_reference") != pr.name:
-            raise BNSValidationError(
-                _("Delivery Note {0} is already linked to Purchase Receipt {1}").format(
-                    delivery_note, dn.get("bns_inter_company_reference")
+        # Check if DN is already linked to another PR — clear stale links
+        dn_existing = (dn.get("bns_inter_company_reference") or "").strip()
+        if dn_existing and dn_existing != pr.name:
+            stale = _is_stale_inter_company_ref("Delivery Note", dn.name, dn_existing)
+            if stale:
+                logger.info("Clearing stale ref %s on DN %s (reason: %s)", dn_existing, dn.name, stale)
+                dn.db_set("bns_inter_company_reference", "", update_modified=False)
+                dn.bns_inter_company_reference = ""
+            else:
+                raise BNSValidationError(
+                    _("Delivery Note {0} is already linked to Purchase Receipt {1}").format(
+                        delivery_note, dn_existing
+                    )
                 )
-            )
         
-        # Check if PR is already linked to another DN
-        if pr.get("bns_inter_company_reference") and pr.get("bns_inter_company_reference") != dn.name:
-            raise BNSValidationError(
-                _("Purchase Receipt {0} is already linked to Delivery Note {1}").format(
-                    purchase_receipt, pr.get("bns_inter_company_reference")
+        # Check if PR is already linked to another DN — clear stale links
+        pr_existing = (pr.get("bns_inter_company_reference") or "").strip()
+        if pr_existing and pr_existing != dn.name:
+            stale = _is_stale_inter_company_ref("Purchase Receipt", pr.name, pr_existing)
+            if stale:
+                logger.info("Clearing stale ref %s on PR %s (reason: %s)", pr_existing, pr.name, stale)
+                pr.db_set("bns_inter_company_reference", "", update_modified=False)
+                pr.bns_inter_company_reference = ""
+            else:
+                raise BNSValidationError(
+                    _("Purchase Receipt {0} is already linked to Delivery Note {1}").format(
+                        purchase_receipt, pr_existing
+                    )
                 )
-            )
         
         # Validate items match
         items_validation = validate_dn_pr_items_match(delivery_note, purchase_receipt)
@@ -3104,6 +7410,8 @@ def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
         if pr.per_billed != 100:
             pr.db_set("per_billed", 100, update_modified=False)
         
+        _remap_pr_delivery_note_items(dn, pr)
+
         # Clear cache
         frappe.clear_cache(doctype="Delivery Note")
         frappe.clear_cache(doctype="Purchase Receipt")
@@ -3118,6 +7426,36 @@ def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
     except Exception as e:
         logger.error(f"Error linking DN-PR: {str(e)}")
         frappe.throw(str(e))
+
+
+def _enforce_unlink_recovery_permission(action: str) -> None:
+    """Allow unlink recovery operations only to Administrator/System Manager."""
+    user = frappe.session.user
+    roles = set(frappe.get_roles(user))
+    if user == "Administrator" or "System Manager" in roles:
+        return
+
+    frappe.throw(
+        _("Only Administrator/System Manager can run {0}.").format(action),
+        frappe.PermissionError,
+        title=_("Not Permitted"),
+    )
+
+
+def _audit_unlink_action(action: str, payload: Dict[str, Any]) -> None:
+    """Write a durable audit trail for manual unlink recovery operations."""
+    audit_payload = {
+        "action": action,
+        "user": frappe.session.user,
+        "timestamp": frappe.utils.now(),
+        **(payload or {}),
+    }
+    message = frappe.as_json(audit_payload, indent=2)
+    logger.warning("BNS unlink audit: %s", message)
+    try:
+        frappe.log_error(message=message, title=f"BNS Unlink Audit: {action}")
+    except Exception:
+        logger.exception("Failed to persist unlink audit log for action %s", action)
 
 
 @frappe.whitelist()
@@ -3137,6 +7475,12 @@ def unlink_dn_pr(delivery_note: str = None, purchase_receipt: str = None) -> Dic
         Dict: Result with success message
     """
     try:
+        _enforce_unlink_recovery_permission("unlink_dn_pr")
+        _audit_unlink_action(
+            "unlink_dn_pr_requested",
+            {"delivery_note": delivery_note, "purchase_receipt": purchase_receipt},
+        )
+
         if not delivery_note and not purchase_receipt:
             raise BNSValidationError(_("Either delivery_note or purchase_receipt must be provided"))
         
@@ -3179,10 +7523,13 @@ def unlink_dn_pr(delivery_note: str = None, purchase_receipt: str = None) -> Dic
                 dn = frappe.get_doc("Delivery Note", delivery_note)
                 if dn.get("bns_inter_company_reference"):
                     dn.db_set("bns_inter_company_reference", "", update_modified=False)
+                dn.db_set("is_bns_internal_customer", 0, update_modified=False)
+                dn.db_set("status", "To Bill", update_modified=False)
+                dn.db_set("per_billed", 0, update_modified=False)
                 dn_cleared = True
             else:
                 logger.warning(f"Delivery Note {delivery_note} does not exist — skipping its side of unlink")
-        
+
         if purchase_receipt:
             if frappe.db.exists("Purchase Receipt", purchase_receipt):
                 pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
@@ -3190,6 +7537,9 @@ def unlink_dn_pr(delivery_note: str = None, purchase_receipt: str = None) -> Dic
                     pr.db_set("bns_inter_company_reference", "", update_modified=False)
                 if pr.get("supplier_delivery_note") == delivery_note:
                     pr.db_set("supplier_delivery_note", "", update_modified=False)
+                pr.db_set("is_bns_internal_supplier", 0, update_modified=False)
+                pr.db_set("status", "To Bill", update_modified=False)
+                pr.db_set("per_billed", 0, update_modified=False)
                 pr_cleared = True
             else:
                 logger.warning(f"Purchase Receipt {purchase_receipt} does not exist — skipping its side of unlink")
@@ -3201,6 +7551,10 @@ def unlink_dn_pr(delivery_note: str = None, purchase_receipt: str = None) -> Dic
             frappe.clear_cache(doctype="Purchase Receipt")
         
         logger.info(f"Unlinked Delivery Note {delivery_note} from Purchase Receipt {purchase_receipt}")
+        _audit_unlink_action(
+            "unlink_dn_pr_completed",
+            {"delivery_note": delivery_note, "purchase_receipt": purchase_receipt},
+        )
         
         return {
             "success": True,
@@ -3294,19 +7648,25 @@ def unlink_si_pr(sales_invoice: str = None, purchase_receipt: str = None) -> Dic
         Dict: Result with success message
     """
     try:
+        _enforce_unlink_recovery_permission("unlink_si_pr")
+        _audit_unlink_action(
+            "unlink_si_pr_requested",
+            {"sales_invoice": sales_invoice, "purchase_receipt": purchase_receipt},
+        )
+
         if not sales_invoice and not purchase_receipt:
             raise BNSValidationError(_("Either sales_invoice or purchase_receipt must be provided"))
 
         if purchase_receipt and not sales_invoice:
             pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
-            ref = pr.get("bns_inter_company_reference") or pr.get("supplier_delivery_note")
+            ref = pr.get("bns_inter_company_reference")
             if ref and frappe.db.exists("Sales Invoice", ref):
                 sales_invoice = ref
 
         if sales_invoice and not purchase_receipt:
             pr_name = frappe.db.get_value(
                 "Purchase Receipt",
-                {"supplier_delivery_note": sales_invoice, "docstatus": 1},
+                {"bns_inter_company_reference": sales_invoice, "docstatus": 1},
                 "name"
             )
             if pr_name:
@@ -3330,6 +7690,10 @@ def unlink_si_pr(sales_invoice: str = None, purchase_receipt: str = None) -> Dic
             frappe.clear_cache(doctype="Sales Invoice")
 
         logger.info(f"Unlinked Sales Invoice {sales_invoice} from Purchase Receipt {purchase_receipt}")
+        _audit_unlink_action(
+            "unlink_si_pr_completed",
+            {"sales_invoice": sales_invoice, "purchase_receipt": purchase_receipt},
+        )
         return {
             "success": True,
             "message": _("Sales Invoice and Purchase Receipt unlinked successfully")
@@ -3352,6 +7716,8 @@ def link_si_pi(sales_invoice: str, purchase_invoice: str) -> Dict:
         Dict: Result with success message
     """
     try:
+        frappe.lock_doc("Sales Invoice", sales_invoice)
+        frappe.lock_doc("Purchase Invoice", purchase_invoice)
         si = frappe.get_doc("Sales Invoice", sales_invoice)
         pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
         
@@ -3387,21 +7753,35 @@ def link_si_pi(sales_invoice: str, purchase_invoice: str) -> Dict:
             frappe.msgprint(_("Sales Invoice and Purchase Invoice are already linked"))
             return {"success": True, "message": _("Already linked")}
         
-        # Check if SI is already linked to another PI
-        if si.get("bns_inter_company_reference") and si.get("bns_inter_company_reference") != pi.name:
-            raise BNSValidationError(
-                _("Sales Invoice {0} is already linked to Purchase Invoice {1}").format(
-                    sales_invoice, si.get("bns_inter_company_reference")
+        # Check if SI is already linked to another PI — clear stale links
+        si_existing = (si.get("bns_inter_company_reference") or "").strip()
+        if si_existing and si_existing != pi.name:
+            stale = _is_stale_inter_company_ref("Sales Invoice", si.name, si_existing)
+            if stale:
+                logger.info("Clearing stale ref %s on SI %s (reason: %s)", si_existing, si.name, stale)
+                si.db_set("bns_inter_company_reference", "", update_modified=False)
+                si.bns_inter_company_reference = ""
+            else:
+                raise BNSValidationError(
+                    _("Sales Invoice {0} is already linked to Purchase Invoice {1}").format(
+                        sales_invoice, si_existing
+                    )
                 )
-            )
-        
-        # Check if PI is already linked to another SI
-        if pi.get("bns_inter_company_reference") and pi.get("bns_inter_company_reference") != si.name:
-            raise BNSValidationError(
-                _("Purchase Invoice {0} is already linked to Sales Invoice {1}").format(
-                    purchase_invoice, pi.get("bns_inter_company_reference")
+
+        # Check if PI is already linked to another SI — clear stale links
+        pi_existing = (pi.get("bns_inter_company_reference") or "").strip()
+        if pi_existing and pi_existing != si.name:
+            stale = _is_stale_inter_company_ref("Purchase Invoice", pi.name, pi_existing)
+            if stale:
+                logger.info("Clearing stale ref %s on PI %s (reason: %s)", pi_existing, pi.name, stale)
+                pi.db_set("bns_inter_company_reference", "", update_modified=False)
+                pi.bns_inter_company_reference = ""
+            else:
+                raise BNSValidationError(
+                    _("Purchase Invoice {0} is already linked to Sales Invoice {1}").format(
+                        purchase_invoice, pi_existing
+                    )
                 )
-            )
         
         # Validate items match
         items_validation = validate_si_pi_items_match(sales_invoice, purchase_invoice)
@@ -3470,6 +7850,12 @@ def unlink_si_pi(sales_invoice: str = None, purchase_invoice: str = None) -> Dic
         Dict: Result with success message
     """
     try:
+        _enforce_unlink_recovery_permission("unlink_si_pi")
+        _audit_unlink_action(
+            "unlink_si_pi_requested",
+            {"sales_invoice": sales_invoice, "purchase_invoice": purchase_invoice},
+        )
+
         if not sales_invoice and not purchase_invoice:
             raise BNSValidationError(_("Either sales_invoice or purchase_invoice must be provided"))
         
@@ -3510,19 +7896,24 @@ def unlink_si_pi(sales_invoice: str = None, purchase_invoice: str = None) -> Dic
                 si = frappe.get_doc("Sales Invoice", sales_invoice)
                 if si.get("bns_inter_company_reference"):
                     si.db_set("bns_inter_company_reference", "", update_modified=False)
+                si.db_set("is_bns_internal_customer", 0, update_modified=False)
+                si_status = "Unpaid" if flt(si.get("outstanding_amount")) > 0 else "Paid"
+                si.db_set("status", si_status, update_modified=False)
                 si_cleared = True
             else:
                 logger.warning(f"Sales Invoice {sales_invoice} does not exist — skipping its side of unlink")
-        
+
         if purchase_invoice:
             if frappe.db.exists("Purchase Invoice", purchase_invoice):
                 pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
                 if pi.get("bns_inter_company_reference"):
                     pi.db_set("bns_inter_company_reference", "", update_modified=False)
-                # Clear item-wise references
                 for pi_item in pi.items:
                     if pi_item.get("sales_invoice_item"):
                         pi_item.db_set("sales_invoice_item", "", update_modified=False)
+                pi.db_set("is_bns_internal_supplier", 0, update_modified=False)
+                pi_status = "Unpaid" if flt(pi.get("outstanding_amount")) > 0 else "Paid"
+                pi.db_set("status", pi_status, update_modified=False)
                 pi_cleared = True
             else:
                 logger.warning(f"Purchase Invoice {purchase_invoice} does not exist — skipping its side of unlink")
@@ -3534,6 +7925,10 @@ def unlink_si_pi(sales_invoice: str = None, purchase_invoice: str = None) -> Dic
             frappe.clear_cache(doctype="Purchase Invoice")
         
         logger.info(f"Unlinked Sales Invoice {sales_invoice} from Purchase Invoice {purchase_invoice}")
+        _audit_unlink_action(
+            "unlink_si_pi_completed",
+            {"sales_invoice": sales_invoice, "purchase_invoice": purchase_invoice},
+        )
         
         return {
             "success": True,
@@ -3546,42 +7941,51 @@ def unlink_si_pi(sales_invoice: str = None, purchase_invoice: str = None) -> Dic
 
 
 @frappe.whitelist()
-def get_bulk_conversion_preview(from_date: str, force: int = 0) -> Dict:
+def get_bulk_conversion_preview(from_date: str, to_date: str = None, force: int = 0) -> Dict:
     """
     Get preview of documents that can be bulk converted to BNS Internal.
-    
+
     Args:
         from_date (str): Date filter (YYYY-MM-DD)
+        to_date (str): Upper date bound (YYYY-MM-DD). Defaults to end of the
+            fiscal year containing from_date to prevent cross-FY modifications.
         force (int): If 1, include documents even if flag is already set
-        
+
     Returns:
         Dict: Counts of documents that can be converted
     """
     try:
         from_date_obj = frappe.utils.getdate(from_date)
-        
-        # Build filters
+        if to_date:
+            to_date_obj = frappe.utils.getdate(to_date)
+        else:
+            to_date_obj = frappe.get_fiscal_year(from_date_obj)[2]
+
         si_filters = [
             ["docstatus", "=", 1],
             ["posting_date", ">=", from_date_obj],
+            ["posting_date", "<=", to_date_obj],
             ["customer", "!=", ""]
         ]
-        
+
         pi_filters = [
             ["docstatus", "=", 1],
             ["posting_date", ">=", from_date_obj],
+            ["posting_date", "<=", to_date_obj],
             ["supplier", "!=", ""]
         ]
-        
+
         dn_filters = [
             ["docstatus", "=", 1],
             ["posting_date", ">=", from_date_obj],
+            ["posting_date", "<=", to_date_obj],
             ["customer", "!=", ""]
         ]
-        
+
         pr_filters = [
             ["docstatus", "=", 1],
             ["posting_date", ">=", from_date_obj],
+            ["posting_date", "<=", to_date_obj],
             ["supplier_delivery_note", "!=", ""]
         ]
         
@@ -3618,17 +8022,23 @@ def get_bulk_conversion_preview(from_date: str, force: int = 0) -> Dict:
         dn_list = frappe.get_all(
             "Delivery Note",
             filters=dn_filters,
-            fields=["name", "customer", "is_bns_internal_customer", "status", "billing_address_gstin", "company_gstin"],
+            fields=["name", "customer", "is_bns_internal_customer", "status",
+                    "billing_address_gstin", "company_gstin", "bns_inter_company_reference"],
             limit=10000
         )
         for dn in dn_list:
             customer_internal = frappe.db.get_value("Customer", dn.customer, "is_bns_internal_customer")
             if customer_internal:
-                # Check GSTIN match (same GSTIN only)
                 billing_gstin = dn.get("billing_address_gstin")
                 company_gstin = dn.get("company_gstin")
                 if billing_gstin and company_gstin and billing_gstin == company_gstin:
-                    if force or not dn.get("is_bns_internal_customer") or dn.status != "BNS Internally Transferred":
+                    dn_ref = (dn.get("bns_inter_company_reference") or "").strip()
+                    if (
+                        force
+                        or not dn.get("is_bns_internal_customer")
+                        or dn.status != "BNS Internally Transferred"
+                        or not dn_ref
+                    ):
                         dn_count += 1
         
         # Get counts for Purchase Receipt (from DN with same GSTIN)
@@ -3671,19 +8081,33 @@ def get_bulk_conversion_preview(from_date: str, force: int = 0) -> Dict:
 
 
 @frappe.whitelist()
-def bulk_convert_to_bns_internal(from_date: str, force: int = 0) -> Dict:
+def bulk_convert_to_bns_internal(from_date: str, to_date: str = None, force: int = 0) -> Dict:
     """
     Bulk convert documents to BNS Internally Transferred status.
-    
+
     Args:
         from_date (str): Date filter (YYYY-MM-DD)
+        to_date (str): Upper date bound (YYYY-MM-DD). Defaults to end of the
+            fiscal year containing from_date to prevent cross-FY modifications.
         force (int): If 1, update even if flag is already set
-        
+
     Returns:
         Dict: Results with counts of converted documents
     """
     try:
         from_date_obj = frappe.utils.getdate(from_date)
+        if to_date:
+            to_date_obj = frappe.utils.getdate(to_date)
+        else:
+            to_date_obj = frappe.get_fiscal_year(from_date_obj)[2]
+
+        if force and to_date_obj > frappe.get_fiscal_year(from_date_obj)[2]:
+            logger.warning(
+                "bulk_convert_to_bns_internal: force=1 with date range %s to %s spans "
+                "multiple fiscal years — documents will be stamped with current settings",
+                from_date_obj, to_date_obj,
+            )
+
         converted = {
             "sales_invoice": 0,
             "purchase_invoice": 0,
@@ -3697,6 +8121,7 @@ def bulk_convert_to_bns_internal(from_date: str, force: int = 0) -> Dict:
             filters=[
                 ["docstatus", "=", 1],
                 ["posting_date", ">=", from_date_obj],
+                ["posting_date", "<=", to_date_obj],
                 ["customer", "!=", ""]
             ],
             fields=["name", "customer", "is_bns_internal_customer", "status"],
@@ -3719,6 +8144,7 @@ def bulk_convert_to_bns_internal(from_date: str, force: int = 0) -> Dict:
             filters=[
                 ["docstatus", "=", 1],
                 ["posting_date", ">=", from_date_obj],
+                ["posting_date", "<=", to_date_obj],
                 ["supplier", "!=", ""]
             ],
             fields=["name", "supplier", "is_bns_internal_supplier", "status"],
@@ -3741,9 +8167,11 @@ def bulk_convert_to_bns_internal(from_date: str, force: int = 0) -> Dict:
             filters=[
                 ["docstatus", "=", 1],
                 ["posting_date", ">=", from_date_obj],
+                ["posting_date", "<=", to_date_obj],
                 ["customer", "!=", ""]
             ],
-            fields=["name", "customer", "is_bns_internal_customer", "status", "billing_address_gstin", "company_gstin"],
+            fields=["name", "customer", "is_bns_internal_customer", "status",
+                    "billing_address_gstin", "company_gstin", "bns_inter_company_reference"],
             limit=10000
         )
         for dn in dn_list:
@@ -3752,7 +8180,14 @@ def bulk_convert_to_bns_internal(from_date: str, force: int = 0) -> Dict:
                 billing_gstin = dn.get("billing_address_gstin")
                 company_gstin = dn.get("company_gstin")
                 if billing_gstin and company_gstin and billing_gstin == company_gstin:
-                    if force or not dn.get("is_bns_internal_customer") or dn.status != "BNS Internally Transferred":
+                    dn_ref = (dn.get("bns_inter_company_reference") or "").strip()
+                    needs_convert = (
+                        force
+                        or not dn.get("is_bns_internal_customer")
+                        or dn.status != "BNS Internally Transferred"
+                        or not dn_ref
+                    )
+                    if needs_convert:
                         try:
                             result = convert_delivery_note_to_bns_internal(dn.name, None)
                             if result.get("success"):
@@ -3768,6 +8203,7 @@ def bulk_convert_to_bns_internal(from_date: str, force: int = 0) -> Dict:
             filters=[
                 ["docstatus", "=", 1],
                 ["posting_date", ">=", from_date_obj],
+                ["posting_date", "<=", to_date_obj],
                 ["supplier_delivery_note", "!=", ""]
             ],
             fields=["name", "supplier_delivery_note", "is_bns_internal_supplier", "status"],
@@ -3893,7 +8329,7 @@ def backfill_item_references(from_date: str) -> Dict:
     )
     for pi_name in pi_list:
         pi = frappe.get_doc("Purchase Invoice", pi_name)
-        si_name = pi.get("bns_inter_company_reference") or pi.get("inter_company_invoice_reference")
+        si_name = pi.get("bns_inter_company_reference")
         if not si_name or not frappe.db.exists("Sales Invoice", si_name):
             continue
         has_empty = any(not (pi_item.get("sales_invoice_item") or "").strip() for pi_item in pi.items)
@@ -3917,7 +8353,7 @@ def backfill_item_references(from_date: str) -> Dict:
     )
     for pr_name in pr_list:
         pr = frappe.get_doc("Purchase Receipt", pr_name)
-        dn_name = pr.get("bns_inter_company_reference") or pr.get("supplier_delivery_note")
+        dn_name = pr.get("bns_inter_company_reference")
         if not dn_name or not frappe.db.exists("Delivery Note", dn_name):
             continue
         has_empty = any(not (pr_item.get("delivery_note_item") or "").strip() for pr_item in pr.items)
@@ -3938,4 +8374,1207 @@ def backfill_item_references(from_date: str) -> Dict:
         "message": _(
             "Backfill complete: {0} Purchase Invoice(s) ({1} items), {2} Purchase Receipt(s) ({3} items)."
         ).format(pi_docs_fixed, pi_items_fixed, pr_docs_fixed, pr_items_fixed),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Bulk Linkage Verification & Repost
+# ---------------------------------------------------------------------------
+
+def _qtys_equal_bulk(a, b):
+    """Compare quantities with no tolerance; round to 6 decimals."""
+    return round(flt(a or 0), 6) == round(flt(b or 0), 6)
+
+
+def _verify_dn_pr_item_linkage(dn_name: str, pr_name: str) -> Dict[str, Any]:
+    """
+    Verify item-level linkage between DN and PR (same GSTIN).
+
+    First attempts matching via delivery_note_item references. When all items
+    are unlinked (common after DN amendment where IDs change), falls back to
+    matching by item_code + qty so amended docs aren't falsely flagged.
+
+    Args:
+        dn_name: Delivery Note name
+        pr_name: Purchase Receipt name
+
+    Returns:
+        Dict with keys: linked (bool), missing_items (list), qty_mismatches (list), item_mismatches (list)
+    """
+    dn_items = frappe.get_all(
+        "Delivery Note Item",
+        filters={"parent": dn_name},
+        fields=["name", "item_code", "qty", "stock_qty"],
+    )
+    pr_items = frappe.get_all(
+        "Purchase Receipt Item",
+        filters={"parent": pr_name},
+        fields=["name", "item_code", "qty", "stock_qty", "delivery_note_item"],
+    )
+
+    pr_by_dn_item = {}
+    for pri in pr_items:
+        dni_ref = (pri.get("delivery_note_item") or "").strip()
+        if dni_ref:
+            pr_by_dn_item.setdefault(dni_ref, []).append(pri)
+
+    dn_item_ids = {d.name for d in dn_items}
+    refs_valid = any(ref in dn_item_ids for ref in pr_by_dn_item)
+
+    if refs_valid:
+        missing_items = []
+        qty_mismatches = []
+        item_mismatches = []
+
+        for dni in dn_items:
+            linked_prs = pr_by_dn_item.get(dni.name, [])
+            if not linked_prs:
+                missing_items.append({"item_code": dni.item_code, "dn_item": dni.name})
+                continue
+            total_pr_qty = sum(flt(p.get("stock_qty") or p.get("qty") or 0) for p in linked_prs)
+            dn_qty = flt(dni.stock_qty or dni.qty or 0)
+            if not _qtys_equal_bulk(dn_qty, total_pr_qty):
+                qty_mismatches.append({
+                    "item_code": dni.item_code, "dn_qty": dn_qty, "pr_qty": total_pr_qty,
+                })
+            for pri in linked_prs:
+                if (pri.item_code or "") != (dni.item_code or ""):
+                    item_mismatches.append({
+                        "dn_item_code": dni.item_code, "pr_item_code": pri.item_code,
+                        "dn_item": dni.name, "pr_item": pri.name,
+                    })
+
+        fully_linked = not missing_items and not qty_mismatches and not item_mismatches
+        return {
+            "linked": fully_linked,
+            "missing_items": missing_items,
+            "qty_mismatches": qty_mismatches,
+            "item_mismatches": item_mismatches,
+        }
+
+    # Fallback: refs are stale (e.g. DN was amended). Match by item_code + qty.
+    dn_agg: Dict[str, float] = {}
+    for d in dn_items:
+        dn_agg[d.item_code] = dn_agg.get(d.item_code, 0) + flt(d.stock_qty or d.qty or 0)
+    pr_agg: Dict[str, float] = {}
+    for p in pr_items:
+        pr_agg[p.item_code] = pr_agg.get(p.item_code, 0) + flt(p.stock_qty or p.qty or 0)
+
+    missing_items = []
+    qty_mismatches = []
+    item_mismatches = []
+
+    for code, dn_qty in dn_agg.items():
+        if code not in pr_agg:
+            missing_items.append({"item_code": code, "dn_item": "aggregate"})
+        elif not _qtys_equal_bulk(dn_qty, pr_agg[code]):
+            qty_mismatches.append({"item_code": code, "dn_qty": dn_qty, "pr_qty": pr_agg[code]})
+    for code in pr_agg:
+        if code not in dn_agg:
+            item_mismatches.append({"dn_item_code": "", "pr_item_code": code, "dn_item": "", "pr_item": "aggregate"})
+
+    fully_linked = not missing_items and not qty_mismatches and not item_mismatches
+    return {
+        "linked": fully_linked,
+        "missing_items": missing_items,
+        "qty_mismatches": qty_mismatches,
+        "item_mismatches": item_mismatches,
+    }
+
+
+def _verify_si_pi_item_linkage(si_name: str, pi_name: str) -> Dict[str, Any]:
+    """
+    Verify item-level linkage between SI and PI (different GSTIN).
+
+    Returns:
+        Dict with keys: linked (bool), missing_items, qty_mismatches, item_mismatches
+    """
+    si_items = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"parent": si_name},
+        fields=["name", "item_code", "qty", "stock_qty"],
+    )
+    pi_items = frappe.get_all(
+        "Purchase Invoice Item",
+        filters={"parent": pi_name},
+        fields=["name", "item_code", "qty", "stock_qty", "sales_invoice_item"],
+    )
+
+    pi_by_si_item = {}
+    for pii in pi_items:
+        si_ref = (pii.get("sales_invoice_item") or "").strip()
+        if si_ref:
+            pi_by_si_item.setdefault(si_ref, []).append(pii)
+
+    missing_items = []
+    qty_mismatches = []
+    item_mismatches = []
+
+    for sii in si_items:
+        linked_pis = pi_by_si_item.get(sii.name, [])
+        if not linked_pis:
+            missing_items.append({"item_code": sii.item_code, "si_item": sii.name})
+            continue
+        total_pi_qty = sum(flt(p.get("stock_qty") or p.get("qty") or 0) for p in linked_pis)
+        si_qty = flt(sii.stock_qty or sii.qty or 0)
+        if not _qtys_equal_bulk(si_qty, total_pi_qty):
+            qty_mismatches.append({
+                "item_code": sii.item_code, "si_qty": si_qty, "pi_qty": total_pi_qty,
+            })
+        for pii in linked_pis:
+            if (pii.item_code or "") != (sii.item_code or ""):
+                item_mismatches.append({
+                    "si_item_code": sii.item_code, "pi_item_code": pii.item_code,
+                    "si_item": sii.name, "pi_item": pii.name,
+                })
+
+    fully_linked = not missing_items and not qty_mismatches and not item_mismatches
+    return {
+        "linked": fully_linked,
+        "missing_items": missing_items,
+        "qty_mismatches": qty_mismatches,
+        "item_mismatches": item_mismatches,
+    }
+
+
+def _verify_si_pr_item_linkage(si_name: str, pr_name: str) -> Dict[str, Any]:
+    """
+    Verify item-level linkage between SI and PR (SI->PR flow).
+
+    PR items reference SI via sales_invoice_item or item_code+qty matching.
+    """
+    si_items = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"parent": si_name},
+        fields=["name", "item_code", "qty", "stock_qty"],
+    )
+    pr_items = frappe.get_all(
+        "Purchase Receipt Item",
+        filters={"parent": pr_name},
+        fields=["name", "item_code", "qty", "stock_qty", "sales_invoice_item"],
+    )
+
+    pr_meta = frappe.get_meta("Purchase Receipt Item")
+    has_si_item_field = pr_meta.has_field("sales_invoice_item")
+
+    pr_by_si_item = {}
+    unlinked_pr_items = []
+    if has_si_item_field:
+        for pri in pr_items:
+            si_ref = (pri.get("sales_invoice_item") or "").strip()
+            if si_ref:
+                pr_by_si_item.setdefault(si_ref, []).append(pri)
+            else:
+                unlinked_pr_items.append(pri)
+    else:
+        unlinked_pr_items = list(pr_items)
+
+    missing_items = []
+    qty_mismatches = []
+    item_mismatches = []
+
+    si_agg = defaultdict(float)
+    for sii in si_items:
+        si_agg[sii.item_code] += flt(sii.stock_qty or sii.qty or 0)
+
+    pr_agg = defaultdict(float)
+    for pri in pr_items:
+        pr_agg[pri.item_code] += flt(pri.stock_qty or pri.qty or 0)
+
+    for item_code, si_qty in si_agg.items():
+        pr_qty = pr_agg.get(item_code, 0)
+        if not _qtys_equal_bulk(si_qty, pr_qty):
+            if pr_qty == 0:
+                missing_items.append({"item_code": item_code})
+            else:
+                qty_mismatches.append({"item_code": item_code, "si_qty": si_qty, "pr_qty": pr_qty})
+
+    for item_code in pr_agg:
+        if item_code not in si_agg:
+            item_mismatches.append({"si_item_code": None, "pr_item_code": item_code})
+
+    fully_linked = not missing_items and not qty_mismatches and not item_mismatches
+    return {
+        "linked": fully_linked,
+        "missing_items": missing_items,
+        "qty_mismatches": qty_mismatches,
+        "item_mismatches": item_mismatches,
+    }
+
+
+def _verify_pr_pi_item_linkage(pr_name: str, pi_name: str) -> Dict[str, Any]:
+    """
+    Verify item-level linkage between PR and PI (PR->PI flow).
+
+    PI items reference PR via purchase_receipt + pr_detail.
+    """
+    pr_items = frappe.get_all(
+        "Purchase Receipt Item",
+        filters={"parent": pr_name},
+        fields=["name", "item_code", "qty", "stock_qty"],
+    )
+    pi_items = frappe.get_all(
+        "Purchase Invoice Item",
+        filters={"parent": pi_name, "purchase_receipt": pr_name},
+        fields=["name", "item_code", "qty", "stock_qty", "pr_detail"],
+    )
+
+    pr_agg = defaultdict(float)
+    for pri in pr_items:
+        pr_agg[pri.item_code] += flt(pri.stock_qty or pri.qty or 0)
+
+    pi_agg = defaultdict(float)
+    for pii in pi_items:
+        pi_agg[pii.item_code] += flt(pii.stock_qty or pii.qty or 0)
+
+    missing_items = []
+    qty_mismatches = []
+    item_mismatches = []
+
+    for item_code, pr_qty in pr_agg.items():
+        pi_qty = pi_agg.get(item_code, 0)
+        if not _qtys_equal_bulk(pr_qty, pi_qty):
+            if pi_qty == 0:
+                missing_items.append({"item_code": item_code})
+            else:
+                qty_mismatches.append({"item_code": item_code, "pr_qty": pr_qty, "pi_qty": pi_qty})
+
+    for item_code in pi_agg:
+        if item_code not in pr_agg:
+            item_mismatches.append({"pr_item_code": None, "pi_item_code": item_code})
+
+    fully_linked = not missing_items and not qty_mismatches and not item_mismatches
+    return {
+        "linked": fully_linked,
+        "missing_items": missing_items,
+        "qty_mismatches": qty_mismatches,
+        "item_mismatches": item_mismatches,
+    }
+
+
+def _verify_dn_si_item_linkage(dn_name: str, si_name: str) -> Dict[str, Any]:
+    """
+    Verify item-level linkage between DN and SI.
+
+    SI items reference DN via delivery_note + dn_detail fields.
+    """
+    dn_items = frappe.get_all(
+        "Delivery Note Item",
+        filters={"parent": dn_name},
+        fields=["name", "item_code", "qty", "stock_qty"],
+    )
+    si_items = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"parent": si_name, "delivery_note": dn_name},
+        fields=["name", "item_code", "qty", "stock_qty", "dn_detail"],
+    )
+
+    si_by_dn_detail = {}
+    for sii in si_items:
+        ref = (sii.get("dn_detail") or "").strip()
+        if ref:
+            si_by_dn_detail.setdefault(ref, []).append(sii)
+
+    missing_items = []
+    qty_mismatches = []
+    item_mismatches = []
+
+    for dni in dn_items:
+        linked_sis = si_by_dn_detail.get(dni.name, [])
+        if not linked_sis:
+            missing_items.append({"item_code": dni.item_code, "dn_item": dni.name})
+            continue
+        total_si_qty = sum(flt(s.get("stock_qty") or s.get("qty") or 0) for s in linked_sis)
+        dn_qty = flt(dni.stock_qty or dni.qty or 0)
+        if not _qtys_equal_bulk(dn_qty, total_si_qty):
+            qty_mismatches.append({
+                "item_code": dni.item_code, "dn_qty": dn_qty, "si_qty": total_si_qty,
+            })
+        for sii in linked_sis:
+            if (sii.item_code or "") != (dni.item_code or ""):
+                item_mismatches.append({
+                    "dn_item_code": dni.item_code, "si_item_code": sii.item_code,
+                })
+
+    fully_linked = not missing_items and not qty_mismatches and not item_mismatches
+    return {
+        "linked": fully_linked,
+        "missing_items": missing_items,
+        "qty_mismatches": qty_mismatches,
+        "item_mismatches": item_mismatches,
+    }
+
+
+def _get_sis_from_dn(dn_name: str) -> List[str]:
+    """Get submitted Sales Invoices created from a Delivery Note."""
+    si_names = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"delivery_note": dn_name, "docstatus": 1},
+        pluck="parent",
+    )
+    return sorted(set(si_names))
+
+
+def _detect_chain_type(doc_type: str, doc_name: str, doc: Dict) -> Dict[str, Any]:
+    """
+    Detect which internal transfer chain type a document belongs to.
+
+    Args:
+        doc_type: "Delivery Note" or "Sales Invoice"
+        doc_name: Document name
+        doc: Document dict with company_gstin, billing_address_gstin, etc.
+
+    Returns:
+        Dict with chain_type, docs dict keyed by role, and verification results.
+    """
+    company_gstin = (doc.get("company_gstin") or "").strip()
+    billing_gstin = (doc.get("billing_address_gstin") or "").strip()
+    same_gstin = company_gstin and billing_gstin and company_gstin == billing_gstin
+
+    if doc_type == "Delivery Note":
+        if same_gstin:
+            # Chain 1: DN -> PR
+            pr_names = _get_submitted_prs_for_dn(doc_name)
+            if not pr_names:
+                return {"chain_type": "DN->PR", "status": "unlinked", "docs": {"dn": doc_name}, "issues": ["No PR linked to DN"]}
+
+            pr_name = pr_names[0]
+            pr_ref = frappe.db.get_value("Purchase Receipt", pr_name, "bns_inter_company_reference")
+            dn_ref = doc.get("bns_inter_company_reference") or ""
+
+            issues = []
+            if dn_ref != pr_name:
+                issues.append(f"DN.bns_inter_company_reference ({dn_ref}) does not point to PR ({pr_name})")
+            if pr_ref != doc_name:
+                issues.append(f"PR.bns_inter_company_reference ({pr_ref}) does not point to DN ({doc_name})")
+
+            item_check = _verify_dn_pr_item_linkage(doc_name, pr_name)
+            if not item_check["linked"]:
+                issues.extend(_format_item_issues("DN->PR", item_check))
+
+            status = "fully_linked" if not issues else "partially_linked"
+            return {
+                "chain_type": "DN->PR",
+                "status": status,
+                "docs": {"dn": doc_name, "pr": pr_name},
+                "issues": issues,
+            }
+        else:
+            # Different GSTIN DN: look for SI made from this DN
+            si_names = _get_sis_from_dn(doc_name)
+            if not si_names:
+                return {"chain_type": "DN->SI->?", "status": "unlinked", "docs": {"dn": doc_name}, "issues": ["No SI created from DN"]}
+
+            si_name = si_names[0]
+            issues = []
+
+            dn_si_check = _verify_dn_si_item_linkage(doc_name, si_name)
+            if not dn_si_check["linked"]:
+                issues.extend(_format_item_issues("DN->SI", dn_si_check))
+
+            si_data = frappe.db.get_value(
+                "Sales Invoice", si_name,
+                ["bns_inter_company_reference", "bns_purchase_receipt_reference"],
+                as_dict=True,
+            ) or {}
+
+            si_pi_ref = (si_data.get("bns_inter_company_reference") or "").strip()
+            si_pr_ref = (si_data.get("bns_purchase_receipt_reference") or "").strip()
+
+            if si_pr_ref and frappe.db.exists("Purchase Receipt", si_pr_ref):
+                # Chain 5: DN -> SI -> PR -> PI
+                pr_name = si_pr_ref
+                pr_data = frappe.db.get_value(
+                    "Purchase Receipt", pr_name, "bns_inter_company_reference",
+                )
+                if (pr_data or "") != si_name:
+                    issues.append(f"PR.bns_inter_company_reference ({pr_data}) does not point to SI ({si_name})")
+
+                si_pr_check = _verify_si_pr_item_linkage(si_name, pr_name)
+                if not si_pr_check["linked"]:
+                    issues.extend(_format_item_issues("SI->PR", si_pr_check))
+
+                pi_names = frappe.get_all(
+                    "Purchase Invoice Item",
+                    filters={"purchase_receipt": pr_name, "docstatus": 1},
+                    pluck="parent",
+                )
+                pi_names = sorted(set(pi_names))
+
+                if pi_names:
+                    pi_name = pi_names[0]
+                    pr_pi_check = _verify_pr_pi_item_linkage(pr_name, pi_name)
+                    if not pr_pi_check["linked"]:
+                        issues.extend(_format_item_issues("PR->PI", pr_pi_check))
+                    status = "fully_linked" if not issues else "partially_linked"
+                    return {
+                        "chain_type": "DN->SI->PR->PI",
+                        "status": status,
+                        "docs": {"dn": doc_name, "si": si_name, "pr": pr_name, "pi": pi_name},
+                        "issues": issues,
+                    }
+                else:
+                    issues.append("No PI created from PR")
+                    return {
+                        "chain_type": "DN->SI->PR->PI",
+                        "status": "partially_linked",
+                        "docs": {"dn": doc_name, "si": si_name, "pr": pr_name},
+                        "issues": issues,
+                    }
+
+            elif si_pi_ref and frappe.db.exists("Purchase Invoice", si_pi_ref):
+                # Chain 4: DN -> SI -> PI
+                pi_name = si_pi_ref
+                pi_ref = frappe.db.get_value("Purchase Invoice", pi_name, "bns_inter_company_reference")
+                if (pi_ref or "") != si_name:
+                    issues.append(f"PI.bns_inter_company_reference ({pi_ref}) does not point to SI ({si_name})")
+
+                si_pi_check = _verify_si_pi_item_linkage(si_name, pi_name)
+                if not si_pi_check["linked"]:
+                    issues.extend(_format_item_issues("SI->PI", si_pi_check))
+
+                status = "fully_linked" if not issues else "partially_linked"
+                return {
+                    "chain_type": "DN->SI->PI",
+                    "status": status,
+                    "docs": {"dn": doc_name, "si": si_name, "pi": pi_name},
+                    "issues": issues,
+                }
+            else:
+                issues.append("SI has no PI or PR link")
+                return {
+                    "chain_type": "DN->SI->?",
+                    "status": "partially_linked",
+                    "docs": {"dn": doc_name, "si": si_name},
+                    "issues": issues,
+                }
+
+    elif doc_type == "Sales Invoice":
+        # Different GSTIN SI (not from DN -- DN-originated chains are handled above)
+        si_items = frappe.get_all(
+            "Sales Invoice Item",
+            filters={"parent": doc_name},
+            fields=["delivery_note"],
+        )
+        has_dn = any((sii.get("delivery_note") or "").strip() for sii in si_items)
+        if has_dn:
+            return None  # Will be handled via DN-originated chain detection
+
+        si_pi_ref = (doc.get("bns_inter_company_reference") or "").strip()
+        si_pr_ref = (doc.get("bns_purchase_receipt_reference") or "").strip() if hasattr(doc, "get") else ""
+
+        if si_pr_ref and frappe.db.exists("Purchase Receipt", si_pr_ref):
+            # Chain 3: SI -> PR -> PI
+            pr_name = si_pr_ref
+            issues = []
+
+            pr_ref = frappe.db.get_value("Purchase Receipt", pr_name, "bns_inter_company_reference")
+            if (pr_ref or "") != doc_name:
+                issues.append(f"PR.bns_inter_company_reference ({pr_ref}) does not point to SI ({doc_name})")
+
+            si_pr_check = _verify_si_pr_item_linkage(doc_name, pr_name)
+            if not si_pr_check["linked"]:
+                issues.extend(_format_item_issues("SI->PR", si_pr_check))
+
+            pi_names = frappe.get_all(
+                "Purchase Invoice Item",
+                filters={"purchase_receipt": pr_name, "docstatus": 1},
+                pluck="parent",
+            )
+            pi_names = sorted(set(pi_names))
+
+            if pi_names:
+                pi_name = pi_names[0]
+                pr_pi_check = _verify_pr_pi_item_linkage(pr_name, pi_name)
+                if not pr_pi_check["linked"]:
+                    issues.extend(_format_item_issues("PR->PI", pr_pi_check))
+                status = "fully_linked" if not issues else "partially_linked"
+                return {
+                    "chain_type": "SI->PR->PI",
+                    "status": status,
+                    "docs": {"si": doc_name, "pr": pr_name, "pi": pi_name},
+                    "issues": issues,
+                }
+            else:
+                issues.append("No PI created from PR")
+                return {
+                    "chain_type": "SI->PR->PI",
+                    "status": "partially_linked",
+                    "docs": {"si": doc_name, "pr": pr_name},
+                    "issues": issues,
+                }
+
+        elif si_pi_ref and frappe.db.exists("Purchase Invoice", si_pi_ref):
+            # Chain 2: SI -> PI (direct)
+            pi_name = si_pi_ref
+            issues = []
+
+            pi_ref = frappe.db.get_value("Purchase Invoice", pi_name, "bns_inter_company_reference")
+            if (pi_ref or "") != doc_name:
+                issues.append(f"PI.bns_inter_company_reference ({pi_ref}) does not point to SI ({doc_name})")
+
+            si_pi_check = _verify_si_pi_item_linkage(doc_name, pi_name)
+            if not si_pi_check["linked"]:
+                issues.extend(_format_item_issues("SI->PI", si_pi_check))
+
+            status = "fully_linked" if not issues else "partially_linked"
+            return {
+                "chain_type": "SI->PI",
+                "status": status,
+                "docs": {"si": doc_name, "pi": pi_name},
+                "issues": issues,
+            }
+        else:
+            # Also check if PR links back via bns_inter_company_reference
+            pr_names = _get_submitted_prs_for_si(doc_name)
+            if pr_names:
+                pr_name = pr_names[0]
+                issues = []
+
+                si_pr_check = _verify_si_pr_item_linkage(doc_name, pr_name)
+                if not si_pr_check["linked"]:
+                    issues.extend(_format_item_issues("SI->PR", si_pr_check))
+
+                pi_names = frappe.get_all(
+                    "Purchase Invoice Item",
+                    filters={"purchase_receipt": pr_name, "docstatus": 1},
+                    pluck="parent",
+                )
+                pi_names = sorted(set(pi_names))
+                if pi_names:
+                    pi_name = pi_names[0]
+                    pr_pi_check = _verify_pr_pi_item_linkage(pr_name, pi_name)
+                    if not pr_pi_check["linked"]:
+                        issues.extend(_format_item_issues("PR->PI", pr_pi_check))
+                    status = "fully_linked" if not issues else "partially_linked"
+                    return {
+                        "chain_type": "SI->PR->PI",
+                        "status": status,
+                        "docs": {"si": doc_name, "pr": pr_name, "pi": pi_name},
+                        "issues": issues,
+                    }
+                else:
+                    issues.append("No PI created from PR")
+                    return {
+                        "chain_type": "SI->PR->PI",
+                        "status": "partially_linked",
+                        "docs": {"si": doc_name, "pr": pr_name},
+                        "issues": issues,
+                    }
+
+            # Check PI via bns_inter_company_reference pointing to this SI
+            pi_name = frappe.db.get_value(
+                "Purchase Invoice",
+                {"bns_inter_company_reference": doc_name, "docstatus": 1},
+                "name",
+            )
+            if pi_name:
+                issues = []
+                si_pi_check = _verify_si_pi_item_linkage(doc_name, pi_name)
+                if not si_pi_check["linked"]:
+                    issues.extend(_format_item_issues("SI->PI", si_pi_check))
+                status = "fully_linked" if not issues else "partially_linked"
+                return {
+                    "chain_type": "SI->PI",
+                    "status": status,
+                    "docs": {"si": doc_name, "pi": pi_name},
+                    "issues": issues,
+                }
+
+            return {
+                "chain_type": "SI->?",
+                "status": "unlinked",
+                "docs": {"si": doc_name},
+                "issues": ["No PI or PR linked to SI"],
+            }
+
+    return None
+
+
+def _check_dn_pr_fixable(dn_name: str, pr_name: str) -> Dict[str, Any]:
+    """
+    Check whether a partially linked DN->PR pair can be auto-fixed.
+
+    Skips (returns fixable=False) when any of these mismatches are found:
+      - Item code mismatch (DN item not in PR or vice-versa)
+      - Per-unit rate mismatch
+      - Taxable amount mismatch
+      - Location mismatch (DN target_warehouse vs PR warehouse)
+
+    Args:
+        dn_name: Delivery Note name
+        pr_name: Purchase Receipt name
+
+    Returns:
+        Dict with fixable (bool) and skip_reasons (list of str).
+    """
+    dn_items = frappe.get_all(
+        "Delivery Note Item",
+        filters={"parent": dn_name},
+        fields=["item_code", "qty", "rate", "amount", "warehouse", "target_warehouse"],
+    )
+    pr_items = frappe.get_all(
+        "Purchase Receipt Item",
+        filters={"parent": pr_name},
+        fields=["item_code", "qty", "rate", "amount", "warehouse"],
+    )
+
+    skip_reasons: List[str] = []
+
+    dn_agg: Dict[str, Dict] = {}
+    for item in dn_items:
+        code = item.item_code
+        if code not in dn_agg:
+            dn_agg[code] = {"qty": 0, "amount": 0, "target_warehouses": set()}
+        dn_agg[code]["qty"] += flt(item.qty)
+        dn_agg[code]["amount"] += flt(item.amount)
+        tw = (item.target_warehouse or "").strip()
+        if tw:
+            dn_agg[code]["target_warehouses"].add(tw)
+
+    pr_agg: Dict[str, Dict] = {}
+    for item in pr_items:
+        code = item.item_code
+        if code not in pr_agg:
+            pr_agg[code] = {"qty": 0, "amount": 0, "warehouses": set()}
+        pr_agg[code]["qty"] += flt(item.qty)
+        pr_agg[code]["amount"] += flt(item.amount)
+        wh = (item.warehouse or "").strip()
+        if wh:
+            pr_agg[code]["warehouses"].add(wh)
+
+    dn_codes = set(dn_agg.keys())
+    pr_codes = set(pr_agg.keys())
+
+    missing_in_pr = dn_codes - pr_codes
+    extra_in_pr = pr_codes - dn_codes
+
+    if missing_in_pr:
+        skip_reasons.append(f"Item(s) in DN but not in PR: {', '.join(sorted(missing_in_pr))}")
+    if extra_in_pr:
+        skip_reasons.append(f"Item(s) in PR but not in DN: {', '.join(sorted(extra_in_pr))}")
+
+    for code in sorted(dn_codes & pr_codes):
+        dn_data = dn_agg[code]
+        pr_data = pr_agg[code]
+
+        dn_rate = flt(dn_data["amount"] / dn_data["qty"], 2) if dn_data["qty"] else 0
+        pr_rate = flt(pr_data["amount"] / pr_data["qty"], 2) if pr_data["qty"] else 0
+        if dn_rate != pr_rate:
+            skip_reasons.append(f"Rate mismatch for {code}: DN rate={dn_rate}, PR rate={pr_rate}")
+
+        if flt(dn_data["amount"], 2) != flt(pr_data["amount"], 2):
+            skip_reasons.append(
+                f"Taxable amount mismatch for {code}: DN={flt(dn_data['amount'], 2)}, PR={flt(pr_data['amount'], 2)}"
+            )
+
+        dn_targets = dn_data["target_warehouses"]
+        pr_whs = pr_data["warehouses"]
+        if dn_targets and pr_whs and dn_targets != pr_whs:
+            skip_reasons.append(
+                f"Location mismatch for {code}: DN target={', '.join(sorted(dn_targets))}, "
+                f"PR warehouse={', '.join(sorted(pr_whs))}"
+            )
+
+    return {"fixable": len(skip_reasons) == 0, "skip_reasons": skip_reasons}
+
+
+def _fix_dn_pr_link(dn_name: str, pr_name: str) -> Dict[str, Any]:
+    """
+    Fix a partially linked DN->PR pair by setting bidirectional references,
+    status, and re-mapping stale delivery_note_item refs on PR items.
+
+    When a DN has been amended, PR items still reference old DN item IDs.
+    This function re-maps them by matching item_code + qty + rate.
+
+    Args:
+        dn_name: Delivery Note name
+        pr_name: Purchase Receipt name
+
+    Returns:
+        Dict with success (bool) and message (str).
+    """
+    try:
+        dn = frappe.get_doc("Delivery Note", dn_name)
+        pr = frappe.get_doc("Purchase Receipt", pr_name)
+
+        if dn.docstatus != 1 or pr.docstatus != 1:
+            return {"success": False, "message": "Both documents must be submitted"}
+
+        if dn.get("bns_inter_company_reference") != pr_name:
+            dn.db_set("bns_inter_company_reference", pr_name, update_modified=False)
+        if pr.get("bns_inter_company_reference") != dn_name:
+            pr.db_set("bns_inter_company_reference", dn_name, update_modified=False)
+
+        if not dn.get("is_bns_internal_customer"):
+            dn.db_set("is_bns_internal_customer", 1, update_modified=False)
+        if dn.status != "BNS Internally Transferred":
+            dn.db_set("status", "BNS Internally Transferred", update_modified=False)
+        if dn.per_billed != 100:
+            dn.db_set("per_billed", 100, update_modified=False)
+
+        if not pr.get("is_bns_internal_supplier"):
+            pr.db_set("is_bns_internal_supplier", 1, update_modified=False)
+        if pr.status != "BNS Internally Transferred":
+            pr.db_set("status", "BNS Internally Transferred", update_modified=False)
+        if pr.per_billed != 100:
+            pr.db_set("per_billed", 100, update_modified=False)
+
+        _remap_pr_delivery_note_items(dn, pr)
+
+        frappe.clear_cache(doctype="Delivery Note")
+        frappe.clear_cache(doctype="Purchase Receipt")
+
+        logger.info("Fixed partial DN->PR link: %s <-> %s", dn_name, pr_name)
+        return {"success": True, "message": f"Fixed link: DN {dn_name} <-> PR {pr_name}"}
+
+    except Exception as e:
+        logger.error("Error fixing DN-PR link %s <-> %s: %s", dn_name, pr_name, str(e))
+        return {"success": False, "message": str(e)}
+
+
+def _remap_pr_delivery_note_items(dn, pr) -> int:
+    """
+    Re-map stale delivery_note_item references on PR items to current DN item IDs.
+
+    Matches by item_code + qty + rate. Only updates refs that are empty or
+    point to IDs not present in the current DN (stale after amendment).
+
+    Args:
+        dn: Delivery Note doc object
+        pr: Purchase Receipt doc object
+
+    Returns:
+        Number of PR items re-mapped.
+    """
+    dn_item_ids = {item.name for item in dn.items}
+
+    pr_items_needing_remap = []
+    for pri in pr.items:
+        ref = (pri.get("delivery_note_item") or "").strip()
+        if not ref or ref not in dn_item_ids:
+            pr_items_needing_remap.append(pri)
+
+    if not pr_items_needing_remap:
+        return 0
+
+    dn_pool = []
+    for dni in dn.items:
+        dn_pool.append({
+            "name": dni.name,
+            "item_code": dni.item_code,
+            "qty": flt(dni.qty),
+            "rate": flt(dni.rate),
+            "stock_qty": flt(dni.stock_qty or dni.qty),
+            "used": False,
+        })
+
+    remapped = 0
+    for pri in pr_items_needing_remap:
+        best = None
+        for dn_entry in dn_pool:
+            if dn_entry["used"]:
+                continue
+            if dn_entry["item_code"] != pri.item_code:
+                continue
+            if _qtys_equal_bulk(dn_entry["qty"], flt(pri.qty)):
+                if best is None:
+                    best = dn_entry
+                elif flt(dn_entry["rate"], 2) == flt(pri.rate, 2):
+                    best = dn_entry
+                    break
+
+        if best:
+            best["used"] = True
+            frappe.db.set_value(
+                "Purchase Receipt Item", pri.name,
+                "delivery_note_item", best["name"],
+                update_modified=False,
+            )
+            remapped += 1
+
+    if remapped:
+        logger.info(
+            "Re-mapped %d PR item refs on %s to current DN %s items",
+            remapped, pr.name, dn.name,
+        )
+
+    return remapped
+
+
+def _format_item_issues(link_label: str, check_result: Dict) -> List[str]:
+    """Format item verification issues into human-readable strings."""
+    issues = []
+    for m in check_result.get("missing_items", [])[:3]:
+        issues.append(f"{link_label}: item {m.get('item_code', '?')} not linked")
+    for m in check_result.get("qty_mismatches", [])[:3]:
+        keys = [k for k in m if k != "item_code"]
+        detail = ", ".join(f"{k}={m[k]}" for k in keys)
+        issues.append(f"{link_label}: qty mismatch {m.get('item_code', '?')} ({detail})")
+    for m in check_result.get("item_mismatches", [])[:3]:
+        src = m.get("dn_item_code") or m.get("si_item_code") or m.get("pr_item_code") or "?"
+        dst = m.get("pr_item_code") or m.get("pi_item_code") or m.get("si_item_code") or "?"
+        issues.append(f"{link_label}: item code mismatch {src} vs {dst}")
+    return issues
+
+
+def _repost_chain(chain: Dict[str, Any], allow_cross_fy_repost: bool = False) -> Dict[str, Any]:
+    """
+    Repost all documents in a fully-linked chain in dependency order.
+
+    Includes a fiscal year guard: vouchers from a prior FY are skipped unless
+    allow_cross_fy_repost is True, because account settings may have changed
+    since the original posting and rewriting GL with current settings would
+    break debit/credit pairing with the counter-document.
+
+    Args:
+        chain: Chain dict from _detect_chain_type with chain_type, docs, status
+        allow_cross_fy_repost: If True, repost even when the voucher belongs
+            to a prior fiscal year. Defaults to False.
+
+    Returns:
+        Dict with reposted doc names, skipped docs, and any errors
+    """
+    from erpnext.controllers.stock_controller import create_repost_item_valuation_entry
+
+    chain_type = chain["chain_type"]
+    docs = chain["docs"]
+    reposted = []
+    skipped = []
+    errors = []
+
+    current_fy = frappe.get_fiscal_year(getdate(frappe.utils.nowdate()))
+
+    def _repost_voucher(voucher_type: str, voucher_no: str):
+        """Create a Repost Item Valuation entry for a voucher."""
+        try:
+            doc = frappe.get_doc(voucher_type, voucher_no)
+            if doc.docstatus != 1:
+                return
+
+            if not allow_cross_fy_repost:
+                voucher_fy = frappe.get_fiscal_year(getdate(doc.posting_date))
+                if voucher_fy[0] != current_fy[0]:
+                    msg = (
+                        f"Skipping repost of {voucher_type} {voucher_no} "
+                        f"(FY {voucher_fy[0]}) — account settings may have changed "
+                        f"since original posting. Repost manually after verifying accounts."
+                    )
+                    skipped.append(f"{voucher_type}:{voucher_no}")
+                    logger.warning(msg)
+                    return
+
+            create_repost_item_valuation_entry({
+                "based_on": "Transaction",
+                "voucher_type": voucher_type,
+                "voucher_no": voucher_no,
+                "posting_date": doc.posting_date,
+                "posting_time": getattr(doc, "posting_time", "00:00:00") or "00:00:00",
+                "company": doc.company,
+                "allow_zero_rate": 1,
+            })
+            reposted.append(f"{voucher_type}:{voucher_no}")
+            logger.info("Bulk repost: created Repost Item Valuation for %s %s", voucher_type, voucher_no)
+        except Exception as e:
+            error_msg = f"Failed to repost {voucher_type} {voucher_no}: {str(e)}"
+            errors.append(error_msg)
+            logger.error(error_msg)
+
+    if chain_type == "DN->PR":
+        _repost_voucher("Delivery Note", docs["dn"])
+        if "pr" in docs:
+            _repost_voucher("Purchase Receipt", docs["pr"])
+
+    elif chain_type == "SI->PI":
+        _repost_voucher("Sales Invoice", docs["si"])
+        if "pi" in docs:
+            _repost_voucher("Purchase Invoice", docs["pi"])
+
+    elif chain_type == "SI->PR->PI":
+        _repost_voucher("Sales Invoice", docs["si"])
+        if "pr" in docs:
+            _repost_voucher("Purchase Receipt", docs["pr"])
+        if "pi" in docs:
+            _repost_voucher("Purchase Invoice", docs["pi"])
+
+    elif chain_type == "DN->SI->PI":
+        _repost_voucher("Delivery Note", docs["dn"])
+        if "si" in docs:
+            _repost_voucher("Sales Invoice", docs["si"])
+        if "pi" in docs:
+            _repost_voucher("Purchase Invoice", docs["pi"])
+
+    elif chain_type == "DN->SI->PR->PI":
+        _repost_voucher("Delivery Note", docs["dn"])
+        if "si" in docs:
+            _repost_voucher("Sales Invoice", docs["si"])
+        if "pr" in docs:
+            _repost_voucher("Purchase Receipt", docs["pr"])
+        if "pi" in docs:
+            _repost_voucher("Purchase Invoice", docs["pi"])
+
+    return {"reposted": reposted, "skipped": skipped, "errors": errors}
+
+
+@frappe.whitelist()
+def verify_and_repost_internal_transfers(
+    cutoff_date: str = None, repost: bool = True, fix_partial_dn_pr: bool = False,
+    allow_cross_fy_repost: bool = False,
+) -> Dict:
+    """
+    Verify all internal transfer chains after a cutoff date and optionally repost fully-linked ones.
+
+    Detects 5 chain types:
+      1. DN->PR (same GSTIN)
+      2. SI->PI (different GSTIN, direct)
+      3. SI->PR->PI (different GSTIN, via PR)
+      4. DN->SI->PI (different GSTIN, DN-originated)
+      5. DN->SI->PR->PI (different GSTIN, full chain)
+
+    Args:
+        cutoff_date: Posting date cutoff (ISO format). Falls back to BNS Branch Accounting Settings.
+        repost: If True, repost all fully-linked chains. Defaults to True.
+        fix_partial_dn_pr: If True, attempt to fix partially linked DN->PR chains.
+            Skips any pair where item code, rate, taxable amount, or warehouse mismatches.
+        allow_cross_fy_repost: If True, repost vouchers even when they belong to a
+            prior fiscal year. Defaults to False to prevent GL account mismatches
+            when BNS Branch Accounting Settings have changed between fiscal years.
+
+    Returns:
+        Dict with summary counts, chain details, repost results, and fix results.
+    """
+    if isinstance(repost, str):
+        repost = repost.lower() in ("true", "1", "yes")
+    if isinstance(fix_partial_dn_pr, str):
+        fix_partial_dn_pr = fix_partial_dn_pr.lower() in ("true", "1", "yes")
+    if isinstance(allow_cross_fy_repost, str):
+        allow_cross_fy_repost = allow_cross_fy_repost.lower() in ("true", "1", "yes")
+
+    if not cutoff_date:
+        cutoff_date = frappe.db.get_single_value(
+            "BNS Branch Accounting Settings", "internal_validation_cutoff_date"
+        )
+    if not cutoff_date:
+        frappe.throw(_("No cutoff date provided and none configured in BNS Branch Accounting Settings."))
+
+    cutoff_date = getdate(cutoff_date)
+
+    # Collect all source documents
+    dn_rows = frappe.db.sql(
+        """
+        SELECT dn.name, dn.company_gstin, dn.billing_address_gstin,
+               dn.bns_inter_company_reference, dn.posting_date, dn.company
+        FROM `tabDelivery Note` dn
+        JOIN `tabCustomer` c ON dn.customer = c.name
+        WHERE dn.docstatus = 1
+          AND c.is_bns_internal_customer = 1
+          AND dn.posting_date >= %s
+        ORDER BY dn.posting_date
+        """,
+        (cutoff_date,),
+        as_dict=True,
+    ) or []
+
+    si_rows = frappe.db.sql(
+        """
+        SELECT si.name, si.company_gstin, si.billing_address_gstin,
+               si.bns_inter_company_reference, si.posting_date, si.company
+        FROM `tabSales Invoice` si
+        JOIN `tabCustomer` c ON si.customer = c.name
+        WHERE si.docstatus = 1
+          AND c.is_bns_internal_customer = 1
+          AND (si.company_gstin IS NOT NULL AND si.billing_address_gstin IS NOT NULL
+               AND si.company_gstin != si.billing_address_gstin)
+          AND si.is_return = 0
+          AND si.posting_date >= %s
+        ORDER BY si.posting_date
+        """,
+        (cutoff_date,),
+        as_dict=True,
+    ) or []
+
+    # Also fetch bns_purchase_receipt_reference for SIs
+    si_meta = frappe.get_meta("Sales Invoice")
+    if si_meta.has_field("bns_purchase_receipt_reference"):
+        for si in si_rows:
+            si["bns_purchase_receipt_reference"] = frappe.db.get_value(
+                "Sales Invoice", si["name"], "bns_purchase_receipt_reference"
+            ) or ""
+
+    chains = []
+    seen_origins = set()
+
+    # Process DNs first (they may originate multi-doc chains)
+    for dn in dn_rows:
+        if dn["name"] in seen_origins:
+            continue
+        seen_origins.add(dn["name"])
+        chain = _detect_chain_type("Delivery Note", dn["name"], dn)
+        if chain:
+            # Mark downstream SIs as seen so they aren't double-counted
+            if chain["docs"].get("si"):
+                seen_origins.add(chain["docs"]["si"])
+            chains.append(chain)
+
+    # Process SIs not already handled via DN chains
+    for si in si_rows:
+        if si["name"] in seen_origins:
+            continue
+        seen_origins.add(si["name"])
+        chain = _detect_chain_type("Sales Invoice", si["name"], si)
+        if chain:
+            chains.append(chain)
+
+    # Categorize
+    fully_linked = [c for c in chains if c["status"] == "fully_linked"]
+    partially_linked = [c for c in chains if c["status"] == "partially_linked"]
+    unlinked = [c for c in chains if c["status"] == "unlinked"]
+
+    # Fix partial DN->PR chains if requested
+    fix_results = []
+    if fix_partial_dn_pr:
+        partial_dn_pr = [c for c in partially_linked if c["chain_type"] == "DN->PR"]
+        for chain in partial_dn_pr:
+            dn_name = chain["docs"].get("dn")
+            pr_name = chain["docs"].get("pr")
+            if not dn_name or not pr_name:
+                fix_results.append({
+                    "dn": dn_name, "pr": pr_name, "action": "skipped",
+                    "reason": "Missing DN or PR in chain",
+                })
+                continue
+
+            check = _check_dn_pr_fixable(dn_name, pr_name)
+            if not check["fixable"]:
+                fix_results.append({
+                    "dn": dn_name, "pr": pr_name, "action": "skipped",
+                    "reason": "; ".join(check["skip_reasons"]),
+                })
+                continue
+
+            result = _fix_dn_pr_link(dn_name, pr_name)
+            if result["success"]:
+                fix_results.append({
+                    "dn": dn_name, "pr": pr_name, "action": "fixed",
+                    "reason": result["message"],
+                })
+                chain["status"] = "fully_linked"
+                chain["issues"] = []
+            else:
+                fix_results.append({
+                    "dn": dn_name, "pr": pr_name, "action": "error",
+                    "reason": result["message"],
+                })
+
+        # Re-categorize after fixes
+        if fix_results:
+            fully_linked = [c for c in chains if c["status"] == "fully_linked"]
+            partially_linked = [c for c in chains if c["status"] == "partially_linked"]
+
+    # Repost fully linked chains
+    repost_results = []
+    if repost and fully_linked:
+        for chain in fully_linked:
+            result = _repost_chain(chain, allow_cross_fy_repost=allow_cross_fy_repost)
+            repost_results.append({
+                "chain_type": chain["chain_type"],
+                "docs": chain["docs"],
+                "reposted": result["reposted"],
+                "skipped": result.get("skipped", []),
+                "errors": result["errors"],
+            })
+
+    fix_fixed_count = sum(1 for f in fix_results if f["action"] == "fixed")
+    fix_skipped_count = sum(1 for f in fix_results if f["action"] == "skipped")
+    fix_error_count = sum(1 for f in fix_results if f["action"] == "error")
+
+    summary = {
+        "cutoff_date": str(cutoff_date),
+        "total_chains": len(chains),
+        "fully_linked": len(fully_linked),
+        "partially_linked": len(partially_linked),
+        "unlinked": len(unlinked),
+        "repost_enabled": repost,
+        "reposted_count": sum(len(r["reposted"]) for r in repost_results),
+        "repost_error_count": sum(len(r["errors"]) for r in repost_results),
+        "fix_partial_dn_pr": fix_partial_dn_pr,
+        "fix_fixed_count": fix_fixed_count,
+        "fix_skipped_count": fix_skipped_count,
+        "fix_error_count": fix_error_count,
+        "chains_by_type": {},
+    }
+
+    for chain in chains:
+        ct = chain["chain_type"]
+        if ct not in summary["chains_by_type"]:
+            summary["chains_by_type"][ct] = {"fully_linked": 0, "partially_linked": 0, "unlinked": 0}
+        summary["chains_by_type"][ct][chain["status"]] += 1
+
+    logger.info(
+        "verify_and_repost_internal_transfers: cutoff=%s total=%s fully_linked=%s partially=%s unlinked=%s reposted=%s fixed=%s skipped=%s",
+        cutoff_date, len(chains), len(fully_linked), len(partially_linked), len(unlinked),
+        summary["reposted_count"], fix_fixed_count, fix_skipped_count,
+    )
+
+    fix_msg = ""
+    if fix_partial_dn_pr:
+        fix_msg = _(" DN->PR fix: {0} fixed, {1} skipped, {2} errors.").format(
+            fix_fixed_count, fix_skipped_count, fix_error_count,
+        )
+
+    return {
+        "success": True,
+        "summary": summary,
+        "fully_linked": [{"chain_type": c["chain_type"], "docs": c["docs"]} for c in fully_linked],
+        "partially_linked": [
+            {"chain_type": c["chain_type"], "docs": c["docs"], "issues": c["issues"]}
+            for c in partially_linked
+        ],
+        "unlinked": [
+            {"chain_type": c["chain_type"], "docs": c["docs"], "issues": c["issues"]}
+            for c in unlinked
+        ],
+        "repost_results": repost_results,
+        "fix_results": fix_results,
+        "message": _(
+            "Verification complete: {0} chains found. {1} fully linked, {2} partially linked, {3} unlinked. {4} documents reposted."
+        ).format(
+            len(chains), len(fully_linked), len(partially_linked), len(unlinked),
+            summary["reposted_count"],
+        ) + fix_msg,
+    }
+
+
+@frappe.whitelist()
+def enqueue_verify_and_repost_internal_transfers(
+    cutoff_date: str = None, repost: bool = True, fix_partial_dn_pr: bool = False
+) -> Dict:
+    """
+    Enqueue bulk verification and repost as a background job.
+
+    Args:
+        cutoff_date: Posting date cutoff (ISO format).
+        repost: If True, repost fully-linked chains.
+        fix_partial_dn_pr: If True, attempt to fix partially linked DN->PR chains.
+
+    Returns:
+        Dict with job enqueue confirmation.
+    """
+    if isinstance(repost, str):
+        repost = repost.lower() in ("true", "1", "yes")
+    if isinstance(fix_partial_dn_pr, str):
+        fix_partial_dn_pr = fix_partial_dn_pr.lower() in ("true", "1", "yes")
+
+    frappe.enqueue(
+        "business_needed_solutions.bns_branch_accounting.utils.verify_and_repost_internal_transfers",
+        queue="long",
+        timeout=3600,
+        cutoff_date=cutoff_date,
+        repost=repost,
+        fix_partial_dn_pr=fix_partial_dn_pr,
+    )
+
+    return {
+        "success": True,
+        "message": _("Bulk verification and repost job has been enqueued. Check Background Jobs for progress."),
     }

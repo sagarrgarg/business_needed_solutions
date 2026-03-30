@@ -16,9 +16,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class GSTComplianceError(Exception):
-    """Custom exception for GST compliance errors."""
-    pass
+# Temporarily disabled unused custom exception (kept commented for rollback safety).
+# class GSTComplianceError(Exception):
+#     """Custom exception for GST compliance errors."""
+#     pass
 
 
 def validate_purchase_invoice_same_gstin(doc, method: Optional[str] = None) -> None:

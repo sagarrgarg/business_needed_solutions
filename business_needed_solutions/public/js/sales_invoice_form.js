@@ -1,4 +1,42 @@
 frappe.ui.form.on('Sales Invoice', {
+    validate: function(frm) {
+        if (frm.doc.is_return || !frm.doc.is_bns_internal_customer) {
+            return;
+        }
+        const company_gstin = (frm.doc.company_gstin || '').trim();
+        const billing_gstin = (frm.doc.billing_address_gstin || '').trim();
+        if (!company_gstin || !billing_gstin || company_gstin === billing_gstin) {
+            return;
+        }
+        const dn_names = Array.from(
+            new Set((frm.doc.items || []).map(d => (d.delivery_note || '').trim()).filter(Boolean))
+        );
+        if (!dn_names.length) {
+            return;
+        }
+
+        frappe.call({
+            method: 'business_needed_solutions.bns_branch_accounting.utils.check_existing_internal_si_for_dn',
+            args: {
+                delivery_notes: dn_names,
+                current_si: frm.doc.name || null
+            },
+            async: false,
+            callback: function(r) {
+                const result = r && r.message;
+                if (!result || !result.exists) return;
+                frappe.validated = false;
+                frappe.msgprint({
+                    title: __('Duplicate Internal Sales Invoice Not Allowed'),
+                    indicator: 'red',
+                    message: __(
+                        'Delivery Note {0} is already linked to Sales Invoice {1} ({2}). You cannot create another internal Sales Invoice for the same Delivery Note.'
+                    ).format(result.delivery_note, result.sales_invoice, result.docstatus_label || __('Draft'))
+                });
+            }
+        });
+    },
+
     refresh: function(frm) {
         // Show button to convert to BNS Internal if customer is BNS internal but SI is not marked
         // OR if SI is marked but status is not "BNS Internally Transferred"
@@ -138,33 +176,7 @@ frappe.ui.form.on('Sales Invoice', {
         
         // Link/Unlink with Purchase Invoice buttons
         if (frm.doc.docstatus == 1) {
-            if (frm.doc.bns_inter_company_reference) {
-                // Show Unlink button if already linked
-                frm.add_custom_button(__('Unlink Purchase Invoice'), function() {
-                    frappe.confirm(
-                        __('Are you sure you want to unlink this Sales Invoice from Purchase Invoice {0}?', frm.doc.bns_inter_company_reference),
-                        function() {
-                            frappe.call({
-                                method: 'business_needed_solutions.bns_branch_accounting.utils.unlink_si_pi',
-                                args: {
-                                    sales_invoice: frm.doc.name
-                                },
-                                freeze: true,
-                                freeze_message: __('Unlinking...'),
-                                callback: function(r) {
-                                    if (!r.exc) {
-                                        frappe.show_alert({
-                                            message: r.message.message || __('Unlinked successfully'),
-                                            indicator: 'green'
-                                        });
-                                        frm.reload_doc();
-                                    }
-                                }
-                            });
-                        }
-                    );
-                }, __('Actions'));
-            } else {
+            if (!frm.doc.bns_inter_company_reference) {
                 // Check if there's a PI with bill_no matching SI name
                 frappe.call({
                     method: 'business_needed_solutions.bns_branch_accounting.utils.get_purchase_invoice_by_supplier_invoice',
@@ -329,9 +341,8 @@ frappe.ui.form.on('Sales Invoice', {
                 }
             });
             
-            // Check if Purchase Receipt button should be shown
-            // Show if: any item maintains stock (is_stock_item) OR if SI is made from Delivery Note
-            if (frm.doc.items && frm.doc.items.length > 0) {
+            // Purchase Receipt button (only for non-return SIs)
+            if (!frm.doc.is_return && frm.doc.items && frm.doc.items.length > 0) {
                 // Check if SI is made from Delivery Note (items have delivery_note reference)
                 let has_dn_reference = frm.doc.items.some(item => item.delivery_note);
                 
@@ -380,6 +391,32 @@ frappe.ui.form.on('Sales Invoice', {
                     }
                 }
             }
+        }
+
+        if (
+            frm.doc.is_return &&
+            frm.doc.is_bns_internal_customer &&
+            frm.doc.docstatus == 1
+        ) {
+            frappe.db.get_value("Purchase Invoice", {
+                bns_inter_company_reference: frm.doc.name,
+                docstatus: ["!=", 2]
+            }, "name").then(function(r) {
+                var pi_exists = !!(r && r.message && r.message.name);
+                if (!pi_exists) {
+                    frm.add_custom_button(
+                        __("BNS Internal Debit Note"),
+                        function() {
+                            frappe.model.open_mapped_doc({
+                                method: "business_needed_solutions.bns_branch_accounting.utils.make_bns_internal_purchase_invoice",
+                                frm: frm,
+                            });
+                        },
+                        __("Create")
+                    );
+                    frm.page.set_inner_btn_group_as_primary(__("Create"));
+                }
+            });
         }
     }
 });

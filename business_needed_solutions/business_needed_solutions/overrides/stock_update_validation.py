@@ -14,6 +14,10 @@ import frappe
 from frappe import _
 from typing import Optional, List
 import logging
+from business_needed_solutions.bns_branch_accounting.utils import (
+    is_after_internal_validation_cutoff,
+    validate_internal_purchase_invoice_linkage,
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -115,6 +119,13 @@ def _validate_purchase_invoice_references(doc) -> None:
         logger.warning(f"Purchase Invoice {doc.name} has non-referenced stock items: {non_referenced_items}")
         _raise_purchase_invoice_reference_error()
 
+    _validate_batch_serial_reference_continuity(doc, "purchase_receipt", "pr_detail", "Purchase Receipt Item")
+
+    # Additional BNS interstate guard after cutoff:
+    # internal PI must be SI-linked or PR(SI-linked)-based; standalone PI is blocked.
+    if is_after_internal_validation_cutoff(doc.get("posting_date")):
+        validate_internal_purchase_invoice_linkage(doc)
+
 
 def _validate_sales_invoice_references(doc) -> None:
     """
@@ -131,6 +142,8 @@ def _validate_sales_invoice_references(doc) -> None:
     if non_referenced_items:
         logger.warning(f"Sales Invoice {doc.name} has non-referenced stock items: {non_referenced_items}")
         _raise_sales_invoice_reference_error()
+
+    _validate_batch_serial_reference_continuity(doc, "delivery_note", "dn_detail", "Delivery Note Item")
 
 
 def _get_non_referenced_stock_items(doc, reference_field: str, reference_item_field: str) -> List[str]:
@@ -174,6 +187,58 @@ def _is_stock_item(item_code: str) -> bool:
     except Exception as e:
         logger.error(f"Error checking stock item status for {item_code}: {str(e)}")
         return False
+
+
+def _validate_batch_serial_reference_continuity(
+    doc, reference_field: str, reference_item_field: str, source_child_doctype: str
+) -> None:
+    """
+    Verify batch/serial info on invoice items matches the referenced source document items.
+
+    For batch-tracked items: ensures batch_no on the invoice item matches the
+    source DN/PR item.  Skips items that use Serial and Batch Bundle (SBB)
+    since bundles are independently validated by ERPNext.
+
+    Args:
+        doc: The invoice document
+        reference_field: Field linking to the source document (e.g. "delivery_note")
+        reference_item_field: Field linking to the source item row (e.g. "dn_detail")
+        source_child_doctype: Child table doctype name (e.g. "Delivery Note Item")
+    """
+    for item in doc.items:
+        source_detail_name = item.get(reference_item_field)
+        if not source_detail_name:
+            continue
+
+        if not _is_stock_item(item.item_code):
+            continue
+
+        item_meta = frappe.get_cached_value(
+            "Item", item.item_code, ["has_batch_no", "has_serial_no"], as_dict=True
+        )
+        if not item_meta:
+            continue
+
+        if not (item_meta.has_batch_no or item_meta.has_serial_no):
+            continue
+
+        if item.get("serial_and_batch_bundle"):
+            continue
+
+        invoice_batch = (item.get("batch_no") or "").strip()
+        if not invoice_batch:
+            continue
+
+        source_batch = (
+            frappe.db.get_value(source_child_doctype, source_detail_name, "batch_no") or ""
+        ).strip()
+        if source_batch and invoice_batch != source_batch:
+            frappe.throw(
+                _(
+                    "Row {0}: Batch {1} on {2} does not match batch {3} on the source {4}."
+                ).format(item.idx, frappe.bold(invoice_batch), doc.doctype, frappe.bold(source_batch), source_child_doctype),
+                title=_("Batch Mismatch"),
+            )
 
 
 def _raise_purchase_invoice_reference_error() -> None:

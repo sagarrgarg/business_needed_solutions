@@ -7,6 +7,48 @@
 
 ---
 
+### Changes Log (v1.5)
+
+| Change | Files Modified | Bug Fixed |
+|--------|---------------|-----------|
+| **Debug logging path hardening** — `_bns_debug_log` now writes to site-local log path (`sites/<site>/logs/bns_branch_accounting_debug.ndjson`) and uses dynamic run identifiers instead of machine-specific hardcoded path and static `runId` | `bns_branch_accounting/utils.py` | Dev-only hardcoded debug file path and fixed run id causing brittle behavior across environments |
+| **Migration fail-fast on setup errors** — `after_migrate()` now re-raises after logging top-level migration exceptions | `bns_branch_accounting/migration.py` | Silent partial post-migration setup when a migration step fails |
+| **PI transfer-rate backfill for PR-linked rows** — SI->PI sync now falls back to linked `Purchase Receipt Item.pr_detail` and copies PR `bns_transfer_rate` when `sales_invoice_item` is not present, keeping PI transfer-rate consistent without making PI the stock-valuation authority in SI->PR->PI chains | `bns_branch_accounting/utils.py` | PR-linked PI items left with stale/zero `bns_transfer_rate` because SI item mapping was absent |
+| **DN repost now propagates SI->PR sync** — after DN->SI incoming-rate sync, repost handler now explicitly runs SI->PR transfer-rate sync for impacted SI docs so DN->SI->PR chains cannot stop at SI | `bns_branch_accounting/utils.py` | DN->SI->PR flow where SI incoming-rate changed but PR `bns_transfer_rate` / SLE / GL remained stale |
+| **DN repost now syncs SI item `incoming_rate`** — added DN->SI repost propagation to copy `Delivery Note Item.incoming_rate` into linked `Sales Invoice Item.incoming_rate` using `delivery_note + dn_detail` mapping on submitted SI rows | `bns_branch_accounting/utils.py` | In DN->SI->PR->PI chains, SI valuation mirror stayed stale after DN repost and broke downstream transfer-rate synchronization |
+| **SI->PR->PI account-set lock for PI GL** — PI rewrite scope now includes PR-linked SI internal PIs (even when `update_stock=0`), and PR-linked PI skips stock valuation leg so GL remains limited to internal purchase transfer, internal branch creditor, and taxes | `bns_branch_accounting/utils.py` | SI->PR->PI PI GL showing stock/expense accounts instead of transfer+creditor+tax-only accounting pattern |
+| **PR hard-lock sync path added (item → SLE → GL)** — whenever PR transfer-rate is synced (DN->PR and SI->PR), system now immediately syncs PR SLE incoming/stock-diff from `bns_transfer_rate` and force-rebuilds PR GL in the same path | `bns_branch_accounting/utils.py` | Transfer-rate reflected on PR items but SLE/GL remained stale until separate repost/manual action |
+| **SI->PR strict valuation lock applied** — PR SLE transfer-rate pickup, PR valuation mirror, PR repost trigger, and PR GL rewrite now include SI-linked PR scope; SI-linked PR GL is forced to valuation leg only (`Stock In Hand` debit, `Stock In Transit` credit) using transfer-rate-driven valuation | `bns_branch_accounting/utils.py` | SI-linked PRs picking transfer-rate but not consistently correcting SLE/GL valuation legs |
+| **PI GL rewrite aligned with ERPNext PI structure** — rewritten PI GL now includes full supplier credit (`base_grand_total`), transfer debit (`base_net_total`), tax-account debits/credits, and valuation stock-in-transit legs; tiny precision residue is absorbed on transfer leg | `bns_branch_accounting/utils.py` | PI repost GL imbalance and stale stock-in-hand valuation after transfer-rate updates |
+| **PI GSTIN scope fallback hardened** — PI internal different-GSTIN detection now falls back to linked SI GSTIN values when PI-level billing GSTIN field is unavailable | `bns_branch_accounting/utils.py` | Internal PI GL rewrite/rebuild skipped on sites where `Purchase Invoice.billing_address_gstin` is absent |
+| **Hard GL rebuild generalized for internal PI/SI** — force-rebuild utility now supports PI/SI (in addition to DN/PR), and PI SLE transfer-rate sync now always executes a PI GL force-rebuild to keep accounting ledger aligned | `bns_branch_accounting/utils.py` | PI stock ledger updated but GL stock valuation remained at stale stock-in-hand amount |
+| **Airtight PI transfer-rate pipeline (PI Item → SLE → GL)** — PI sync now immediately runs SLE correction and guarded GL repost in the same code path; lock tracking for non-repost contexts is anchored to real voucher docs | `bns_branch_accounting/utils.py` | Stock ledger corrected while accounting ledger (stock-in-hand / stock-in-transit) remained stale due skipped/invalid repost lock contexts |
+| **Repost lock DB compatibility hardened** — lock claim now falls back to SQL `ROW_COUNT()` when `frappe.db.affected_rows()` is unavailable in the active DB backend wrapper | `bns_branch_accounting/utils.py` | PI/PR transfer-rate repost trigger silently failing at lock-claim stage in some environments |
+| **Immediate PI SLE correction on transfer-rate sync** — SI repost sync now triggers PI repost inline per updated PI item set, and PI submit sync also triggers PI repost so PI SLE/valuation updates happen immediately after `bns_transfer_rate` changes | `bns_branch_accounting/utils.py` | Delay window where PI item transfer-rate changed but PI SLE still reflected old valuation until later repost |
+| **BNS internal status re-assertion after repost** — added repost-completion status reconciler to reapply `BNS Internally Transferred` for impacted SI/PI docs when BNS internal conditions are met | `bns_branch_accounting/utils.py`, `hooks.py` | SI/PI status flipping to `Unpaid`/`Overdue` after repost-driven outstanding recomputation |
+| **Repost hook moved to `on_change`** — `Repost Item Valuation` transfer-rate refresh now runs on `on_change` (instead of `on_update_after_submit`) so db_set-driven status transitions to `Completed` trigger SI/PI and DN/PR sync reliably | `hooks.py` | Repost-completion auto sync not firing when status was changed via `db_set` |
+
+### Changes Log (v1.4)
+
+| Change | Files Modified | Bug Fixed |
+|--------|---------------|-----------|
+| **Repost source-voucher resolver added** — unified voucher discovery helper now resolves impacted SI/DN across direct transaction metadata, `get_affected_transactions`, and item+warehouse fallback scan | `bns_branch_accounting/utils.py` | Missed source vouchers in item+warehouse repost contexts |
+| **SI repost sync hardened for both repost modes** — `refresh_si_transfer_rate_after_repost` now uses unified resolver; PI/PR transfer-rate sync path no longer depends on direct transaction-only discovery | `bns_branch_accounting/utils.py` | PI `bns_transfer_rate` not updating after some backdated reposts |
+| **DN repost sync aligned to same resolver** — `refresh_pr_transfer_rate_after_repost` now uses identical source-discovery pattern for consistency and resilience | `bns_branch_accounting/utils.py` | Potential parity gap between DN->PR and SI->PI/SI->PR repost detection |
+| **Source-aware repost diagnostics added** — logs now capture discovery source counts (`transaction`, `affected_transactions`, `item_warehouse_fallback`) and resolved totals | `bns_branch_accounting/utils.py` | Low observability while debugging repost sync misses |
+| **Behavior note formalized** — SI item valuation mirror (`incoming_rate`) is updated through DB writes during repost, so sync stays on repost completion hooks instead of SI update hooks | `bns_branch_accounting/utils.py`, `hooks.py` | Incorrect event-trigger assumptions for repost-driven valuation changes |
+
+### Changes Log (v1.3)
+
+| Change | Files Modified | Bug Fixed |
+|--------|---------------|-----------|
+| **SI Item incoming_rate property setter added** — cleared `depends_on` so internal transfer costing mirror is always available for SI stock flows | `fixtures/property_setter.json` | Hidden/conditional transfer-rate source on SI item |
+| **SI->PI/SI->PR transfer-rate mapping hard-applied** — `bns_transfer_rate` now copied from SI Item `incoming_rate` during mapping | `bns_branch_accounting/utils.py` | Internal stock valuation drift in SI-based receive flows |
+| **SLE patch extended to PI + SI-linked PR** — transfer-rate override now applies to PI stock SLE and PR rows linked from SI | `bns_branch_accounting/utils.py` | Stock inflation on SI->PI / SI->PR repost paths |
+| **PI GL rewrite added (different GSTIN)** — PI stock internal transfers now use transfer/stock-in-transit pattern aligned with DN/PR model | `bns_branch_accounting/utils.py` | PI GL not aligned to transfer-rate valuation model |
+| **SI repost propagation added** — SI repost now syncs and mirrors PI/PR transfer rates then triggers guarded repost | `bns_branch_accounting/utils.py`, `hooks.py` | Downstream PI/PR not auto-corrected after SI valuation repost |
+| **PI transfer-rate validation hook added** — blocks submit for SI-linked update-stock PI rows missing `bns_transfer_rate` | `hooks.py`, `bns_branch_accounting/utils.py` | Missing transfer-rate slipping into submitted internal PI |
+
 ### Changes Log (v1.2)
 
 | Change | Files Modified | Bug Fixed |
@@ -18,6 +60,12 @@
 | **link_si_pr added** — Link PR to SI when PR has different GSTIN (SI→PR flow) | `utils.py`, `purchase_receipt_form.js` | — |
 | **Link Sales Invoice button** — Shown on PR form when company_gstin ≠ supplier_gstin | `purchase_receipt_form.js` | — |
 | **SI↔PR record connections** — DocType Links + bns_purchase_receipt_reference on SI | `migration.py`, `custom_field.json`, `utils.py` | — |
+| **`bns_transfer_rate` fixtures added** — ensures PR/PI item transfer-rate fields are created on production sites via fixture import | `fixtures/custom_field.json` | Production setup missing field |
+| **Asymmetric cancellation policy enforced** — PR/PI cancel only unlinks references; SI/DN cancel cascades and cancels linked purchase docs | `hooks.py`, `utils.py` | Linked-doc cancellation direction mismatch |
+| **Cancel popup filtering override** — hides DN/SI from PR/PI "Cancel All Documents" dialog using whitelisted method override | `hooks.py`, `bns_branch_accounting/overrides/cancel_dialog.py` | PR/PI still prompting to cancel parent docs |
+| **Branch-accounting module boundary cleanup** — moved internal-transfer migration hook and internal party exclusivity enforcement into `bns_branch_accounting`; moved bulk-convert UI action from `BNS Settings` to `BNS Branch Accounting Settings` | `hooks.py`, `bns_branch_accounting/migration.py`, `bns_branch_accounting/overrides/internal_party.py`, `bns_branch_accounting/doctype/bns_branch_accounting_settings/bns_branch_accounting_settings.js`, `doctype/bns_settings/bns_settings.js` | Internal-transfer logic scattered outside branch-accounting module |
+| **FIFO auto payment reconciliation removed** — deleted backend reconcile service and removed BNS Settings UI/config fields for FIFO reconcile | `auto_payment_reconcile.py` (deleted), `doctype/bns_settings/bns_settings.js`, `doctype/bns_settings/bns_settings.json` | Removed high-risk broad reconciliation surface |
+| **Repost lock hardening + DB idempotency tracking** — lock is claimed before repost execution, lock is released in `finally`, and processed state is persisted in `BNS Repost Tracking` instead of cache-only markers | `bns_branch_accounting/utils.py`, `bns_branch_accounting/migration.py`, `bns_branch_accounting/doctype/bns_repost_tracking/*` | Duplicate repost risk on race/restart and stale lock behavior |
 
 ### Changes Log (v1.1)
 
@@ -47,7 +95,6 @@
 9. [Functional Area 8: Item Validation](#9-item-validation)
 10. [Functional Area 9: Stock Update/Reference Validation](#10-stock-updatereference-validation)
 11. [Functional Area 10: BOM Component Qty Variance](#11-bom-component-qty-variance)
-12. [Functional Area 11: Auto Payment Reconciliation (FIFO)](#12-auto-payment-reconciliation)
 13. [Functional Area 12: Direct Print System](#13-direct-print-system)
 14. [Functional Area 13: UOM Restriction & Conversion Overlay](#14-uom-restriction--conversion-overlay)
 15. [Functional Area 14: Custom Reports (11 Reports)](#15-custom-reports)
@@ -591,40 +638,7 @@ When purpose is "Manufacture" and enforcement is on, `bom_no` and `from_bom` are
 
 ## 12. Auto Payment Reconciliation
 
-### Purpose
-Automatically reconciles outstanding invoices with unallocated payments using FIFO (First-In-First-Out) matching — oldest invoices matched with oldest payments first.
-
-### How It Works
-```
-Trigger: Scheduled job OR manual @frappe.whitelist() call
-├── For each company:
-│   ├── For each party_type (Customer, Supplier):
-│   │   ├── Find parties with unreconciled balances
-│   │   ├── For each party:
-│   │   │   ├── Gather: unallocated payment entries + journal entries + DR/CR notes
-│   │   │   ├── Gather: outstanding invoices
-│   │   │   ├── Run FIFO allocation
-│   │   │   ├── Apply: reconcile_against_document() for payments
-│   │   │   └── Apply: reconcile_dr_cr_note() for returns
-```
-
-### Files Involved
-- `auto_payment_reconcile.py` (687 lines)
-- `BNS Settings` — toggle + configuration fields
-
-### Settings
-- `enable_auto_fifo_reconciliation` — master toggle
-- `include_future_payments_in_reconciliation` — include post-dated payments
-- `reconciliation_batch_size` — max allocations per party
-
-### Bugs in This Area
-
-| ID | Severity | Description |
-|----|----------|-------------|
-| BNS-REC-001 | **HIGH** | `reconcile_all_parties` is `@frappe.whitelist()` but has no permission check. Any authenticated user can trigger mass reconciliation across all parties. |
-| BNS-REC-002 | **HIGH** | `allocate_fifo` mutates input invoice dicts in-place (`inv["outstanding_amount"] = inv_outstanding - allocated`). The `get_reconciliation_preview` function does `list(invoices)` which creates a new list but shares the same dict objects — preview mutates the same data that actual reconciliation would use. |
-| BNS-REC-003 | **MEDIUM** | Hardcoded `limit=1000` on multiple queries — businesses with >1000 outstanding invoices or payments will have some silently skipped. |
-| BNS-REC-004 | **LOW** | No idempotency guard per-party — `is_job_enqueued` check is per-company, not per-party. Overlapping scheduled runs could double-reconcile. |
+Removed from the app. FIFO auto payment reconciliation backend, BNS Settings fields, and the manual run action were intentionally deleted.
 
 ---
 
@@ -763,9 +777,6 @@ Central configuration hub for all BNS features. Single DocType (singleton) that 
 | `enable_bns_variance_qty` | Check | BOM variance tolerance (±% instead of strict equality) |
 | `bns_default_variance_qty` | Percent | Default variance % when per-item variance not set |
 | `enable_custom_update_items_po_so` | Check | Custom Update Items on SO/PO |
-| `enable_auto_fifo_reconciliation` | Check | Auto payment reconciliation |
-| `include_future_payments_in_reconciliation` | Check | Include future payments in reconciliation |
-| `reconciliation_batch_size` | Int | Max allocations per party |
 
 ### Controller: `bns_settings.py`
 - `on_update()` — calls `apply_settings()` when `discount_type` changes
@@ -826,6 +837,7 @@ Runs `warehouse_negative_stock.apply_patches()` which monkey-patches 3 ERPNext f
 | Sales Invoice | `update_billed_amount_in_delivery_note` | default | 0 |
 | Sales Invoice | `update_billed_amount_in_sales_order` | hidden | 1 |
 | Sales Invoice | `update_billed_amount_in_sales_order` | default | 0 |
+| Sales Invoice Item | `incoming_rate` | depends_on | `""` |
 
 ### Dynamic Property Setters (via BNS Settings.apply_settings)
 
@@ -852,7 +864,7 @@ When `discount_type = "Triple"`:
 | ~~BNS-BOM-001~~ | ~~BOM Variance~~ | **FIXED** — `override_doctype_class` was commented out. Now active with BOM enforcement + `from_bom` mandatory + client-side red highlighting |
 | BNS-INT-001 | Internal Transfer | `utils.py` lines 213-217 unreachable dead code — `parent_doctype` null-guard never runs |
 
-### Severity: HIGH (10)
+### Severity: HIGH (9)
 
 | ID | Area | Description |
 |----|------|-------------|
@@ -863,12 +875,11 @@ When `discount_type = "Triple"`:
 | BNS-NEG-002 | Negative Stock | `actual_qty` double-counted in patched validate_negative_stock |
 | BNS-UPD-002 | Update Items | No database lock — concurrent calls cause race conditions |
 | BNS-SUB-001 | Submission | Three categories share same toggle/roles — category system is non-functional |
-| BNS-REC-001 | Reconciliation | `reconcile_all_parties` has no permission check |
 | BNS-RPT-001 | Reports | 9 redundant `NOT IN` subqueries in Negative Episodes report |
 | BNS-RPT-002 | Reports | Duplicate `remarks` column in Bank GL / Party GL |
 | BNS-RPT-003 | Reports | Bank GL 4x DB queries per GL entry for party detection |
 
-### Severity: MEDIUM (14)
+### Severity: MEDIUM (12)
 
 | ID | Area | Description |
 |----|------|-------------|
@@ -882,8 +893,6 @@ When `discount_type = "Triple"`:
 | BNS-STOCK-001 | Stock Validation | Error messages don't identify which items |
 | BNS-STOCK-002 | Stock Validation | N+1 query per item row |
 | BNS-NEG-003 | Negative Stock | Triple-redundant validation per transaction |
-| BNS-REC-002 | Reconciliation | FIFO allocator mutates input dicts |
-| BNS-REC-003 | Reconciliation | Hardcoded 1000 limit |
 | BNS-RPT-004 | Reports | Hardcoded fallback fiscal year 2023-24 |
 | BNS-RPT-005 | Reports | Account query inside loop |
 | BNS-RPT-006 | Reports | Zero-balance episodes skipped + infinity display |
@@ -891,7 +900,7 @@ When `discount_type = "Triple"`:
 | BNS-GST-003 | GST | E-Waybill failures silently swallowed |
 | BNS-SUB-002 | Submission | Module-level translations |
 
-### Severity: LOW (16)
+### Severity: LOW (15)
 
 | ID | Area | Description |
 |----|------|-------------|
@@ -907,7 +916,6 @@ When `discount_type = "Triple"`:
 | BNS-SUB-003 | Submission | Dead custom exception class |
 | BNS-SUB-004 | Submission | Unused legacy wrappers |
 | BNS-NEG-004 | Negative Stock | `get_or_make_bin` side effect |
-| BNS-REC-004 | Reconciliation | No per-party idempotency |
 | BNS-RPT-007 | Reports | Set literal for fields |
 | BNS-RPT-008 | Reports | XSS in unlinked report buttons |
 | BNS-RPT-009 | Reports | False episode detection |
@@ -936,7 +944,6 @@ When `discount_type = "Triple"`:
 | Stock | `overrides/warehouse_negative_stock.py` | 376 | Per-warehouse negative stock |
 | BOM | `overrides/stock_entry_component_qty_variance.py` | 336 | BOM enforcement + variance tolerance (active via `override_doctype_class`) |
 | Update Items | `overrides/update_items.py` | 635 | Custom SO/PO update items |
-| Reconciliation | `auto_payment_reconcile.py` | 687 | FIFO auto-reconciliation |
 | Migration | `migration.py` | 239 | Post-migration setup |
 | Patch | `patch/stock_entry_patch.py` | ~50 | Stock entry data migration |
 | Test | `test_submission_restriction.py` | 271 | Manual test script |

@@ -15,14 +15,14 @@ Matching Logic:
 
 2. SI to PI (Different GSTIN):
    - Shows Sales Invoices where Company GSTIN differs from Customer GSTIN
-   - Checks if Purchase Invoice exists via inter_company_invoice_reference
+   - Checks if Purchase Invoice exists via bns_inter_company_reference
    - Checks if quantities match between SI and PI items
 
 """
 
 import frappe
 from frappe import _
-from frappe.utils import today, flt
+from frappe.utils import today, flt, getdate
 
 # No tolerance: compare rounded values so matching SI-PI (e.g. after link_si_pi) are not falsely reported as mismatch.
 # Amounts: round to 2 decimals; qty: round to 6 decimals. This avoids float representation noise without allowing any business tolerance.
@@ -86,6 +86,8 @@ def execute(filters=None):
 	"""
 	if not filters:
 		filters = {}
+
+	filters = _apply_cutoff_filters(filters)
 	
 	columns = get_columns()
 	data = get_data(filters)
@@ -162,6 +164,36 @@ def get_columns():
 			"fieldtype": "Link",
 			"options": "Purchase Invoice",
 			"width": 150
+		},
+		{
+			"fieldname": "transfer_chain",
+			"label": _("Transfer Chain"),
+			"fieldtype": "Data",
+			"width": 140
+		},
+		{
+			"fieldname": "source_location",
+			"label": _("Source Location"),
+			"fieldtype": "Data",
+			"width": 160
+		},
+		{
+			"fieldname": "purchase_location",
+			"label": _("Purchase Location"),
+			"fieldtype": "Data",
+			"width": 160
+		},
+		{
+			"fieldname": "location_mismatch",
+			"label": _("Location Mismatch"),
+			"fieldtype": "Data",
+			"width": 200
+		},
+		{
+			"fieldname": "item_mismatch_details",
+			"label": _("Item Mismatch"),
+			"fieldtype": "Data",
+			"width": 250
 		}
 	]
 
@@ -185,12 +217,209 @@ def get_data(filters=None):
 	# Get Sales Invoices with internal customers that are missing Purchase Invoices or Purchase Receipts
 	si_data = get_sales_invoice_mismatches(filters)
 	data.extend(si_data)
+
+	# Include orphan/invalid internal PR/PI rows based on linkage rules.
+	internal_purchase_mismatch_data = get_internal_purchase_doc_linkage_mismatches(filters)
+	data.extend(internal_purchase_mismatch_data)
 	
 	# Sort by posting date descending (handle None values)
 	if data:
 		data.sort(key=lambda x: x.get("posting_date") or today(), reverse=True)
 	
 	return data or []
+
+
+def _get_internal_validation_cutoff_date():
+	"""Read global posting-date cutoff from BNS Branch Accounting Settings."""
+	cutoff = frappe.db.get_single_value(
+		"BNS Branch Accounting Settings",
+		"internal_validation_cutoff_date",
+	)
+	if not cutoff:
+		return None
+	try:
+		return getdate(cutoff)
+	except Exception:
+		return None
+
+
+def _apply_cutoff_filters(filters):
+	"""Apply cutoff as default from_date when user has not provided one."""
+	filters = frappe._dict(filters or {})
+	if filters.get("from_date"):
+		return filters
+	cutoff = _get_internal_validation_cutoff_date()
+	if cutoff:
+		filters["from_date"] = cutoff
+	return filters
+
+
+def _link_flags_from_refs(*refs):
+	"""Return link flags for DN/SI from given reference values."""
+	seen = set()
+	values = []
+	for ref in refs:
+		ref = (ref or "").strip()
+		if ref and ref not in seen:
+			seen.add(ref)
+			values.append(ref)
+
+	has_dn = any(frappe.db.exists("Delivery Note", ref) for ref in values)
+	has_si = any(frappe.db.exists("Sales Invoice", ref) for ref in values)
+	return has_dn, has_si
+
+
+def _resolve_scope(company_gstin, billing_gstin, has_dn, has_si):
+	company_gstin = (company_gstin or "").strip()
+	billing_gstin = (billing_gstin or "").strip()
+	if company_gstin and billing_gstin:
+		return "same" if company_gstin == billing_gstin else "different"
+	if has_dn and not has_si:
+		return "same"
+	if has_si and not has_dn:
+		return "different"
+	return None
+
+
+def get_internal_purchase_doc_linkage_mismatches(filters=None):
+	"""Find submitted internal PR/PI rows violating PR/PI linkage rules."""
+	filters = frappe._dict(filters or {})
+	data = []
+
+	common_conditions = ["docstatus = 1", "is_bns_internal_supplier = 1"]
+	common_values = []
+	if filters.get("company"):
+		common_conditions.append("company = %s")
+		common_values.append(filters.get("company"))
+	if filters.get("from_date"):
+		common_conditions.append("posting_date >= %s")
+		common_values.append(filters.get("from_date"))
+	if filters.get("to_date"):
+		common_conditions.append("posting_date <= %s")
+		common_values.append(filters.get("to_date"))
+
+	pr_rows = frappe.db.sql(
+		f"""
+		SELECT
+			name, posting_date, grand_total, company, company_gstin, supplier_gstin,
+			bns_inter_company_reference
+		FROM `tabPurchase Receipt`
+		WHERE {" AND ".join(common_conditions)}
+		""",
+		tuple(common_values),
+		as_dict=True,
+	) or []
+
+	for pr in pr_rows:
+		has_dn, has_si = _link_flags_from_refs(
+			pr.get("bns_inter_company_reference"),
+		)
+		scope = _resolve_scope(
+			pr.get("company_gstin"),
+			pr.get("supplier_gstin"),
+			has_dn,
+			has_si,
+		)
+
+		reason = None
+		if has_dn and has_si:
+			reason = "PR linked to both DN and SI; only one source link is allowed."
+		elif scope == "same" and (not has_dn or has_si):
+			reason = "Same GSTIN internal PR must be linked to DN only."
+		elif scope == "different" and (has_dn or not has_si):
+			reason = "Different GSTIN internal PR must be linked to SI only (DN link not allowed)."
+		elif scope is None and not has_dn and not has_si:
+			reason = "PR has no source link; expected DN (same GSTIN) or SI (different GSTIN)."
+
+		if reason:
+			data.append(
+				{
+					"posting_date": pr.get("posting_date") or None,
+					"document_type": "Purchase Receipt",
+					"document_name": pr.get("name"),
+					"grand_total": pr.get("grand_total") or 0.0,
+					"company_address_name": "",
+					"customer_address_name": "",
+					"missing_document": "Source Link (DN/SI)",
+					"mismatch_reason": reason,
+					"purchase_receipt": pr.get("name"),
+					"purchase_invoice": None,
+					"transfer_chain": "",
+					"source_location": "",
+					"purchase_location": "",
+					"location_mismatch": "",
+					"item_mismatch_details": "",
+				}
+			)
+
+	pi_rows = frappe.db.sql(
+		f"""
+		SELECT
+			name, posting_date, grand_total, company, company_gstin, supplier_gstin,
+			bns_inter_company_reference
+		FROM `tabPurchase Invoice`
+		WHERE {" AND ".join(common_conditions)}
+		""",
+		tuple(common_values),
+		as_dict=True,
+	) or []
+
+	for pi in pi_rows:
+		company_gstin = (pi.get("company_gstin") or "").strip()
+		billing_gstin = (pi.get("supplier_gstin") or "").strip()
+		if not (company_gstin and billing_gstin and company_gstin != billing_gstin):
+			continue
+
+		_, has_si_direct = _link_flags_from_refs(pi.get("bns_inter_company_reference"))
+
+		pr_names = frappe.get_all(
+			"Purchase Invoice Item",
+			filters={"parent": pi.get("name")},
+			pluck="purchase_receipt",
+		) or []
+		pr_names = sorted({(name or "").strip() for name in pr_names if name})
+
+		has_valid_pr_link = False
+		for pr_name in pr_names:
+			pr_link = frappe.db.get_value(
+				"Purchase Receipt",
+				pr_name,
+				["bns_inter_company_reference"],
+				as_dict=True,
+			)
+			if not pr_link:
+				continue
+			pr_has_dn, pr_has_si = _link_flags_from_refs(
+				pr_link.get("bns_inter_company_reference"),
+			)
+			if pr_has_si and not pr_has_dn:
+				has_valid_pr_link = True
+				break
+
+		if has_si_direct or has_valid_pr_link:
+			continue
+
+		data.append(
+			{
+				"posting_date": pi.get("posting_date") or None,
+				"document_type": "Purchase Invoice",
+				"document_name": pi.get("name"),
+				"grand_total": pi.get("grand_total") or 0.0,
+				"company_address_name": "",
+				"customer_address_name": "",
+				"missing_document": "Sales Invoice / SI-linked PR",
+				"mismatch_reason": "Different GSTIN internal PI is standalone/unlinked; must link to SI directly or via SI-linked PR.",
+				"purchase_receipt": None,
+				"purchase_invoice": pi.get("name"),
+				"transfer_chain": "",
+				"source_location": "",
+				"purchase_location": "",
+				"location_mismatch": "",
+				"item_mismatch_details": "",
+			}
+		)
+
+	return data
 
 
 def get_delivery_note_mismatches(filters=None):
@@ -267,7 +496,9 @@ def get_delivery_note_mismatches(filters=None):
 			qty,
 			stock_qty,
 			net_amount,
-			base_net_amount
+			base_net_amount,
+			target_warehouse,
+			warehouse
 		FROM `tabDelivery Note Item`
 		WHERE parent = %s
 		"""
@@ -292,6 +523,7 @@ def get_delivery_note_mismatches(filters=None):
 		missing_items = []
 		qty_mismatches = []
 		taxable_value_mismatches = []
+		item_code_mismatches = []
 		matched_prs = set()
 		pr_grand_total = 0
 		pr_total_taxes = 0
@@ -308,10 +540,12 @@ def get_delivery_note_mismatches(filters=None):
 			pr_item_query = """
 			SELECT 
 				pri.parent as pr_name,
+				pri.item_code as pr_item_code,
 				pri.qty as pr_qty,
 				pri.stock_qty as pr_stock_qty,
 				pri.net_amount as pr_net_amount,
 				pri.base_net_amount as pr_base_net_amount,
+				pri.warehouse as pr_warehouse,
 				pr.docstatus,
 				pr.grand_total,
 				pr.total_taxes_and_charges,
@@ -391,6 +625,15 @@ def get_delivery_note_mismatches(filters=None):
 						"dn_taxable_value": dn_taxable_value,
 						"pr_taxable_value": pr_taxable_value
 					})
+
+				for pr_item in pr_items:
+					pr_ic = (pr_item.get("pr_item_code") or "").strip()
+					dn_ic = (dn_item.get("item_code") or "").strip()
+					if pr_ic and dn_ic and pr_ic != dn_ic:
+						item_code_mismatches.append({
+							"dn_item_code": dn_ic,
+							"pr_item_code": pr_ic,
+						})
 		
 		# Check grand total and tax mismatches
 		grand_total_mismatch = None
@@ -520,6 +763,24 @@ def get_delivery_note_mismatches(filters=None):
 				# No mismatch found, skip this DN
 				continue
 		
+		item_mismatch_str = ""
+		if item_code_mismatches:
+			im_parts = []
+			for im in item_code_mismatches[:3]:
+				im_parts.append(f"DN={im['dn_item_code']}, PR={im['pr_item_code']}")
+			if len(item_code_mismatches) > 3:
+				im_parts.append(f"... +{len(item_code_mismatches) - 3} more")
+			item_mismatch_str = " | ".join(im_parts)
+
+		dn_billing_location = (dn_doc.get("billing_location") or "").strip()
+		pr_location = ""
+		location_mismatch_str = ""
+		if matched_prs:
+			first_pr = list(matched_prs)[0]
+			pr_location = (frappe.db.get_value("Purchase Receipt", first_pr, "location") or "").strip()
+			if dn_billing_location and pr_location and dn_billing_location != pr_location:
+				location_mismatch_str = f"DN={dn_billing_location}, PR={pr_location}"
+
 		mismatches.append({
 			"posting_date": dn.get("posting_date") or None,
 			"document_type": "Delivery Note",
@@ -530,7 +791,12 @@ def get_delivery_note_mismatches(filters=None):
 			"missing_document": missing_doc,
 			"mismatch_reason": mismatch_reason,
 			"purchase_receipt": purchase_receipt,
-			"purchase_invoice": None
+			"purchase_invoice": None,
+			"transfer_chain": "DN->PR",
+			"source_location": dn_billing_location,
+			"purchase_location": pr_location,
+			"location_mismatch": location_mismatch_str,
+			"item_mismatch_details": item_mismatch_str,
 		})
 	
 	return mismatches or []
@@ -611,7 +877,9 @@ def get_sales_invoice_mismatches(filters=None):
 			qty,
 			stock_qty,
 			net_amount,
-			base_net_amount
+			base_net_amount,
+			warehouse,
+			delivery_note
 		FROM `tabSales Invoice Item`
 		WHERE parent = %s
 		"""
@@ -629,11 +897,37 @@ def get_sales_invoice_mismatches(filters=None):
 		# Get Sales Invoice document for totals and taxes
 		si_doc = frappe.get_doc("Sales Invoice", si_name)
 		
+		# Determine chain type: SI->PI or SI->PR->PI
+		has_dn_ref = any((item.get("delivery_note") or "").strip() for item in si_items)
+		si_pr_ref = ""
+		if si_doc.meta.has_field("bns_purchase_receipt_reference"):
+			si_pr_ref = (si_doc.get("bns_purchase_receipt_reference") or "").strip()
+		si_pi_ref = (si_doc.get("bns_inter_company_reference") or "").strip()
+
+		if si_pr_ref and frappe.db.exists("Purchase Receipt", si_pr_ref):
+			chain_type = "DN->SI->PR->PI" if has_dn_ref else "SI->PR->PI"
+		elif si_pi_ref and frappe.db.exists("Purchase Invoice", si_pi_ref):
+			chain_type = "DN->SI->PI" if has_dn_ref else "SI->PI"
+		else:
+			chain_type = "DN->SI->PI" if has_dn_ref else "SI->PI"
+
 		# Check for Purchase Invoice mismatch
 		pi_mismatch = check_si_pi_mismatch(si_name, si_items, si_doc)
 		
-		# Only check PI mismatch, not PR
+		# Also check SI->PR->PI chain for PR mismatch
+		pr_mismatch_info = _check_si_pr_chain_mismatch(si_name, si_items, si_pr_ref)
+
+		si_billing_location = (si_doc.get("billing_location") or "").strip()
+
 		if pi_mismatch:
+			pi_name_for_loc = pi_mismatch.get("purchase_invoice")
+			pi_location = ""
+			location_mismatch_str = ""
+			if pi_name_for_loc:
+				pi_location = (frappe.db.get_value("Purchase Invoice", pi_name_for_loc, "location") or "").strip()
+				if si_billing_location and pi_location and si_billing_location != pi_location:
+					location_mismatch_str = f"SI={si_billing_location}, PI={pi_location}"
+
 			mismatches.append({
 				"posting_date": si.get("posting_date") or None,
 				"document_type": "Sales Invoice",
@@ -643,11 +937,109 @@ def get_sales_invoice_mismatches(filters=None):
 				"customer_address_name": si.get("customer_address_name") or "",
 				"missing_document": pi_mismatch.get("missing_doc", "Purchase Invoice"),
 				"mismatch_reason": pi_mismatch.get("reason", "No PI for SI"),
-				"purchase_receipt": None,
-				"purchase_invoice": pi_mismatch.get("purchase_invoice")
+				"purchase_receipt": pi_mismatch.get("purchase_receipt") or (si_pr_ref if si_pr_ref else None),
+				"purchase_invoice": pi_mismatch.get("purchase_invoice"),
+				"transfer_chain": chain_type,
+				"source_location": si_billing_location,
+				"purchase_location": pi_location,
+				"location_mismatch": location_mismatch_str,
+				"item_mismatch_details": pi_mismatch.get("item_mismatch_details", ""),
+			})
+		elif pr_mismatch_info:
+			pr_location = ""
+			location_mismatch_str = ""
+			if si_pr_ref:
+				pr_location = (frappe.db.get_value("Purchase Receipt", si_pr_ref, "location") or "").strip()
+				if si_billing_location and pr_location and si_billing_location != pr_location:
+					location_mismatch_str = f"SI={si_billing_location}, PR={pr_location}"
+
+			mismatches.append({
+				"posting_date": si.get("posting_date") or None,
+				"document_type": "Sales Invoice",
+				"document_name": si_name,
+				"grand_total": si.get("grand_total") or 0.0,
+				"company_address_name": si.get("company_address_name") or "",
+				"customer_address_name": si.get("customer_address_name") or "",
+				"missing_document": pr_mismatch_info.get("missing_doc", "Purchase Receipt"),
+				"mismatch_reason": pr_mismatch_info.get("reason", ""),
+				"purchase_receipt": si_pr_ref or None,
+				"purchase_invoice": None,
+				"transfer_chain": chain_type,
+				"source_location": si_billing_location,
+				"purchase_location": pr_location,
+				"location_mismatch": location_mismatch_str,
+				"item_mismatch_details": pr_mismatch_info.get("item_mismatch_details", ""),
 			})
 	
 	return mismatches or []
+
+
+def _check_si_pr_chain_mismatch(si_name, si_items, si_pr_ref):
+	"""
+	Check SI->PR chain for item mismatches.
+
+	Args:
+		si_name: Sales Invoice name
+		si_items: SI item rows
+		si_pr_ref: bns_purchase_receipt_reference value
+
+	Returns:
+		dict with mismatch info or None
+	"""
+	if not si_pr_ref or not frappe.db.exists("Purchase Receipt", si_pr_ref):
+		return None
+
+	pr_items = frappe.db.sql(
+		"""
+		SELECT item_code, qty, stock_qty
+		FROM `tabPurchase Receipt Item`
+		WHERE parent = %s
+		""",
+		(si_pr_ref,),
+		as_dict=True,
+	) or []
+
+	if not pr_items:
+		return None
+
+	si_agg = {}
+	for sii in si_items:
+		ic = (sii.get("item_code") or "").strip()
+		if ic:
+			si_agg.setdefault(ic, 0)
+			si_agg[ic] += flt(sii.get("stock_qty") or sii.get("qty") or 0)
+
+	pr_agg = {}
+	for pri in pr_items:
+		ic = (pri.get("item_code") or "").strip()
+		if ic:
+			pr_agg.setdefault(ic, 0)
+			pr_agg[ic] += flt(pri.get("stock_qty") or pri.get("qty") or 0)
+
+	item_mismatches = []
+	qty_mismatches = []
+
+	for ic, si_qty in si_agg.items():
+		pr_qty = pr_agg.get(ic, 0)
+		if not _qtys_equal(si_qty, pr_qty):
+			if pr_qty == 0:
+				item_mismatches.append(f"SI has {ic}, PR missing")
+			else:
+				qty_mismatches.append(f"{ic}: SI={si_qty}, PR={pr_qty}")
+
+	for ic in pr_agg:
+		if ic not in si_agg:
+			item_mismatches.append(f"PR has extra {ic}")
+
+	if not qty_mismatches and not item_mismatches:
+		return None
+
+	parts = qty_mismatches + item_mismatches
+	return {
+		"missing_doc": "Purchase Receipt (Mismatch)",
+		"reason": " | ".join(parts[:5]) if parts else "",
+		"item_mismatch_details": " | ".join(item_mismatches[:3]) if item_mismatches else "",
+	}
 
 
 def check_si_pi_mismatch(si_name, si_items, si_doc):
@@ -660,10 +1052,6 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 	"""
 	# Check if PI exists via bns_inter_company_reference (BNS internal transfers use this field)
 	pi_name = frappe.db.get_value("Purchase Invoice", {"bns_inter_company_reference": si_name, "docstatus": 1}, "name")
-	
-	# Also check inter_company_invoice_reference for backward compatibility
-	if not pi_name:
-		pi_name = frappe.db.get_value("Purchase Invoice", {"inter_company_invoice_reference": si_name, "docstatus": 1}, "name")
 	
 	if not pi_name:
 		return {
@@ -684,7 +1072,8 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 	qty_mismatches = []
 	taxable_value_mismatches = []
 	extra_items = []
-	
+	item_code_mismatches_pi = []
+
 	# Track which PI items are matched
 	matched_pi_items = set()
 	
@@ -699,10 +1088,12 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 		pi_item_query = """
 		SELECT 
 			pii.name,
+			pii.item_code as pi_item_code,
 			pii.qty as pi_qty,
 			pii.stock_qty as pi_stock_qty,
 			pii.net_amount as pi_net_amount,
-			pii.base_net_amount as pi_base_net_amount
+			pii.base_net_amount as pi_base_net_amount,
+			pii.warehouse as pi_warehouse
 		FROM `tabPurchase Invoice Item` pii
 		WHERE pii.parent = %s
 		AND pii.sales_invoice_item = %s
@@ -759,6 +1150,15 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 					"si_taxable_value": si_taxable_value,
 					"pi_taxable_value": pi_taxable_value
 				})
+
+			for pi_item in pi_items:
+				pi_ic = (pi_item.get("pi_item_code") or "").strip()
+				si_ic = (si_item.get("item_code") or "").strip()
+				if pi_ic and si_ic and pi_ic != si_ic:
+					item_code_mismatches_pi.append({
+						"si_item_code": si_ic,
+						"pi_item_code": pi_ic,
+					})
 	
 	# Check for extra items in PI (not linked to any SI item)
 	all_pi_items_query = """
@@ -887,12 +1287,37 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 		if tax_mismatch:
 			all_mismatches.append(f"Total Taxes and Charges: SI ₹{tax_mismatch['si_tax']:.2f} vs PI ₹{tax_mismatch['pi_tax']:.2f} (Diff: ₹{abs(tax_mismatch['diff']):.2f})")
 		
+		item_mismatch_str = ""
+		if item_code_mismatches_pi:
+			im_parts = []
+			for im in item_code_mismatches_pi[:3]:
+				im_parts.append(f"SI={im['si_item_code']}, PI={im['pi_item_code']}")
+			if len(item_code_mismatches_pi) > 3:
+				im_parts.append(f"... +{len(item_code_mismatches_pi) - 3} more")
+			item_mismatch_str = " | ".join(im_parts)
+
 		return {
 			"missing_doc": "Purchase Invoice (Mismatch)",
 			"reason": " | ".join(all_mismatches[:8]) + (f" | ... and {len(all_mismatches) - 8} more" if len(all_mismatches) > 8 else ""),
-			"purchase_invoice": pi_name
+			"purchase_invoice": pi_name,
+			"item_mismatch_details": item_mismatch_str,
 		}
-	
+
+	# No quantity/value mismatches, but check for item code mismatches only
+	if item_code_mismatches_pi:
+		item_mismatch_str = ""
+		im_parts = []
+		for im in item_code_mismatches_pi[:3]:
+			im_parts.append(f"SI={im['si_item_code']}, PI={im['pi_item_code']}")
+		item_mismatch_str = " | ".join(im_parts)
+
+		return {
+			"missing_doc": "Purchase Invoice (Item Mismatch)",
+			"reason": f"Item: {item_mismatch_str}",
+			"purchase_invoice": pi_name,
+			"item_mismatch_details": item_mismatch_str,
+		}
+
 	return None
 
 
