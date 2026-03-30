@@ -83,15 +83,31 @@ The app is designed to be **configurable via settings** – most features can be
 
 **Constraint:** Validation runs on validate; GSTIN is resolved from doc or from Company/Supplier addresses. Do not skip when India Compliance is present.
 
+### 2.3b Serial and Batch Bundle Support (ERPNext v15+)
+
+**Intent:** All stock-related code in BNS must support ERPNext v15+ Serial and Batch Bundle (SBB) alongside legacy `serial_no`/`batch_no` fields. This ensures batch and serial traceability across all internal transfer mappings, negative stock validations, and reports.
+
+**Pattern:** Use `_duplicate_serial_and_batch_bundle()` for all document-to-document item mappings (DN→PR, SI→PI, SI→PR). Never copy `serial_and_batch_bundle` directly between documents — each document needs its own SBB created via `SerialBatchCreation.duplicate_package()`.
+
+**Constraint:** Do not reintroduce legacy `serial_no`/`batch_no` into `field_map` for mappings. These fields are in `field_no_map` to prevent raw copying. The helper handles all four scenarios (SBB, legacy fields, cross-FY item without tracking, non-batch/serial item) in a single codepath.
+
+**Constraint:** Reports that query SLE must handle both `batch_no` on SLE and `serial_and_batch_bundle` references. When `batch_no` is empty, fall back to querying the SBB's child entries (`Serial and Batch Entry`).
+
+**Fiscal Year Transition:** When enabling batch/serial tracking on items from a new fiscal year:
+- Complete all pending cross-FY internal transfers before enabling `has_batch_no`/`has_serial_no`.
+- Set `internal_validation_cutoff_date` to the new FY start date to isolate old-FY documents.
+- The SBB duplication helper logs a warning (not an error) for cross-FY items missing batch/serial on the source.
+- Parity validation uses warnings for one-side-missing scenarios, not hard errors — this accommodates the transition period without breaking existing workflows.
+
 ### 2.4 Stock Update vs. Reference
 
-**Intent:** When SI/PI do not update stock, every stock item must trace back to DN/PR. Ensures audit trail.
+**Intent:** When SI/PI do not update stock, every stock item must trace back to DN/PR. Ensures audit trail. Includes batch continuity: the batch_no on the invoice item must match the referenced source item's batch_no.
 
 **Constraint:** Do not relax this for "special cases" without explicit business approval.
 
 ### 2.5 Per-Warehouse Negative Stock
 
-**Intent:** Some warehouses (e.g. retail) must never go negative; others (e.g. manufacturing) may. ERPNext's global setting is insufficient.
+**Intent:** Some warehouses (e.g. retail) must never go negative; others (e.g. manufacturing) may. ERPNext's global setting is insufficient. Supports batch-level negative stock detection — when items use SBB instead of legacy `batch_no`, batch numbers are extracted from the bundle and each is validated individually.
 
 **Constraint:** Works only when ERPNext allows negative stock globally. Warehouse-level setting is additive.
 
@@ -132,6 +148,13 @@ The app is designed to be **configurable via settings** – most features can be
 4. **Bypassing hooks** – All validations must run via doc_events. Do not call validation only from client JS.
 5. **Duplicate accounting logic** – Use BNS Branch Accounting Settings for accounts. Do not hardcode account names.
 6. **Handbook drift** – After any logic change, update both `technical_handbook.md` and `psychological_handbook.md` so the docs match the code.
+7. **Direct SBB field copy in mappings** – Never copy `serial_and_batch_bundle` via `field_map`. Each target document needs its own SBB created via `duplicate_package()`. Use `field_no_map` to block raw copying.
+8. **Ignoring SBB in batch-aware code** – When checking `batch_no`, always add a fallback path for `serial_and_batch_bundle`. ERPNext v15+ may populate only the SBB field.
+9. **Cross-FY repost without account verification** – Never repost old-FY documents after BNS Branch Accounting Settings have changed. The GL rewrite reads accounts at execution time; reposting with new accounts breaks the debit/credit pairing with the counter-document that was written with the old accounts. Use `allow_cross_fy_repost=True` only after verifying account consistency.
+10. **Premature reference writes** – Never write `bns_inter_company_reference` on a source document before the target document is saved/submitted. Use `on_submit` hooks for reference writes to avoid dangling refs.
+11. **Link/convert without locks** – Always use `frappe.lock_doc()` before read-check-write sequences in link/convert operations to prevent duplicate creation from concurrent requests.
+12. **Empty GSTIN as same-GSTIN** – Treat missing/empty GSTINs as "unknown", not "same". Do not trigger same-GSTIN GL rewrite when either GSTIN is absent.
+13. **Unlinking without status reset** – Clearing `bns_inter_company_reference` alone leaves documents visually in "transferred" state. Always reset `is_bns_internal_*`, `status`, and `per_billed` when unlinking.
 
 ---
 

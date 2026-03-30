@@ -159,6 +159,9 @@ business_needed_solutions.updateItems = (() => {
       tax_category: frm.doc.tax_category,
       child_doctype: frm.doc.doctype + " Item",
       is_old_subcontracting_flow: frm.doc.is_old_subcontracting_flow,
+      batch_no: rowDoc.batch_no || "",
+      serial_no: rowDoc.serial_no || "",
+      serial_and_batch_bundle: rowDoc.serial_and_batch_bundle || "",
     };
     return Object.assign({}, args, overrides);
   };

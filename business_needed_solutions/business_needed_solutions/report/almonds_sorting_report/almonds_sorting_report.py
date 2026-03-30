@@ -40,16 +40,50 @@ def get_columns():
     ]
     return columns
     
+def _get_item_batch_no(item, fallback="NA"):
+	"""
+	Resolve batch_no from a Stock Entry Detail row.
+
+	Checks the legacy batch_no field first; if empty, extracts the first
+	batch from the linked Serial and Batch Bundle (ERPNext v15+).
+	"""
+	if item.batch_no:
+		return item.batch_no
+
+	bundle = item.get("serial_and_batch_bundle")
+	if bundle:
+		batch = frappe.db.get_value(
+			"Serial and Batch Entry",
+			{"parent": bundle, "batch_no": ("is", "set")},
+			"batch_no",
+		)
+		if batch:
+			return batch
+
+	return fallback
+
+
 def get_filtered_stock_entries(filters):
 	if not filters.get("batch_no") or not filters.get("item_code"):
 		frappe.throw("Batch No and Item Code are required filters")
-		
+
 	precision = cint(frappe.db.get_single_value("System Settings", "float_precision"))
-	stock_entries = frappe.db.get_list("Stock Ledger Entry", 
+
+	stock_entries = frappe.db.get_list("Stock Ledger Entry",
 		filters={"docstatus": 1, "batch_no": filters.batch_no},
-		fields={"voucher_no"}, 
+		fields={"voucher_no"},
 		pluck="voucher_no")
-	
+
+	if not stock_entries:
+		bundles = frappe.get_all("Serial and Batch Entry",
+			filters={"batch_no": filters.batch_no},
+			pluck="parent")
+		if bundles:
+			stock_entries = frappe.db.get_list("Stock Ledger Entry",
+				filters={"docstatus": 1, "serial_and_batch_bundle": ("in", bundles)},
+				fields={"voucher_no"},
+				pluck="voucher_no")
+
 	if not stock_entries:
 		return []
 		
@@ -63,7 +97,7 @@ def get_filtered_stock_entries(filters):
 		if stock_entry_doc.purpose == "Repack" and stock_entry_doc.stock_entry_type == "Almonds Sorting" and stock_entry_doc.docstatus == 1:
 			# Process source items (items going out)
 			for item in stock_entry_doc.items:
-				if item.s_warehouse:  # Source warehouse means item is going out
+				if item.s_warehouse:
 					item_key = item.item_code
 					if item_key not in source_items:
 						source_items[item_key] = {
@@ -71,12 +105,11 @@ def get_filtered_stock_entries(filters):
 							"item_name": item.item_name,
 							"transfer_qty": 0,
 							"stock_uom": item.stock_uom,
-							"batch_id": item.batch_no or "NA"
+							"batch_id": _get_item_batch_no(item),
 						}
 					source_items[item_key]["transfer_qty"] += flt(item.transfer_qty, precision)
-					
-				# Process target items (items coming in)
-				elif item.t_warehouse:  # Target warehouse means item is coming in
+
+				elif item.t_warehouse:
 					item_key = item.item_code
 					if item_key not in target_items:
 						target_items[item_key] = {
@@ -84,7 +117,7 @@ def get_filtered_stock_entries(filters):
 							"item_name": item.item_name,
 							"transfer_qty": 0,
 							"stock_uom": item.stock_uom,
-							"batch_id": item.batch_no or "NA"
+							"batch_id": _get_item_batch_no(item),
 						}
 					target_items[item_key]["transfer_qty"] += flt(item.transfer_qty, precision)
 	

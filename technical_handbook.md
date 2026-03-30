@@ -43,7 +43,8 @@ BNS extends ERPNext with:
 
 ### 3.2 BNS Branch Accounting (`bns_branch_accounting/utils.py`)
 
-- **What:** Internal transfer flow – DN→PR, SI→PI, SI→PR; status updates; convert/link/unlink. Bulk linkage verification and repost. Credit note → debit note conversion (SI return → PI return).
+- **What:** Internal transfer flow – DN→PR, SI→PI, SI→PR; status updates; convert/link/unlink. Bulk linkage verification and repost. Credit note → debit note conversion (SI return → PI return). Full ERPNext v15+ Serial and Batch Bundle (SBB) support for all internal transfer mappings.
+- **Serial and Batch Bundle Support:** All three mapping flows (DN→PR, SI→PI, SI→PR) use `_duplicate_serial_and_batch_bundle()`, a shared helper that clones the source SBB using `SerialBatchCreation.duplicate_package()`. Legacy `serial_no`/`batch_no` fields are removed from `field_map` and added to `field_no_map` to prevent raw copying; the helper handles three scenarios: (1) SBB present → duplicate, (2) legacy fields present → copy with `use_serial_batch_fields=1`, (3) neither → no-op. Batch parity is enforced in `_enforce_one_to_one_item_and_amount_parity()` via `_validate_batch_serial_parity()`.
 - **Why:** Support inter-branch transfers with `is_bns_internal_customer` / `is_bns_internal_supplier`.
 - **Impacted:** DN, PR, SI, PI (client JS + doc_events).
 - **Credit Note → Debit Note:** SI credit notes (is_return=1) can be converted to PI debit notes via `make_bns_internal_purchase_invoice`. The function detects `is_return` on the source SI, sets `is_return=1` on the target PI, and resolves `return_against` by looking up the original PI linked to `si.return_against`. Item mapping uses `qty != 0` to handle negative quantities.
@@ -113,15 +114,15 @@ BNS extends ERPNext with:
 
 ### 3.4 Stock Update Validation (`overrides/stock_update_validation.py`)
 
-- **What:** When `update_stock` is off on SI/PI, all stock items must reference DN/PR.
+- **What:** When `update_stock` is off on SI/PI, all stock items must reference DN/PR. Includes batch/serial reference continuity: invoice item batch_no must match the referenced source DN/PR item batch_no to prevent silent batch mismatches.
 - **Why:** Enforce traceability when stock is not updated from the invoice.
 - **Impacted:** SI, PI (validate).
 - **Settings:** BNS Settings → `enforce_stock_update_or_reference`.
 
 ### 3.5 Warehouse Negative Stock (`overrides/warehouse_negative_stock.py`)
 
-- **What:** Per-warehouse `bns_disallow_negative_stock`; blocks SLE when enabled.
-- **Why:** Allow negative stock in some warehouses, disallow in others.
+- **What:** Per-warehouse `bns_disallow_negative_stock`; blocks SLE when enabled. Supports ERPNext v15+ Serial and Batch Bundle (SBB): when legacy `batch_no` is empty but `serial_and_batch_bundle` is present, batch numbers are extracted from the SBB and each is validated individually for negative stock.
+- **Why:** Allow negative stock in some warehouses, disallow in others — including batch-level negative stock detection.
 - **Impacted:** Stock Ledger Entry (validate), Warehouse doctype (custom field).
 - **Settings:** BNS Settings → `enable_per_warehouse_negative_stock_disallow`.
 
@@ -147,7 +148,7 @@ BNS extends ERPNext with:
 
 ### 3.9 Stock Entry Override (`overrides/stock_entry_component_qty_variance.py`)
 
-- **What:** BNS variance qty for manufacturing; component qty variance control.
+- **What:** BNS variance qty for manufacturing; component qty variance control. Batch/serial safe: set-based item_code matching correctly handles batch-tracked items with the same item_code in multiple rows (different batches/SBBs).
 - **Impacted:** Stock Entry (override_doctype_class).
 - **Settings:** BNS Settings → `enable_bns_variance_qty`, `bns_default_variance_qty`.
 
@@ -226,6 +227,24 @@ BNS extends ERPNext with:
 - **Impacted:** Report output only (read-only). No data modifications.
 - **Cutoff:** Respects `internal_validation_cutoff_date` from BNS Branch Accounting Settings as default `from_date`.
 
+### 3.13 Batch/Serial Number Support in Reports (2026)
+
+- **Stock Ledger Negative Episodes:** When `Segregate Serial / Batch Bundle` filter is enabled, episodes are detected at batch level — grouping by `(item_code, warehouse, batch_no)` instead of `(item_code, warehouse)`. Batch No column appears in output when enabled.
+- **Outgoing Stock Audit:** SLE query now selects `batch_no`; Batch No column added to report output, populated from SLE data.
+- **Negative Stock Resolution Report:** `get_bin_qty()` and `find_alternative_warehouse()` accept optional `batch_no` parameter — queries SLE aggregates instead of Bin when batch is specified (Bin does not track batch-level balances).
+- **Almonds Sorting Report:** SLE lookup falls back to Serial and Batch Bundle entries when legacy `batch_no` is empty. Item batch resolution uses `_get_item_batch_no()` helper that checks legacy `batch_no` first, then extracts from linked SBB.
+
+### 3.14 Fiscal Year Transition — Batch/Serial Rollout (2026)
+
+- **Cross-FY internal transfers:** If a source document (DN/SI) was submitted in the old FY without batch/serial info, but the Item now has `has_batch_no=1` or `has_serial_no=1`, `_duplicate_serial_and_batch_bundle()` logs a warning and skips SBB duplication. The target document (PR/PI) must have its batch/serial populated manually before submission.
+- **Recommended rollout procedure:**
+  1. Complete all pending cross-FY internal transfers before enabling batch/serial on items.
+  2. Set `internal_validation_cutoff_date` in BNS Branch Accounting Settings to the new FY start date.
+  3. Enable `has_batch_no` / `has_serial_no` on items after the cutoff.
+  4. All new-FY transactions will carry batch/serial through the SBB duplication path.
+- **Report guidance:** When running reports with batch segregation across the FY boundary, filter by `from_date >= new FY start` to avoid split-timeline artifacts.
+- **Parity validation:** `_validate_batch_serial_parity()` logs warnings (not errors) when one side of an internal transfer has batch/serial info and the other doesn't, accommodating the transition period.
+
 ---
 
 ## 6. Migration Implications
@@ -254,6 +273,19 @@ BNS extends ERPNext with:
 | Dead test imports | **Bug** | test_bns_settings.py imported non-existent modules | Replaced with minimal passing test |
 | Duplicate `is_bns_internal_customer` logic | Refactor | gst_compliance._is_bns_internal_customer + ~20 inline checks in bns_branch_accounting/utils.py | Consider adding `is_bns_internal_customer(doc)` helper in bns_branch_accounting, import from gst_compliance |
 | Legacy wrappers unused | Dead code | submission_restriction: validate_stock_modification, validate_transaction_modification, validate_order_modification | Kept for backward compatibility; not in hooks |
+
+### 8b. Branch Accounting Bug Fixes (2026)
+
+| Bug | Severity | Fix |
+|-----|----------|-----|
+| Repost uses current settings, not transaction-time | CRITICAL | Added FY guard to `_repost_chain` / `verify_and_repost_internal_transfers` — vouchers from a prior FY are skipped unless `allow_cross_fy_repost=True`. Prevents GL account mismatch when settings change between FYs. |
+| Bulk operations modify old-FY documents | CRITICAL | Added `to_date` parameter to `bulk_convert_to_bns_internal` / `get_bulk_conversion_preview`. Auto-defaults to end of the FY containing `from_date`. Logs warning when `force=1` spans multiple FYs. |
+| Premature reference write (dangling ref) | CRITICAL | Removed `_update_delivery_note_reference` / `_update_sales_invoice_reference` calls from `make_bns_internal_purchase_receipt` / `make_bns_internal_purchase_invoice`. Reference is already written in `on_submit` hooks (`update_purchase_receipt_status_for_bns_internal`, `update_purchase_invoice_status_for_bns_internal`) after save. |
+| No locking on link/convert operations | CRITICAL | Added `frappe.lock_doc()` (SELECT FOR UPDATE) at the top of `link_dn_pr`, `link_si_pi`, `make_bns_internal_purchase_receipt`, `make_bns_internal_purchase_invoice` to prevent duplicate creation from concurrent requests. |
+| stock_qty mixes UOM and stock UOM | MEDIUM | `_update_item` now multiplies `returned_qty` and `received_qty` by `conversion_factor` before subtracting from `stock_qty`. |
+| Empty GSTINs treated as "same GSTIN" | MEDIUM | `_is_same_gstin_internal_delivery_note` now returns `False` when either GSTIN is empty/None, preventing incorrect GL rewrite for non-GST companies. |
+| Unlink doesn't reset status/flags | MEDIUM | `unlink_dn_pr` / `unlink_si_pi` now reset `is_bns_internal_customer`/`is_bns_internal_supplier`, `status`, and `per_billed` after clearing `bns_inter_company_reference`. |
+| link_si_pi hard-blocks re-linking | MEDIUM | Extended `_is_stale_inter_company_ref` to support SI/PI doctypes. Replaced hard-block in `link_si_pi` with stale-ref auto-clear pattern matching `link_dn_pr`. |
 
 ---
 

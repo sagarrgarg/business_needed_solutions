@@ -128,6 +128,13 @@ def get_columns():
 			"width": 140
 		},
 		{
+			"label": _("Batch No"),
+			"fieldname": "batch_no",
+			"fieldtype": "Link",
+			"options": "Batch",
+			"width": 120
+		},
+		{
 			"label": _("Valuation Rate"),
 			"fieldname": "valuation_rate",
 			"fieldtype": "Currency",
@@ -463,7 +470,8 @@ def get_sle_data_bulk(voucher_items, items):
 			SLE.qty_after_transaction,
 			SLE.actual_qty,
 			SLE.posting_date,
-			SLE.posting_time
+			SLE.posting_time,
+			SLE.batch_no,
 		)
 		.where(
 			(SLE.is_cancelled == 0) &
@@ -524,6 +532,7 @@ def build_report_data(voucher_items, sle_data):
 			"stock_qty": flt(item.get("stock_qty")),
 			"stock_uom": item.get("stock_uom"),
 			"warehouse": warehouse,
+			"batch_no": "",
 			"valuation_rate": None,
 			"qty_after_transaction": None,
 			"selling_rate": None,
@@ -544,7 +553,8 @@ def build_report_data(voucher_items, sle_data):
 			
 			row["valuation_rate"] = valuation_rate if valuation_rate > 0 else None
 			row["qty_after_transaction"] = qty_after_transaction
-			
+			row["batch_no"] = latest_sle.get("batch_no") or ""
+
 			# Check for negative stock across all matching SLEs
 			for sle in matching_sles:
 				if flt(sle.get("qty_after_transaction")) < 0:

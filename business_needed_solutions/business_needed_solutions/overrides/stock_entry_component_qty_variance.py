@@ -69,6 +69,11 @@ class BNSStockEntry(StockEntry):
 
         - All BOM components must be present in Stock Entry.
         - No extra components outside the BOM are allowed.
+
+        Batch/Serial safety: Uses set-based item_code matching, so the
+        same item_code appearing in multiple rows (e.g. different batches
+        via Serial and Batch Bundle) is correctly deduplicated.  BOM
+        quantities are per-item_code regardless of batch.
         """
         expected_item_codes = self._get_expected_bom_item_codes()
         if not expected_item_codes:
@@ -125,9 +130,14 @@ class BNSStockEntry(StockEntry):
     def validate_component_and_quantities(self):
         """
         Validate component quantities against BOM with variance tolerance.
-        
+
         If BNS variance feature is disabled, falls back to ERPNext's strict validation.
-        Otherwise, allows quantities within the configured ±% tolerance.
+        Otherwise, allows quantities within the configured +/- % tolerance.
+
+        Batch/Serial safety: ERPNext's get_matched_items() aggregates
+        qty across all rows of the same item_code, so batch-tracked items
+        split into multiple rows (different batches/SBBs) are summed
+        correctly before comparison with BOM expected qty.
         """
         # Early exit conditions (same as ERPNext)
         if self.purpose not in ["Manufacture", "Material Transfer for Manufacture"]:
