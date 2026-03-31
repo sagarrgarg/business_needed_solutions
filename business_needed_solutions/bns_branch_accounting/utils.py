@@ -3565,8 +3565,7 @@ def make_bns_internal_purchase_receipt(source_name: str, target_doc: Optional[Di
         BNSInternalTransferError: If internal transfer setup fails
     """
     try:
-        frappe.lock_doc("Delivery Note", source_name)
-        dn = frappe.get_doc("Delivery Note", source_name)
+        dn = frappe.get_doc("Delivery Note", source_name, for_update=True)
 
         if not is_after_internal_transfer_cutoff(dn.get("posting_date")):
             frappe.throw(
@@ -5210,8 +5209,7 @@ def make_bns_internal_purchase_invoice(source_name: str, target_doc: Optional[Di
         BNSInternalTransferError: If internal transfer setup fails
     """
     try:
-        frappe.lock_doc("Sales Invoice", source_name)
-        si = frappe.get_doc("Sales Invoice", source_name)
+        si = frappe.get_doc("Sales Invoice", source_name, for_update=True)
 
         if not is_after_internal_transfer_cutoff(si.get("posting_date")):
             frappe.throw(
@@ -7399,10 +7397,8 @@ def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
         Dict: Result with success message
     """
     try:
-        frappe.lock_doc("Delivery Note", delivery_note)
-        frappe.lock_doc("Purchase Receipt", purchase_receipt)
-        dn = frappe.get_doc("Delivery Note", delivery_note)
-        pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
+        dn = frappe.get_doc("Delivery Note", delivery_note, for_update=True)
+        pr = frappe.get_doc("Purchase Receipt", purchase_receipt, for_update=True)
 
         if dn.docstatus != 1:
             raise BNSValidationError(_("Delivery Note must be submitted before linking"))
@@ -7807,10 +7803,8 @@ def link_si_pi(sales_invoice: str, purchase_invoice: str) -> Dict:
         Dict: Result with success message
     """
     try:
-        frappe.lock_doc("Sales Invoice", sales_invoice)
-        frappe.lock_doc("Purchase Invoice", purchase_invoice)
-        si = frappe.get_doc("Sales Invoice", sales_invoice)
-        pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
+        si = frappe.get_doc("Sales Invoice", sales_invoice, for_update=True)
+        pi = frappe.get_doc("Purchase Invoice", purchase_invoice, for_update=True)
 
         if si.docstatus != 1:
             raise BNSValidationError(_("Sales Invoice must be submitted before linking"))
