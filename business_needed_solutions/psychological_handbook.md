@@ -133,3 +133,11 @@
 - Migration correctness guarantee:
   - Post-migration setup must fail fast on unrecoverable top-level errors.
   - Avoid “log-only” failure handling that leaves partial setup while reporting successful migration completion.
+- Health Check Dashboard philosophy:
+  - The BNS Dashboard is the single pane of glass for system health. It bundles accounting, branch-accounting, stock, and compliance metrics in one view so users don't need to navigate multiple reports to assess data quality.
+  - The get_health_check_overview API exists to minimise round-trips; always prefer a single bundled call over N individual metric calls.
+  - Metric cards use traffic-light colouring (green/ok, orange/warn, red/danger) so issues are visually obvious without reading numbers.
+  - Progress bars for completion rates (DN to PR, SI to PI, attachment compliance) convey the ratio at a glance; they are not decorative.
+  - Detail sections (expense fixables, party link, transfer mismatch) are collapsed by default to keep the overview clean; power users expand them for drill-down.
+  - The trend chart uses frappe.Chart when available and degrades to a table when not. Never break the page for a missing charting library.
+  - The workspace (bns_health_check.json) is a navigation hub, not a dashboard. It links to the dashboard page, settings, and all reports grouped by domain. Don't add metrics to the workspace itself; keep them in the dashboard page where they are actionable.

@@ -382,7 +382,40 @@ Replaced single `internal_validation_cutoff_date` (Date) with two Fiscal Year Li
 
 ---
 
-## 11. Post-Change Commands
+## 11. BNS Health Check Dashboard & Workspace
+
+**Added:** 2026-04-01
+
+### What Changed
+- **`bns_dashboard.py`**: Added `get_health_check_overview` API that bundles accounting (AR/AP/overdue + 6-month trend), branch-accounting (DN→PR/SI→PI completion, repost queue), stock (negative stock violations, guarded warehouses, draft reconciliations), and compliance (PR/PI attachment rates) metrics in a single call.
+- **`bns_dashboard.js`**: Restructured the BNS Dashboard page into a comprehensive health-check layout:
+  - **Accounting Overview**: 4 metric cards (Total Receivables, Total Payables, Overdue Receivables, Overdue Payables) + monthly Sales vs Purchase bar chart using `frappe.Chart`.
+  - **Data Health Indicators**: 4 cards reflecting items missing expense accounts, PI fixable count, unlinked PAN pairs, and transfer mismatches.
+  - **Branch Accounting Health**: 6 metric cards (DN→PR pending, SI→PI pending, total internal DNs/SIs, repost queued, repost tracked) + completion percentage progress bars.
+  - **Stock & Compliance**: Negative stock items/warehouses, guarded warehouse count, draft reconciliations, PR/PI attachment compliance with progress bars.
+  - **Quick Links**: Organized links to all BNS reports and settings.
+  - **Detail Sections**: Existing collapsible sections (expense fixables, party fixables, food company FSSAI, transfer mismatches) preserved below.
+- **`workspace/bns_health_check.json`**: New workspace titled "BNS Health Check" with shortcuts to BNS Dashboard page, BNS Settings, and Branch Accounting Settings; links organized into Accounting Reports, Branch Accounting, Stock Reports, and Other Reports card groups.
+
+### Why
+- Users needed a single entry point to assess the overall health of their BNS-managed accounting, branch transfers, stock discipline, and compliance posture.
+- Previously the dashboard only covered expense-account fixes and party linking; branch accounting, stock, and compliance metrics were scattered across individual reports with no aggregated view.
+
+### Impacted Modules
+- `business_needed_solutions.page.bns_dashboard` (Python + JS)
+- `business_needed_solutions.workspace` (new workspace JSON)
+
+### Backend Helpers (internal, not whitelisted)
+| Function | Purpose |
+|----------|---------|
+| `_get_accounting_metrics(company)` | AR/AP totals, overdue splits, 6-month invoice trend |
+| `_get_branch_accounting_metrics(company)` | Internal DN/SI completion, repost health |
+| `_get_stock_metrics(company)` | Negative stock counts, guarded warehouses, draft reconciliations |
+| `_get_compliance_metrics(company)` | PR/PI supplier-invoice attachment rates |
+
+---
+
+## 12. Post-Change Commands
 
 After changes to fields, JS, Vue, or assets:
 

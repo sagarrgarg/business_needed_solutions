@@ -1,7 +1,7 @@
 frappe.pages["bns-dashboard"].on_page_load = function (wrapper) {
 	const page = frappe.ui.make_app_page({
 		parent: wrapper,
-		title: __("BNS Dashboard"),
+		title: __("BNS Health Check"),
 		single_column: true,
 	});
 
@@ -44,43 +44,308 @@ class BNSDashboard {
 		return this.page.company_field.get_value() || frappe.defaults.get_user_default("Company");
 	}
 
+	// =====================================================================
+	// Layout
+	// =====================================================================
+
 	render_layout() {
 		this.wrapper.html(`
-			<div class="bns-dashboard-container" style="padding: 15px;">
+			<div class="bns-dashboard-container">
+
+				<!-- ======= ACCOUNTING OVERVIEW ======= -->
+				<div class="bns-section">
+					<div class="bns-section-title">
+						<i class="fa fa-bar-chart"></i> ${__("Accounting Overview")}
+					</div>
+					<div class="row" id="accounting-cards">
+						<div class="col-lg-3 col-md-6 col-6 mb-3">
+							<div class="metric-card" id="metric-receivables">
+								<div class="metric-value text-primary">--</div>
+								<div class="metric-label">${__("Net Receivables")}</div>
+								<div class="metric-sub">${__("Pure AR (party-netted)")}</div>
+							</div>
+						</div>
+						<div class="col-lg-3 col-md-6 col-6 mb-3">
+							<div class="metric-card" id="metric-payables">
+								<div class="metric-value text-primary">--</div>
+								<div class="metric-label">${__("Net Payables")}</div>
+								<div class="metric-sub">${__("Pure AP (party-netted)")}</div>
+							</div>
+						</div>
+						<div class="col-lg-3 col-md-6 col-6 mb-3">
+							<div class="metric-card" id="metric-overdue-recv">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("Overdue Receivables")}</div>
+							</div>
+						</div>
+						<div class="col-lg-3 col-md-6 col-6 mb-3">
+							<div class="metric-card" id="metric-overdue-pay">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("Overdue Payables")}</div>
+							</div>
+						</div>
+					</div>
+					<div class="row">
+						<div class="col-12">
+							<div class="chart-wrapper" id="trend-chart-wrapper">
+								<div id="trend-chart-container"></div>
+							</div>
+						</div>
+					</div>
+				</div>
+
+				<!-- ======= BNS HEALTH INDICATORS ======= -->
+				<div class="bns-section">
+					<div class="bns-section-title">
+						<i class="fa fa-heartbeat"></i> ${__("Data Health Indicators")}
+					</div>
+					<div class="row" id="health-indicator-cards">
+						<div class="col-lg-3 col-md-6 col-6 mb-3">
+							<div class="metric-card" id="health-missing-expense">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("Items Missing Expense A/c")}</div>
+							</div>
+						</div>
+						<div class="col-lg-3 col-md-6 col-6 mb-3">
+							<div class="metric-card" id="health-pi-fixable">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("PI Expense Fixable")}</div>
+							</div>
+						</div>
+						<div class="col-lg-3 col-md-6 col-6 mb-3">
+							<div class="metric-card" id="health-unlinked-pan">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("Unlinked by PAN")}</div>
+							</div>
+						</div>
+						<div class="col-lg-3 col-md-6 col-6 mb-3">
+							<div class="metric-card" id="health-transfer-mismatch">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("Transfer Mismatches")}</div>
+							</div>
+						</div>
+					</div>
+				</div>
+
+				<!-- ======= BRANCH ACCOUNTING HEALTH ======= -->
+				<div class="bns-section">
+					<div class="bns-section-title">
+						<i class="fa fa-exchange"></i> ${__("Branch Accounting Health")}
+					</div>
+					<div class="row" id="branch-accounting-cards">
+						<div class="col-lg-2 col-md-4 col-6 mb-3">
+							<div class="metric-card mini" id="branch-dn-pending">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("DN → PR Pending")}</div>
+							</div>
+						</div>
+						<div class="col-lg-2 col-md-4 col-6 mb-3">
+							<div class="metric-card mini" id="branch-si-pending">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("SI → PI Pending")}</div>
+							</div>
+						</div>
+						<div class="col-lg-2 col-md-4 col-6 mb-3">
+							<div class="metric-card mini" id="branch-total-dn">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("Total Internal DNs")}</div>
+							</div>
+						</div>
+						<div class="col-lg-2 col-md-4 col-6 mb-3">
+							<div class="metric-card mini" id="branch-total-si">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("Total Internal SIs")}</div>
+							</div>
+						</div>
+						<div class="col-lg-2 col-md-4 col-6 mb-3">
+							<div class="metric-card mini" id="branch-pending-repost">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("Repost Queued")}</div>
+							</div>
+						</div>
+						<div class="col-lg-2 col-md-4 col-6 mb-3">
+							<div class="metric-card mini" id="branch-repost-tracking">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("Repost Tracked")}</div>
+							</div>
+						</div>
+					</div>
+					<div class="row">
+						<div class="col-lg-6 col-md-12 mb-3">
+							<div class="progress-card">
+								<div class="d-flex justify-content-between mb-1">
+									<span class="progress-card-label">${__("DN → PR Completion")}</span>
+									<span class="progress-card-pct" id="branch-dn-pct">--</span>
+								</div>
+								<div class="progress" style="height: 8px;">
+									<div class="progress-bar bg-success" id="branch-dn-bar" role="progressbar" style="width: 0%"></div>
+								</div>
+							</div>
+						</div>
+						<div class="col-lg-6 col-md-12 mb-3">
+							<div class="progress-card">
+								<div class="d-flex justify-content-between mb-1">
+									<span class="progress-card-label">${__("SI → PI Completion")}</span>
+									<span class="progress-card-pct" id="branch-si-pct">--</span>
+								</div>
+								<div class="progress" style="height: 8px;">
+									<div class="progress-bar bg-success" id="branch-si-bar" role="progressbar" style="width: 0%"></div>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+
+				<!-- ======= STOCK & COMPLIANCE ======= -->
+				<div class="bns-section">
+					<div class="row">
+						<div class="col-lg-6">
+							<div class="bns-section-title">
+								<i class="fa fa-cubes"></i> ${__("Stock Health")}
+							</div>
+							<div class="row" id="stock-health-cards">
+								<div class="col-6 mb-3">
+									<div class="metric-card mini" id="stock-neg-items">
+										<div class="metric-value">--</div>
+										<div class="metric-label">${__("Negative Stock Items")}</div>
+									</div>
+								</div>
+								<div class="col-6 mb-3">
+									<div class="metric-card mini" id="stock-neg-wh">
+										<div class="metric-value">--</div>
+										<div class="metric-label">${__("Negative Stock WHs")}</div>
+									</div>
+								</div>
+								<div class="col-6 mb-3">
+									<div class="metric-card mini" id="stock-guarded">
+										<div class="metric-value">--</div>
+										<div class="metric-label">${__("Guarded Warehouses")}</div>
+									</div>
+								</div>
+								<div class="col-6 mb-3">
+									<div class="metric-card mini" id="stock-draft-recon">
+										<div class="metric-value">--</div>
+										<div class="metric-label">${__("Draft Reconciliations")}</div>
+									</div>
+								</div>
+							</div>
+						</div>
+						<div class="col-lg-6">
+							<div class="bns-section-title">
+								<i class="fa fa-shield"></i> ${__("Compliance Health")}
+							</div>
+							<div class="row" id="compliance-cards">
+								<div class="col-6 mb-3">
+									<div class="metric-card mini" id="compliance-pr-attach">
+										<div class="metric-value">--</div>
+										<div class="metric-label">${__("PR Missing Invoice Attachment")}</div>
+									</div>
+								</div>
+								<div class="col-6 mb-3">
+									<div class="metric-card mini" id="compliance-pi-attach">
+										<div class="metric-value">--</div>
+										<div class="metric-label">${__("PI Missing Invoice Attachment")}</div>
+									</div>
+								</div>
+							</div>
+							<div class="row">
+								<div class="col-6 mb-3">
+									<div class="progress-card">
+										<div class="d-flex justify-content-between mb-1">
+											<span class="progress-card-label">${__("PR Attachment %")}</span>
+											<span class="progress-card-pct" id="compliance-pr-pct">--</span>
+										</div>
+										<div class="progress" style="height: 8px;">
+											<div class="progress-bar bg-info" id="compliance-pr-bar" role="progressbar" style="width: 0%"></div>
+										</div>
+									</div>
+								</div>
+								<div class="col-6 mb-3">
+									<div class="progress-card">
+										<div class="d-flex justify-content-between mb-1">
+											<span class="progress-card-label">${__("PI Attachment %")}</span>
+											<span class="progress-card-pct" id="compliance-pi-pct">--</span>
+										</div>
+										<div class="progress" style="height: 8px;">
+											<div class="progress-bar bg-info" id="compliance-pi-bar" role="progressbar" style="width: 0%"></div>
+										</div>
+									</div>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+
+				<!-- ======= QUICK LINKS ======= -->
+				<div class="bns-section">
+					<div class="bns-section-title">
+						<i class="fa fa-link"></i> ${__("Quick Links")}
+					</div>
+					<div class="row">
+						<div class="col-lg-3 col-md-6 mb-3">
+							<div class="quick-link-card">
+								<div class="quick-link-heading">${__("Accounting Reports")}</div>
+								<a href="/app/query-report/Party GL" class="quick-link">${__("Party GL")}</a>
+								<a href="/app/query-report/Bank GL" class="quick-link">${__("Bank GL")}</a>
+								<a href="/app/query-report/Pure Accounts Receivable Summary" class="quick-link">${__("AR Summary")}</a>
+								<a href="/app/query-report/Pure Accounts Payable Summary" class="quick-link">${__("AP Summary")}</a>
+							</div>
+						</div>
+						<div class="col-lg-3 col-md-6 mb-3">
+							<div class="quick-link-card">
+								<div class="quick-link-heading">${__("Branch Accounting")}</div>
+								<a href="/app/query-report/Internal Transfer Accounting Audit" class="quick-link">${__("Transfer Audit")}</a>
+								<a href="/app/query-report/Internal Transfer Receive Mismatch" class="quick-link">${__("Receive Mismatch")}</a>
+								<a href="/app/bns-branch-accounting-settings" class="quick-link">${__("Branch Settings")}</a>
+							</div>
+						</div>
+						<div class="col-lg-3 col-md-6 mb-3">
+							<div class="quick-link-card">
+								<div class="quick-link-heading">${__("Stock Reports")}</div>
+								<a href="/app/query-report/Outgoing Stock Audit - 1 BNS" class="quick-link">${__("Outgoing Stock Audit")}</a>
+								<a href="/app/query-report/Stock Ledger Negative Episodes" class="quick-link">${__("Negative Episodes")}</a>
+								<a href="/app/query-report/Negative Stock Resolution Report" class="quick-link">${__("Negative Resolution")}</a>
+							</div>
+						</div>
+						<div class="col-lg-3 col-md-6 mb-3">
+							<div class="quick-link-card">
+								<div class="quick-link-heading">${__("Settings")}</div>
+								<a href="/app/bns-settings" class="quick-link">${__("BNS Settings")}</a>
+								<a href="/app/bns-branch-accounting-settings" class="quick-link">${__("Branch Accounting Settings")}</a>
+								<a href="/app/query-report/Unlinked Customer-Supplier by PAN" class="quick-link">${__("Unlinked PAN Report")}</a>
+							</div>
+						</div>
+					</div>
+				</div>
+
+				<!-- ======= DETAIL SECTIONS (collapsible) ======= -->
 				<div class="row">
 					<!-- Left Column - Expense Item Fixables -->
 					<div class="col-lg-6">
 						<div class="frappe-card" id="section-expense-fixables">
-							<div class="card-header d-flex justify-content-between align-items-center section-header" 
+							<div class="card-header d-flex justify-content-between align-items-center section-header"
 								 style="cursor: pointer; padding: 12px 15px; background: var(--subtle-bg);"
 								 data-section="expense-fixables">
 								<h5 class="mb-0">
-									<i class="fa fa-chevron-down section-toggle" id="toggle-expense-fixables"></i>
+									<i class="fa fa-chevron-down section-toggle collapsed" id="toggle-expense-fixables"></i>
 									${__("Expense Item Fixables")}
 								</h5>
 							</div>
-							<div class="card-body section-content" id="content-expense-fixables">
-								<!-- Summary Cards -->
+							<div class="card-body section-content" id="content-expense-fixables" style="display: none;">
 								<div class="row mb-3" id="summary-cards">
 									<div class="col-6">
 										<div class="number-card" id="card-items-missing">
-											<div class="number-card-loading">
-												<span class="text-muted">${__("Loading...")}</span>
-											</div>
+											<span class="text-muted">${__("Loading...")}</span>
 										</div>
 									</div>
 									<div class="col-6">
 										<div class="number-card" id="card-pi-fixable">
-											<div class="number-card-loading">
-												<span class="text-muted">${__("Loading...")}</span>
-											</div>
+											<span class="text-muted">${__("Loading...")}</span>
 										</div>
 									</div>
 								</div>
-
-								<!-- Sub-section 1: Items Missing Expense Account -->
 								<div class="sub-section mb-3" id="subsection-items-missing">
-									<div class="sub-section-header d-flex justify-content-between align-items-center" 
+									<div class="sub-section-header d-flex justify-content-between align-items-center"
 										 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
 										 data-subsection="items-missing">
 										<strong>
@@ -95,10 +360,8 @@ class BNSDashboard {
 										</div>
 									</div>
 								</div>
-
-								<!-- Sub-section 2: PI Items with Wrong Expense Account -->
 								<div class="sub-section mb-3" id="subsection-pi-wrong">
-									<div class="sub-section-header d-flex justify-content-between align-items-center" 
+									<div class="sub-section-header d-flex justify-content-between align-items-center"
 										 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
 										 data-subsection="pi-wrong">
 										<strong>
@@ -121,10 +384,8 @@ class BNSDashboard {
 										</div>
 									</div>
 								</div>
-
-								<!-- Sub-section 3: All Expense Items -->
 								<div class="sub-section" id="subsection-all-items">
-									<div class="sub-section-header d-flex justify-content-between align-items-center" 
+									<div class="sub-section-header d-flex justify-content-between align-items-center"
 										 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
 										 data-subsection="all-items">
 										<strong>
@@ -146,36 +407,29 @@ class BNSDashboard {
 					<!-- Right Column - Party Link & Transfer Fixables -->
 					<div class="col-lg-6">
 						<div class="frappe-card" id="section-party-link">
-							<div class="card-header d-flex justify-content-between align-items-center section-header" 
+							<div class="card-header d-flex justify-content-between align-items-center section-header"
 								 style="cursor: pointer; padding: 12px 15px; background: var(--subtle-bg);"
 								 data-section="party-link">
 								<h5 class="mb-0">
-									<i class="fa fa-chevron-down section-toggle" id="toggle-party-link"></i>
+									<i class="fa fa-chevron-down section-toggle collapsed" id="toggle-party-link"></i>
 									${__("Party & Transfer Fixables")}
 								</h5>
 							</div>
-							<div class="card-body section-content" id="content-party-link">
-								<!-- Summary Cards -->
+							<div class="card-body section-content" id="content-party-link" style="display: none;">
 								<div class="row mb-3">
 									<div class="col-6">
 										<div class="number-card" id="card-unlinked-pan">
-											<div class="number-card-loading">
-												<span class="text-muted">${__("Loading...")}</span>
-											</div>
+											<span class="text-muted">${__("Loading...")}</span>
 										</div>
 									</div>
 									<div class="col-6">
 										<div class="number-card" id="card-transfer-mismatch">
-											<div class="number-card-loading">
-												<span class="text-muted">${__("Loading...")}</span>
-											</div>
+											<span class="text-muted">${__("Loading...")}</span>
 										</div>
 									</div>
 								</div>
-
-								<!-- Sub-section: Unlinked Customer/Supplier by PAN -->
 								<div class="sub-section mb-3" id="subsection-unlinked-pan">
-									<div class="sub-section-header d-flex justify-content-between align-items-center" 
+									<div class="sub-section-header d-flex justify-content-between align-items-center"
 										 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
 										 data-subsection="unlinked-pan">
 										<strong>
@@ -193,10 +447,8 @@ class BNSDashboard {
 										</div>
 									</div>
 								</div>
-
-								<!-- Sub-section: Internal Transfer Mismatches -->
 								<div class="sub-section" id="subsection-transfer-mismatch">
-									<div class="sub-section-header d-flex justify-content-between align-items-center" 
+									<div class="sub-section-header d-flex justify-content-between align-items-center"
 										 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
 										 data-subsection="transfer-mismatch">
 										<strong>
@@ -205,34 +457,34 @@ class BNSDashboard {
 											<span class="badge badge-danger ml-2" id="badge-transfer-mismatch">0</span>
 										</strong>
 									</div>
-							<div class="sub-section-content" id="subcontent-transfer-mismatch" style="display: none; padding-top: 10px;">
-									<p class="text-muted small mb-2">
-										${__("DN/SI with missing or mismatched PR/PI. Data comes from the last prepared report.")}
-									</p>
-									<div class="mb-2 d-flex align-items-center" style="gap: 8px;">
-										<button class="btn btn-primary btn-xs" id="btn-prepare-mismatch-report">
-											<i class="fa fa-refresh"></i> ${__("Prepare New Report")}
-										</button>
-										<a href="/app/query-report/Internal%20Transfer%20Receive%20Mismatch" target="_blank" class="btn btn-secondary btn-xs">
-											<i class="fa fa-external-link"></i> ${__("Open Full Report")}
-										</a>
-										<span class="text-muted small" id="mismatch-report-status"></span>
+									<div class="sub-section-content" id="subcontent-transfer-mismatch" style="display: none; padding-top: 10px;">
+										<p class="text-muted small mb-2">
+											${__("DN/SI with missing or mismatched PR/PI. Data comes from the last prepared report.")}
+										</p>
+										<div class="mb-2 d-flex align-items-center" style="gap: 8px;">
+											<button class="btn btn-primary btn-xs" id="btn-prepare-mismatch-report">
+												<i class="fa fa-refresh"></i> ${__("Prepare New Report")}
+											</button>
+											<a href="/app/query-report/Internal%20Transfer%20Receive%20Mismatch" target="_blank" class="btn btn-secondary btn-xs">
+												<i class="fa fa-external-link"></i> ${__("Open Full Report")}
+											</a>
+											<span class="text-muted small" id="mismatch-report-status"></span>
+										</div>
+										<div id="table-transfer-mismatch">
+											<p class="text-muted">${__("Loading...")}</p>
+										</div>
 									</div>
-									<div id="table-transfer-mismatch">
-										<p class="text-muted">${__("Loading...")}</p>
-									</div>
-								</div>
 								</div>
 							</div>
 						</div>
 					</div>
 				</div>
 
-				<!-- Third Section - Food Company Addresses & FSSAI (hidden unless food company) -->
+				<!-- Food Company Addresses -->
 				<div class="row mt-0" id="row-food-addresses" style="display: none;">
 					<div class="col-lg-6">
 						<div class="frappe-card" id="section-food-addresses">
-							<div class="card-header d-flex justify-content-between align-items-center section-header" 
+							<div class="card-header d-flex justify-content-between align-items-center section-header"
 								 style="cursor: pointer; padding: 12px 15px; background: var(--subtle-bg);"
 								 data-section="food-addresses">
 								<h5 class="mb-0">
@@ -255,134 +507,259 @@ class BNSDashboard {
 				</div>
 			</div>
 
-			<style>
-				.bns-dashboard-container .number-card {
-					background: var(--card-bg);
-					border: 1px solid var(--border-color);
-					border-radius: 6px;
-					padding: 12px;
-					text-align: center;
-				}
-				.bns-dashboard-container .number-card .number {
-					font-size: 1.8rem;
-					font-weight: bold;
-					color: var(--primary);
-				}
-				.bns-dashboard-container .number-card .label {
-					color: var(--text-muted);
-					font-size: 0.8rem;
-				}
-				.bns-dashboard-container .number-card.warning .number {
-					color: var(--orange-500);
-				}
-				.bns-dashboard-container .number-card.danger .number {
-					color: var(--red-500);
-				}
-				.bns-dashboard-container .frappe-card {
-					background: var(--card-bg);
-					border: 1px solid var(--border-color);
-					border-radius: 8px;
-					margin-bottom: 15px;
-				}
-				.bns-dashboard-container .card-body {
-					padding: 15px;
-				}
-				.bns-dashboard-container .section-toggle,
-				.bns-dashboard-container .subsection-toggle {
-					transition: transform 0.2s;
-					margin-right: 8px;
-					width: 12px;
-				}
-				.bns-dashboard-container .section-toggle.collapsed,
-				.bns-dashboard-container .subsection-toggle.collapsed {
-					transform: rotate(-90deg);
-				}
-				.bns-dashboard-container .sub-section {
-					border: 1px solid var(--border-color);
-					border-radius: 4px;
-					padding: 0;
-				}
-				.bns-dashboard-container .sub-section-content {
-					padding: 10px;
-					max-height: 400px;
-					overflow-y: auto;
-				}
-				.bns-dashboard-container table {
-					width: 100%;
-					font-size: 0.85rem;
-				}
-				.bns-dashboard-container table th,
-				.bns-dashboard-container table td {
-					padding: 6px 8px;
-					border-bottom: 1px solid var(--border-color);
-				}
-				.bns-dashboard-container table th {
-					background: var(--card-bg, #fff);
-					font-weight: 600;
-					position: sticky;
-					top: 0;
-					z-index: 1;
-					box-shadow: 0 1px 0 var(--border-color);
-				}
-				.bns-dashboard-container .row-fixable {
-					background: var(--subtle-accent);
-				}
-				.bns-dashboard-container .row-not-fixable {
-					opacity: 0.7;
-				}
-				.bns-dashboard-container .row-fssai-ok {
-					background: rgba(34, 197, 94, 0.12);
-					border-left: 3px solid var(--green-500, #22c55e);
-				}
-				.bns-dashboard-container .row-fssai-missing {
-					background: rgba(239, 68, 68, 0.1);
-					border-left: 3px solid var(--red-500, #ef4444);
-				}
-				.bns-dashboard-container .food-address-name {
-					font-weight: 600;
-					color: var(--text-color);
-				}
-				.bns-dashboard-container .food-address-full {
-					font-size: 0.8rem;
-					color: var(--text-muted);
-					line-height: 1.4;
-					white-space: pre-line;
-				}
-				.bns-dashboard-container .fssai-badge {
-					font-family: var(--font-family-mono, monospace);
-					font-size: 0.8rem;
-					padding: 2px 6px;
-					border-radius: 4px;
-				}
-				.bns-dashboard-container .food-addresses-table-wrap {
-					max-height: 400px;
-					overflow-y: auto;
-				}
-				.bns-dashboard-container .expense-account-select {
-					min-width: 150px;
-					font-size: 0.8rem;
-					padding: 2px 6px;
-				}
-				.bns-dashboard-container .btn-xs {
-					font-size: 0.75rem;
-					padding: 2px 8px;
-				}
-			</style>
+			${this.get_styles()}
 		`);
 
 		this.bind_events();
 	}
 
+	get_styles() {
+		return `<style>
+			.bns-dashboard-container {
+				padding: 15px;
+				max-width: 1400px;
+				margin: 0 auto;
+			}
+
+			/* Section titles */
+			.bns-section {
+				margin-bottom: 20px;
+			}
+			.bns-section-title {
+				font-size: 1rem;
+				font-weight: 700;
+				color: var(--heading-color);
+				margin-bottom: 12px;
+				padding-bottom: 6px;
+				border-bottom: 2px solid var(--primary);
+				display: inline-block;
+			}
+			.bns-section-title i {
+				margin-right: 6px;
+				color: var(--primary);
+			}
+
+			/* Metric cards (top-level health numbers) */
+			.metric-card {
+				background: var(--card-bg);
+				border: 1px solid var(--border-color);
+				border-radius: 8px;
+				padding: 16px;
+				text-align: center;
+				transition: box-shadow 0.2s, border-color 0.2s;
+				height: 100%;
+			}
+			.metric-card:hover {
+				box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+				border-color: var(--primary);
+			}
+			.metric-card.mini {
+				padding: 10px;
+			}
+			.metric-card .metric-value {
+				font-size: 1.6rem;
+				font-weight: 700;
+				line-height: 1.2;
+			}
+			.metric-card.mini .metric-value {
+				font-size: 1.3rem;
+			}
+			.metric-card .metric-label {
+				font-size: 0.75rem;
+				color: var(--text-muted);
+				margin-top: 4px;
+				text-transform: uppercase;
+				letter-spacing: 0.3px;
+			}
+			.metric-card .metric-sub {
+				font-size: 0.7rem;
+				color: var(--text-light);
+				margin-top: 2px;
+			}
+			.metric-card.ok .metric-value { color: var(--green-500); }
+			.metric-card.warn .metric-value { color: var(--orange-500); }
+			.metric-card.danger .metric-value { color: var(--red-500); }
+			.metric-card.info .metric-value { color: var(--blue-500); }
+
+			/* Chart wrapper */
+			.chart-wrapper {
+				background: var(--card-bg);
+				border: 1px solid var(--border-color);
+				border-radius: 8px;
+				padding: 16px;
+				min-height: 80px;
+			}
+
+			/* Progress cards */
+			.progress-card {
+				background: var(--card-bg);
+				border: 1px solid var(--border-color);
+				border-radius: 8px;
+				padding: 12px 16px;
+			}
+			.progress-card-label {
+				font-size: 0.8rem;
+				font-weight: 600;
+				color: var(--text-color);
+			}
+			.progress-card-pct {
+				font-size: 0.8rem;
+				font-weight: 700;
+				color: var(--primary);
+			}
+
+			/* Quick links */
+			.quick-link-card {
+				background: var(--card-bg);
+				border: 1px solid var(--border-color);
+				border-radius: 8px;
+				padding: 14px;
+				height: 100%;
+			}
+			.quick-link-heading {
+				font-size: 0.8rem;
+				font-weight: 700;
+				text-transform: uppercase;
+				letter-spacing: 0.5px;
+				color: var(--text-muted);
+				margin-bottom: 8px;
+				padding-bottom: 6px;
+				border-bottom: 1px solid var(--border-color);
+			}
+			.quick-link {
+				display: block;
+				font-size: 0.85rem;
+				padding: 3px 0;
+				color: var(--text-color);
+				text-decoration: none;
+			}
+			.quick-link:hover {
+				color: var(--primary);
+			}
+
+			/* Legacy number cards (detail sections) */
+			.bns-dashboard-container .number-card {
+				background: var(--card-bg);
+				border: 1px solid var(--border-color);
+				border-radius: 6px;
+				padding: 12px;
+				text-align: center;
+			}
+			.bns-dashboard-container .number-card .number {
+				font-size: 1.8rem;
+				font-weight: bold;
+				color: var(--primary);
+			}
+			.bns-dashboard-container .number-card .label {
+				color: var(--text-muted);
+				font-size: 0.8rem;
+			}
+			.bns-dashboard-container .number-card.warning .number {
+				color: var(--orange-500);
+			}
+			.bns-dashboard-container .number-card.danger .number {
+				color: var(--red-500);
+			}
+			.bns-dashboard-container .frappe-card {
+				background: var(--card-bg);
+				border: 1px solid var(--border-color);
+				border-radius: 8px;
+				margin-bottom: 15px;
+			}
+			.bns-dashboard-container .card-body {
+				padding: 15px;
+			}
+			.bns-dashboard-container .section-toggle,
+			.bns-dashboard-container .subsection-toggle {
+				transition: transform 0.2s;
+				margin-right: 8px;
+				width: 12px;
+			}
+			.bns-dashboard-container .section-toggle.collapsed,
+			.bns-dashboard-container .subsection-toggle.collapsed {
+				transform: rotate(-90deg);
+			}
+			.bns-dashboard-container .sub-section {
+				border: 1px solid var(--border-color);
+				border-radius: 4px;
+				padding: 0;
+			}
+			.bns-dashboard-container .sub-section-content {
+				padding: 10px;
+				max-height: 400px;
+				overflow-y: auto;
+			}
+			.bns-dashboard-container table {
+				width: 100%;
+				font-size: 0.85rem;
+			}
+			.bns-dashboard-container table th,
+			.bns-dashboard-container table td {
+				padding: 6px 8px;
+				border-bottom: 1px solid var(--border-color);
+			}
+			.bns-dashboard-container table th {
+				background: var(--card-bg, #fff);
+				font-weight: 600;
+				position: sticky;
+				top: 0;
+				z-index: 1;
+				box-shadow: 0 1px 0 var(--border-color);
+			}
+			.bns-dashboard-container .row-fixable {
+				background: var(--subtle-accent);
+			}
+			.bns-dashboard-container .row-not-fixable {
+				opacity: 0.7;
+			}
+			.bns-dashboard-container .row-fssai-ok {
+				background: rgba(34, 197, 94, 0.12);
+				border-left: 3px solid var(--green-500, #22c55e);
+			}
+			.bns-dashboard-container .row-fssai-missing {
+				background: rgba(239, 68, 68, 0.1);
+				border-left: 3px solid var(--red-500, #ef4444);
+			}
+			.bns-dashboard-container .food-address-name {
+				font-weight: 600;
+				color: var(--text-color);
+			}
+			.bns-dashboard-container .food-address-full {
+				font-size: 0.8rem;
+				color: var(--text-muted);
+				line-height: 1.4;
+				white-space: pre-line;
+			}
+			.bns-dashboard-container .fssai-badge {
+				font-family: var(--font-family-mono, monospace);
+				font-size: 0.8rem;
+				padding: 2px 6px;
+				border-radius: 4px;
+			}
+			.bns-dashboard-container .food-addresses-table-wrap {
+				max-height: 400px;
+				overflow-y: auto;
+			}
+			.bns-dashboard-container .expense-account-select {
+				min-width: 150px;
+				font-size: 0.8rem;
+				padding: 2px 6px;
+			}
+			.bns-dashboard-container .btn-xs {
+				font-size: 0.75rem;
+				padding: 2px 8px;
+			}
+		</style>`;
+	}
+
 	bind_events() {
 		const self = this;
 
-		// Main section toggle
 		this.wrapper.find(".section-header").on("click", function () {
 			const section = $(this).data("section");
 			self.toggle_section(section);
 		});
 
-		// Sub-section toggles
 		this.wrapper.find(".sub-section-header").on("click", function () {
 			const subsection = $(this).data("subsection");
 			self.toggle_subsection(subsection);
@@ -428,6 +805,10 @@ class BNSDashboard {
 		}
 	}
 
+	// =====================================================================
+	// Data Loading
+	// =====================================================================
+
 	async load_expense_accounts() {
 		try {
 			const result = await frappe.call({
@@ -441,9 +822,9 @@ class BNSDashboard {
 	}
 
 	async refresh() {
-		// Run ALL data loads in parallel — load_expense_accounts no longer blocks
 		await Promise.all([
 			this.load_expense_accounts(),
+			this.load_health_overview(),
 			this.load_summary(),
 			this.load_items_missing_expense_account(),
 			this.load_pi_wrong_expense_account(),
@@ -453,6 +834,179 @@ class BNSDashboard {
 			this.load_transfer_mismatches(),
 		]);
 	}
+
+	// =====================================================================
+	// Health Overview (single API, populates all top sections)
+	// =====================================================================
+
+	async load_health_overview() {
+		try {
+			const result = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_health_check_overview",
+				args: { company: this.get_company() },
+			});
+			this.render_health_overview(result.message);
+		} catch (e) {
+			console.error("Health overview load failed:", e);
+		}
+	}
+
+	render_health_overview(data) {
+		if (!data) return;
+
+		const fmt = (v) => format_currency(v, null, 0);
+
+		// --- Accounting cards ---
+		const acct = data.accounting || {};
+		this._set_metric("metric-receivables", fmt(acct.total_receivables), null, "info");
+		this._set_metric("metric-payables", fmt(acct.total_payables), null, "info");
+		this._set_metric(
+			"metric-overdue-recv", fmt(acct.overdue_receivables), null,
+			acct.overdue_receivables > 0 ? "danger" : "ok"
+		);
+		this._set_metric(
+			"metric-overdue-pay", fmt(acct.overdue_payables), null,
+			acct.overdue_payables > 0 ? "warn" : "ok"
+		);
+
+		this.render_trend_chart(acct.monthly_sales || [], acct.monthly_purchase || []);
+
+		// --- Branch Accounting cards ---
+		const ba = data.branch_accounting || {};
+		this._set_metric("branch-dn-pending", ba.dns_without_pr, null,
+			ba.dns_without_pr > 0 ? "warn" : "ok");
+		this._set_metric("branch-si-pending", ba.sis_without_pi, null,
+			ba.sis_without_pi > 0 ? "warn" : "ok");
+		this._set_metric("branch-total-dn", ba.total_internal_dns, null, "info");
+		this._set_metric("branch-total-si", ba.total_internal_sis, null, "info");
+		this._set_metric("branch-pending-repost", ba.pending_repost, null,
+			ba.pending_repost > 0 ? "danger" : "ok");
+		this._set_metric("branch-repost-tracking", ba.repost_tracking, null, "info");
+
+		const dnPct = ba.total_internal_dns > 0
+			? Math.round(((ba.total_internal_dns - ba.dns_without_pr) / ba.total_internal_dns) * 100)
+			: 100;
+		const siPct = ba.total_internal_sis > 0
+			? Math.round(((ba.total_internal_sis - ba.sis_without_pi) / ba.total_internal_sis) * 100)
+			: 100;
+		this._set_progress("branch-dn", dnPct);
+		this._set_progress("branch-si", siPct);
+
+		// --- Stock Health cards ---
+		const st = data.stock || {};
+		this._set_metric("stock-neg-items", st.negative_stock_items, null,
+			st.negative_stock_items > 0 ? "danger" : "ok");
+		this._set_metric("stock-neg-wh", st.negative_stock_warehouses, null,
+			st.negative_stock_warehouses > 0 ? "danger" : "ok");
+		this._set_metric("stock-guarded", st.guarded_warehouses,
+			st.total_warehouses ? __("of {0}", [st.total_warehouses]) : null, "info");
+		this._set_metric("stock-draft-recon", st.draft_reconciliations, null,
+			st.draft_reconciliations > 0 ? "warn" : "ok");
+
+		// --- Compliance cards ---
+		const comp = data.compliance || {};
+		this._set_metric("compliance-pr-attach", comp.pr_without_attachment,
+			comp.total_prs ? __("of {0} PRs", [comp.total_prs]) : null,
+			comp.pr_without_attachment > 0 ? "warn" : "ok");
+		this._set_metric("compliance-pi-attach", comp.pi_without_attachment,
+			comp.total_pis ? __("of {0} PIs", [comp.total_pis]) : null,
+			comp.pi_without_attachment > 0 ? "warn" : "ok");
+
+		const prPct = comp.total_prs > 0
+			? Math.round(((comp.total_prs - comp.pr_without_attachment) / comp.total_prs) * 100)
+			: 100;
+		const piPct = comp.total_pis > 0
+			? Math.round(((comp.total_pis - comp.pi_without_attachment) / comp.total_pis) * 100)
+			: 100;
+		this._set_progress("compliance-pr", prPct);
+		this._set_progress("compliance-pi", piPct);
+	}
+
+	_set_metric(id, value, subText, colorClass) {
+		const card = this.wrapper.find("#" + id);
+		card.removeClass("ok warn danger info").addClass(colorClass || "");
+		card.find(".metric-value").text(value);
+		if (subText) {
+			if (card.find(".metric-sub").length === 0) {
+				card.find(".metric-label").after('<div class="metric-sub"></div>');
+			}
+			card.find(".metric-sub").text(subText);
+		}
+	}
+
+	_set_progress(prefix, pct) {
+		this.wrapper.find("#" + prefix + "-pct").text(pct + "%");
+		const bar = this.wrapper.find("#" + prefix + "-bar");
+		bar.css("width", pct + "%");
+		bar.removeClass("bg-success bg-warning bg-danger");
+		if (pct >= 90) bar.addClass("bg-success");
+		else if (pct >= 60) bar.addClass("bg-warning");
+		else bar.addClass("bg-danger");
+	}
+
+	render_trend_chart(sales, purchase) {
+		const container = this.wrapper.find("#trend-chart-container");
+		if (!sales.length && !purchase.length) {
+			container.html('<p class="text-muted text-center mb-0">' + __("No invoice data for the last 6 months.") + '</p>');
+			return;
+		}
+
+		const allMonths = [...new Set([
+			...sales.map(s => s.month),
+			...purchase.map(p => p.month),
+		])].sort();
+
+		const salesMap = {};
+		sales.forEach(s => { salesMap[s.month] = s.total; });
+		const purchaseMap = {};
+		purchase.forEach(p => { purchaseMap[p.month] = p.total; });
+
+		const labels = allMonths.map(m => {
+			const parts = m.split("-");
+			const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+			return monthNames[parseInt(parts[1]) - 1] + " " + parts[0].slice(2);
+		});
+
+		const salesData = allMonths.map(m => salesMap[m] || 0);
+		const purchaseData = allMonths.map(m => purchaseMap[m] || 0);
+
+		container.empty();
+
+		if (typeof frappe.Chart !== "undefined") {
+			new frappe.Chart(container[0], {
+				data: {
+					labels: labels,
+					datasets: [
+						{ name: __("Sales"), values: salesData },
+						{ name: __("Purchase"), values: purchaseData },
+					],
+				},
+				type: "bar",
+				height: 220,
+				colors: ["#2490EF", "#E24C4C"],
+				barOptions: { stacked: false, spaceRatio: 0.4 },
+				axisOptions: {
+					xIsSeries: true,
+					shortenYAxisNumbers: true,
+				},
+			});
+		} else {
+			let html = '<table class="table table-sm mb-0"><thead><tr>';
+			html += '<th>' + __("Month") + '</th><th class="text-right">' + __("Sales") + '</th><th class="text-right">' + __("Purchase") + '</th>';
+			html += '</tr></thead><tbody>';
+			allMonths.forEach((m, i) => {
+				html += '<tr><td>' + labels[i] + '</td>';
+				html += '<td class="text-right">' + format_currency(salesData[i], null, 0) + '</td>';
+				html += '<td class="text-right">' + format_currency(purchaseData[i], null, 0) + '</td></tr>';
+			});
+			html += '</tbody></table>';
+			container.html(html);
+		}
+	}
+
+	// =====================================================================
+	// Existing Summary (detail section badges)
+	// =====================================================================
 
 	async load_summary() {
 		try {
@@ -484,7 +1038,6 @@ class BNSDashboard {
 				(data.unlinked_pan_count || 0) > 0 ? "warning" : ""
 			);
 
-			// Transfer mismatch card — show prepared report status
 			const mismatchCount = data.transfer_mismatch_count || 0;
 			const mismatchStatus = data.transfer_mismatch_status || "Not Prepared";
 			let mismatchLabel = __("Transfer Mismatches");
@@ -505,6 +1058,16 @@ class BNSDashboard {
 			this.wrapper.find("#badge-pi-fixable").text(data.pi_items_fixable);
 			this.wrapper.find("#badge-unlinked-pan").text(data.unlinked_pan_count || 0);
 			this.wrapper.find("#badge-transfer-mismatch").text(mismatchCount);
+
+			// Also update health indicator cards from summary data
+			this._set_metric("health-missing-expense", data.items_missing_expense_account, null,
+				data.items_missing_expense_account > 0 ? "warn" : "ok");
+			this._set_metric("health-pi-fixable", data.pi_items_fixable, null,
+				data.pi_items_fixable > 0 ? "danger" : "ok");
+			this._set_metric("health-unlinked-pan", data.unlinked_pan_count || 0, null,
+				(data.unlinked_pan_count || 0) > 0 ? "warn" : "ok");
+			this._set_metric("health-transfer-mismatch", mismatchCount, null,
+				mismatchCount > 0 ? "danger" : "ok");
 		} catch (e) {
 			console.error("Failed to load summary:", e);
 		}
@@ -516,15 +1079,17 @@ class BNSDashboard {
 		card.html('<div class="number">' + number + '</div><div class="label">' + label + '</div>');
 	}
 
+	// =====================================================================
+	// Items Missing Expense Account
+	// =====================================================================
+
 	async load_items_missing_expense_account() {
 		try {
 			const result = await frappe.call({
 				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_items_missing_expense_account",
 				args: { company: this.get_company() },
 			});
-
-			const data = result.message;
-			this.render_items_missing_table(data.items);
+			this.render_items_missing_table(result.message.items);
 		} catch (e) {
 			console.error("Failed to load items:", e);
 			this.wrapper.find("#table-items-missing").html(
@@ -608,15 +1173,17 @@ class BNSDashboard {
 		}
 	}
 
+	// =====================================================================
+	// PI Wrong Expense Account
+	// =====================================================================
+
 	async load_pi_wrong_expense_account() {
 		try {
 			const result = await frappe.call({
 				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_purchase_invoices_with_wrong_expense_account",
 				args: { company: this.get_company() },
 			});
-
-			const data = result.message;
-			this.render_pi_wrong_table(data);
+			this.render_pi_wrong_table(result.message);
 		} catch (e) {
 			console.error("Failed to load PI data:", e);
 			this.wrapper.find("#table-pi-wrong").html(
@@ -753,6 +1320,10 @@ class BNSDashboard {
 		);
 	}
 
+	// =====================================================================
+	// All Expense Items
+	// =====================================================================
+
 	async load_all_expense_items() {
 		try {
 			const result = await frappe.call({
@@ -841,8 +1412,7 @@ class BNSDashboard {
 
 			frappe.show_alert({ message: __("Updated {0}", [itemCode]), indicator: "green" });
 			btn.prop("disabled", false).text(__("Update"));
-			
-			// Refresh summary and missing items
+
 			this.load_summary();
 			this.load_items_missing_expense_account();
 		} catch (e) {
@@ -851,7 +1421,9 @@ class BNSDashboard {
 		}
 	}
 
-	// ========== Food Company Addresses & FSSAI ==========
+	// =====================================================================
+	// Food Company Addresses & FSSAI
+	// =====================================================================
 
 	async load_food_company_addresses() {
 		try {
@@ -964,7 +1536,9 @@ class BNSDashboard {
 		}
 	}
 
-	// ========== Unlinked Customer/Supplier by PAN ==========
+	// =====================================================================
+	// Unlinked Customer/Supplier by PAN
+	// =====================================================================
 
 	async load_unlinked_pan() {
 		try {
@@ -1027,7 +1601,6 @@ class BNSDashboard {
 		html += '</tbody></table>';
 		container.html(html);
 
-		// Bind click events
 		container.find(".btn-link-c2s").on("click", function () {
 			const customer = $(this).data("customer");
 			const supplier = $(this).data("supplier");
@@ -1074,7 +1647,9 @@ class BNSDashboard {
 		}
 	}
 
-	// ========== Internal Transfer Mismatches ==========
+	// =====================================================================
+	// Internal Transfer Mismatches
+	// =====================================================================
 
 	async load_transfer_mismatches() {
 		try {
@@ -1086,7 +1661,6 @@ class BNSDashboard {
 			const data = result.message;
 			this.wrapper.find("#badge-transfer-mismatch").text(data.count);
 
-			// Show prepared report status
 			const statusEl = this.wrapper.find("#mismatch-report-status");
 			if (data.status === "Completed" && data.prepared_at) {
 				statusEl.html(
@@ -1097,7 +1671,6 @@ class BNSDashboard {
 				statusEl.html(
 					'<i class="fa fa-spinner fa-spin"></i> ' + __("Report is being prepared...")
 				);
-				// Poll for completion
 				if (data.prepared_report_name) {
 					this._poll_prepared_report(data.prepared_report_name);
 				}
@@ -1134,7 +1707,6 @@ class BNSDashboard {
 				'<i class="fa fa-spinner fa-spin"></i> ' + __("Report is being prepared...")
 			);
 
-			// Poll for completion
 			if (data.prepared_report_name) {
 				this._poll_prepared_report(data.prepared_report_name);
 			}
@@ -1148,7 +1720,6 @@ class BNSDashboard {
 	_poll_prepared_report(prepared_report_name, attempt = 0) {
 		const self = this;
 		const maxAttempts = 30;
-		// Exponential backoff: 3s, 5s, 8s, 12s, 15s... capped at 15s
 		const delay = Math.min(3000 + attempt * 2000, 15000);
 
 		setTimeout(async function () {
@@ -1162,7 +1733,6 @@ class BNSDashboard {
 
 				if (data.status === "Completed") {
 					frappe.show_alert({ message: __("Transfer mismatch report is ready!"), indicator: "green" });
-					// Refresh transfer mismatch data + summary
 					self.load_transfer_mismatches();
 					self.load_summary();
 				} else if (data.status === "Error") {
@@ -1172,7 +1742,6 @@ class BNSDashboard {
 					);
 					frappe.show_alert({ message: __("Report preparation failed"), indicator: "red" });
 				} else if (attempt < maxAttempts) {
-					// Still queued/started — keep polling
 					self._poll_prepared_report(prepared_report_name, attempt + 1);
 				} else {
 					self.wrapper.find("#mismatch-report-status").html(
@@ -1191,7 +1760,6 @@ class BNSDashboard {
 
 		if (!records || records.length === 0) {
 			if (status !== "Completed") {
-				// No prepared report available — prompt user to run one
 				container.html(
 					'<p class="text-danger mb-0">' +
 					'<i class="fa fa-exclamation-circle"></i> ' +
@@ -1199,7 +1767,6 @@ class BNSDashboard {
 					'</p>'
 				);
 			} else {
-				// Report ran successfully but found zero mismatches
 				container.html('<p class="text-success mb-0">' + __("No internal transfer mismatches found!") + '</p>');
 			}
 			return;
@@ -1218,12 +1785,12 @@ class BNSDashboard {
 			const docType = record.document_type;
 			const docName = record.document_name;
 			const route = docType === "Delivery Note" ? "delivery-note" : "sales-invoice";
-			const linkedRoute = record.linked_document 
+			const linkedRoute = record.linked_document
 				? (docType === "Delivery Note" ? "purchase-receipt" : "purchase-invoice")
 				: null;
 
-			const mismatchBadgeClass = record.mismatch_type === "Missing PR" || record.mismatch_type === "Missing PI" 
-				? "badge-danger" 
+			const mismatchBadgeClass = record.mismatch_type === "Missing PR" || record.mismatch_type === "Missing PI"
+				? "badge-danger"
 				: "badge-warning";
 
 			html += '<tr>';

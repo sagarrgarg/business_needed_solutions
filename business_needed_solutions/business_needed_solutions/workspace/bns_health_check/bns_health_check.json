@@ -1,0 +1,256 @@
+{
+ "charts": [],
+ "content": "[{\"id\":\"hc-header\",\"type\":\"header\",\"data\":{\"text\":\"BNS Health Check\",\"col\":12,\"level\":4}},{\"id\":\"hc-shortcut-dashboard\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"BNS Dashboard\",\"col\":4}},{\"id\":\"hc-shortcut-settings\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"BNS Settings\",\"col\":4}},{\"id\":\"hc-shortcut-branch\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Branch Accounting Settings\",\"col\":4}},{\"id\":\"hc-spacer-1\",\"type\":\"spacer\",\"data\":{\"col\":12}}]",
+ "creation": "2026-04-01 10:00:00.000000",
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "healthcare",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "BNS Health Check",
+ "links": [
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Health Check Dashboard",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "BNS Settings",
+   "link_count": 0,
+   "link_to": "BNS Settings",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "BNS Branch Accounting Settings",
+   "link_count": 0,
+   "link_to": "BNS Branch Accounting Settings",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Accounting Reports",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Party GL",
+   "link_count": 0,
+   "link_to": "Party GL",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Bank GL",
+   "link_count": 0,
+   "link_to": "Bank GL",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Pure Accounts Receivable Summary",
+   "link_count": 0,
+   "link_to": "Pure Accounts Receivable Summary",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Pure Accounts Payable Summary",
+   "link_count": 0,
+   "link_to": "Pure Accounts Payable Summary",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Branch Accounting",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Internal Transfer Accounting Audit",
+   "link_count": 0,
+   "link_to": "Internal Transfer Accounting Audit",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Internal Transfer Receive Mismatch",
+   "link_count": 0,
+   "link_to": "Internal Transfer Receive Mismatch",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Unlinked Customer-Supplier by PAN",
+   "link_count": 0,
+   "link_to": "Unlinked Customer-Supplier by PAN",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Stock Reports",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Outgoing Stock Audit - 1 BNS",
+   "link_count": 0,
+   "link_to": "Outgoing Stock Audit - 1 BNS",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Stock Ledger Negative Episodes",
+   "link_count": 0,
+   "link_to": "Stock Ledger Negative Episodes",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Negative Stock Resolution Report",
+   "link_count": 0,
+   "link_to": "Negative Stock Resolution Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Other Reports",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Expected Sales Person Wise Predicted Transaction Summary",
+   "link_count": 0,
+   "link_to": "Expected Sales Person Wise Predicted Transaction Summary",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Almonds Sorting Report",
+   "link_count": 0,
+   "link_to": "Almonds Sorting Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-04-01 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Business Needed Solutions",
+ "name": "BNS Health Check",
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "restrict_to_domain": "",
+ "roles": [],
+ "sequence_id": 26,
+ "shortcuts": [
+  {
+   "color": "Blue",
+   "doc_view": "",
+   "label": "BNS Dashboard",
+   "link_to": "bns-dashboard",
+   "restrict_to_domain": "",
+   "stats_filter": "",
+   "type": "Page"
+  },
+  {
+   "color": "Grey",
+   "doc_view": "",
+   "label": "BNS Settings",
+   "link_to": "BNS Settings",
+   "restrict_to_domain": "",
+   "stats_filter": "",
+   "type": "DocType"
+  },
+  {
+   "color": "Green",
+   "doc_view": "",
+   "label": "Branch Accounting Settings",
+   "link_to": "BNS Branch Accounting Settings",
+   "restrict_to_domain": "",
+   "stats_filter": "",
+   "type": "DocType"
+  }
+ ],
+ "title": "BNS Health Check"
+}

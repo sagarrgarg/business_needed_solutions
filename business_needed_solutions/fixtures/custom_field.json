@@ -2935,21 +2935,10 @@
  {
   "doctype": "Custom Field",
   "dt": "Purchase Receipt",
-  "fieldname": "bns_purchase_attachments_section",
-  "fieldtype": "Section Break",
-  "label": "Purchase Document Attachments",
-  "insert_after": "subscription_detail",
-  "collapsible": 1,
-  "module": "Business Needed Solutions",
-  "name": "Purchase Receipt-bns_purchase_attachments_section"
- },
- {
-  "doctype": "Custom Field",
-  "dt": "Purchase Receipt",
   "fieldname": "bns_supplier_invoice_attachment",
   "fieldtype": "Attach",
   "label": "Supplier Invoice",
-  "insert_after": "bns_purchase_attachments_section",
+  "insert_after": "supplier_name",
   "module": "Business Needed Solutions",
   "name": "Purchase Receipt-bns_supplier_invoice_attachment",
   "description": "Attach the supplier invoice document."
@@ -2979,21 +2968,10 @@
  {
   "doctype": "Custom Field",
   "dt": "Purchase Invoice",
-  "fieldname": "bns_purchase_attachments_section",
-  "fieldtype": "Section Break",
-  "label": "Purchase Document Attachments",
-  "insert_after": "subscription_section",
-  "collapsible": 1,
-  "module": "Business Needed Solutions",
-  "name": "Purchase Invoice-bns_purchase_attachments_section"
- },
- {
-  "doctype": "Custom Field",
-  "dt": "Purchase Invoice",
   "fieldname": "bns_supplier_invoice_attachment",
   "fieldtype": "Attach",
   "label": "Supplier Invoice",
-  "insert_after": "bns_purchase_attachments_section",
+  "insert_after": "bill_no",
   "module": "Business Needed Solutions",
   "name": "Purchase Invoice-bns_supplier_invoice_attachment",
   "description": "Attach the supplier invoice document."

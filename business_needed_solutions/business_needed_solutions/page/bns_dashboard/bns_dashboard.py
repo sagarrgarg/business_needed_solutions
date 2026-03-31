@@ -917,3 +917,261 @@ def get_prepared_report_status(prepared_report_name):
 		"created_at": str(doc.creation) if doc.creation else None,
 		"completed_at": str(doc.report_end_time) if doc.report_end_time else None,
 	}
+
+
+# =====================================================================
+# Health Check Overview APIs
+# =====================================================================
+
+def _default_company(company=None):
+	"""Resolve company from argument, user default, or global default."""
+	return (
+		company
+		or frappe.defaults.get_user_default("Company")
+		or frappe.db.get_single_value("Global Defaults", "default_company")
+	)
+
+
+@frappe.whitelist()
+def get_health_check_overview(company=None):
+	"""
+	Single API returning all BNS health-check metrics.
+	Minimises round-trips by bundling accounting, branch-accounting,
+	stock, and compliance data in one call.
+
+	Args:
+		company: Optional company; falls back to user/global default.
+
+	Returns:
+		dict with keys: accounting, branch_accounting, stock, compliance, company
+	"""
+	company = _default_company(company)
+	return {
+		"accounting": _get_accounting_metrics(company),
+		"branch_accounting": _get_branch_accounting_metrics(company),
+		"stock": _get_stock_metrics(company),
+		"compliance": _get_compliance_metrics(company),
+		"company": company,
+	}
+
+
+def _get_accounting_metrics(company):
+	"""
+	AR / AP overview sourced from BNS Pure reports (party-link netted)
+	plus a 6-month invoice trend from raw invoices.
+	"""
+	today = frappe.utils.today()
+	report_date = today
+
+	total_receivables = 0
+	total_payables = 0
+	overdue_receivables = 0
+	overdue_payables = 0
+
+	try:
+		from business_needed_solutions.business_needed_solutions.report.pure_accounts_receivable_summary.pure_accounts_receivable_summary import (
+			execute as ar_execute,
+		)
+		from business_needed_solutions.business_needed_solutions.report.pure_accounts_payable_summary.pure_accounts_payable_summary import (
+			execute as ap_execute,
+		)
+
+		base_filters = frappe._dict({
+			"company": company,
+			"report_date": report_date,
+			"ageing_based_on": "Due Date",
+			"range1": 30, "range2": 60, "range3": 90, "range4": 120,
+			"show_gl_balance": 0,
+			"show_future_payments": 0,
+			"show_sales_person": 0,
+		})
+
+		_ar_cols, ar_data = ar_execute(base_filters)
+		for row in ar_data:
+			outstanding = flt(row.get("outstanding", 0))
+			total_receivables += outstanding
+			range1 = flt(row.get("range1", 0))
+			if outstanding > range1:
+				overdue_receivables += outstanding - range1
+
+		_ap_cols, ap_data = ap_execute(frappe._dict(base_filters.copy()))
+		for row in ap_data:
+			outstanding = flt(row.get("outstanding", 0))
+			total_payables += outstanding
+			range1 = flt(row.get("range1", 0))
+			if outstanding > range1:
+				overdue_payables += outstanding - range1
+
+	except Exception:
+		frappe.log_error(title="BNS Dashboard: Pure report fallback")
+		total_receivables = flt(frappe.db.sql(
+			"SELECT COALESCE(SUM(outstanding_amount),0) FROM `tabSales Invoice` "
+			"WHERE docstatus=1 AND company=%s AND outstanding_amount>0", company
+		)[0][0])
+		total_payables = flt(frappe.db.sql(
+			"SELECT COALESCE(SUM(outstanding_amount),0) FROM `tabPurchase Invoice` "
+			"WHERE docstatus=1 AND company=%s AND outstanding_amount>0", company
+		)[0][0])
+		overdue_receivables = flt(frappe.db.sql(
+			"SELECT COALESCE(SUM(outstanding_amount),0) FROM `tabSales Invoice` "
+			"WHERE docstatus=1 AND company=%s AND outstanding_amount>0 AND due_date<%s",
+			(company, today),
+		)[0][0])
+		overdue_payables = flt(frappe.db.sql(
+			"SELECT COALESCE(SUM(outstanding_amount),0) FROM `tabPurchase Invoice` "
+			"WHERE docstatus=1 AND company=%s AND outstanding_amount>0 AND due_date<%s",
+			(company, today),
+		)[0][0])
+
+	six_months_ago = frappe.utils.add_months(today, -6)
+
+	monthly_sales = frappe.db.sql("""
+		SELECT DATE_FORMAT(posting_date, '%%Y-%%m') as month,
+		       COALESCE(SUM(grand_total), 0) as total,
+		       COUNT(*) as count
+		FROM `tabSales Invoice`
+		WHERE docstatus = 1 AND company = %s AND posting_date >= %s
+		GROUP BY DATE_FORMAT(posting_date, '%%Y-%%m')
+		ORDER BY month
+	""", (company, six_months_ago), as_dict=True)
+
+	monthly_purchase = frappe.db.sql("""
+		SELECT DATE_FORMAT(posting_date, '%%Y-%%m') as month,
+		       COALESCE(SUM(grand_total), 0) as total,
+		       COUNT(*) as count
+		FROM `tabPurchase Invoice`
+		WHERE docstatus = 1 AND company = %s AND posting_date >= %s
+		GROUP BY DATE_FORMAT(posting_date, '%%Y-%%m')
+		ORDER BY month
+	""", (company, six_months_ago), as_dict=True)
+
+	return {
+		"total_receivables": flt(total_receivables, 2),
+		"total_payables": flt(total_payables, 2),
+		"overdue_receivables": flt(overdue_receivables, 2),
+		"overdue_payables": flt(overdue_payables, 2),
+		"monthly_sales": monthly_sales,
+		"monthly_purchase": monthly_purchase,
+	}
+
+
+def _get_branch_accounting_metrics(company):
+	"""Internal-transfer completion rates and repost health."""
+	dns_without_pr = frappe.db.sql(
+		"SELECT COUNT(*) FROM `tabDelivery Note` "
+		"WHERE docstatus=1 AND company=%s AND is_bns_internal_customer=1 "
+		"AND (bns_inter_company_reference IS NULL OR bns_inter_company_reference='')",
+		company,
+	)[0][0] or 0
+
+	sis_without_pi = frappe.db.sql(
+		"SELECT COUNT(*) FROM `tabSales Invoice` "
+		"WHERE docstatus=1 AND company=%s AND is_bns_internal_customer=1 "
+		"AND (bns_inter_company_reference IS NULL OR bns_inter_company_reference='')",
+		company,
+	)[0][0] or 0
+
+	total_internal_dns = frappe.db.sql(
+		"SELECT COUNT(*) FROM `tabDelivery Note` "
+		"WHERE docstatus=1 AND company=%s AND is_bns_internal_customer=1",
+		company,
+	)[0][0] or 0
+
+	total_internal_sis = frappe.db.sql(
+		"SELECT COUNT(*) FROM `tabSales Invoice` "
+		"WHERE docstatus=1 AND company=%s AND is_bns_internal_customer=1",
+		company,
+	)[0][0] or 0
+
+	pending_repost = frappe.db.count("Repost Item Valuation", {
+		"docstatus": 1,
+		"status": ("in", ("Queued", "In Progress")),
+		"company": company,
+	})
+
+	repost_tracking = 0
+	if frappe.db.exists("DocType", "BNS Repost Tracking"):
+		repost_tracking = frappe.db.count("BNS Repost Tracking")
+
+	return {
+		"dns_without_pr": dns_without_pr,
+		"sis_without_pi": sis_without_pi,
+		"total_internal_dns": total_internal_dns,
+		"total_internal_sis": total_internal_sis,
+		"pending_repost": pending_repost,
+		"repost_tracking": repost_tracking,
+	}
+
+
+def _get_stock_metrics(company):
+	"""Negative-stock guards, violations, and reconciliation queue."""
+	guarded_warehouses = frappe.db.count("Warehouse", {
+		"company": company,
+		"bns_disallow_negative_stock": 1,
+		"disabled": 0,
+	})
+
+	total_warehouses = frappe.db.count("Warehouse", {
+		"company": company,
+		"is_group": 0,
+		"disabled": 0,
+	})
+
+	negative_stock_items = frappe.db.sql(
+		"SELECT COUNT(DISTINCT b.item_code) FROM `tabBin` b "
+		"INNER JOIN `tabWarehouse` w ON w.name=b.warehouse "
+		"WHERE w.company=%s AND b.actual_qty<0", company
+	)[0][0] or 0
+
+	negative_stock_warehouses = frappe.db.sql(
+		"SELECT COUNT(DISTINCT b.warehouse) FROM `tabBin` b "
+		"INNER JOIN `tabWarehouse` w ON w.name=b.warehouse "
+		"WHERE w.company=%s AND b.actual_qty<0", company
+	)[0][0] or 0
+
+	draft_reconciliations = frappe.db.count("Stock Reconciliation", {
+		"company": company,
+		"docstatus": 0,
+	})
+
+	return {
+		"guarded_warehouses": guarded_warehouses,
+		"total_warehouses": total_warehouses,
+		"negative_stock_items": negative_stock_items,
+		"negative_stock_warehouses": negative_stock_warehouses,
+		"draft_reconciliations": draft_reconciliations,
+	}
+
+
+def _get_compliance_metrics(company):
+	"""Attachment and supplier-invoice compliance on PR / PI."""
+	pr_without_attachment = frappe.db.sql(
+		"SELECT COUNT(*) FROM `tabPurchase Receipt` "
+		"WHERE docstatus=1 AND company=%s "
+		"AND (bns_supplier_invoice_attachment IS NULL OR bns_supplier_invoice_attachment='') "
+		"AND is_bns_internal_supplier=0", company
+	)[0][0] or 0
+
+	total_prs = frappe.db.sql(
+		"SELECT COUNT(*) FROM `tabPurchase Receipt` "
+		"WHERE docstatus=1 AND company=%s AND is_bns_internal_supplier=0", company
+	)[0][0] or 0
+
+	pi_without_attachment = frappe.db.sql(
+		"SELECT COUNT(*) FROM `tabPurchase Invoice` "
+		"WHERE docstatus=1 AND company=%s "
+		"AND (bns_supplier_invoice_attachment IS NULL OR bns_supplier_invoice_attachment='') "
+		"AND is_bns_internal_supplier=0", company
+	)[0][0] or 0
+
+	total_pis = frappe.db.sql(
+		"SELECT COUNT(*) FROM `tabPurchase Invoice` "
+		"WHERE docstatus=1 AND company=%s AND is_bns_internal_supplier=0", company
+	)[0][0] or 0
+
+	return {
+		"pr_without_attachment": pr_without_attachment,
+		"total_prs": total_prs,
+		"pi_without_attachment": pi_without_attachment,
+		"total_pis": total_pis,
+	}
