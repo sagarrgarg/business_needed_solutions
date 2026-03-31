@@ -33,6 +33,9 @@ def validate_purchase_attachments(doc, method: Optional[str] = None) -> None:
     if not _is_attachment_validation_enabled():
         return
 
+    if doc.get("is_return"):
+        return
+
     if doc.doctype == "Purchase Receipt":
         _require_supplier_invoice(doc)
         if _is_ewaybill_required(doc):
@@ -66,7 +69,7 @@ def _require_supplier_invoice(doc) -> None:
         frappe.throw(
             _(
                 "Supplier Invoice attachment is mandatory to submit {0} {1}. "
-                "Please attach the supplier invoice in the 'Purchase Document Attachments' section."
+                "Please attach the supplier invoice."
             ).format(bold(doc.doctype), bold(doc.name)),
             title=_("Supplier Invoice Required"),
         )
@@ -119,7 +122,7 @@ def _require_ewaybill(doc) -> None:
             _(
                 "e-Waybill attachment is mandatory to submit {0} {1} "
                 "(net total exceeds the e-Waybill threshold). "
-                "Please attach the e-Waybill in the 'Purchase Document Attachments' section."
+                "Please attach the e-Waybill."
             ).format(bold(doc.doctype), bold(doc.name)),
             title=_("e-Waybill Required"),
         )
