@@ -3019,5 +3019,18 @@
   "module": "Business Needed Solutions",
   "name": "Purchase Invoice-bns_builty_attachment",
   "description": "Optional: Attach the transport builty or lorry receipt."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Supplier",
+  "fieldname": "bns_msme_certificate",
+  "fieldtype": "Attach",
+  "label": "MSME Certificate",
+  "insert_after": "custom_contract_done",
+  "module": "Business Needed Solutions",
+  "name": "Supplier-bns_msme_certificate",
+  "depends_on": "eval:doc.custom_msme_registered == 'Yes'",
+  "mandatory_depends_on": "eval:doc.custom_msme_registered == 'Yes'",
+  "description": "Attach the supplier's MSME / Udyam registration certificate."
  }
 ]

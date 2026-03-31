@@ -83,7 +83,8 @@ doctype_list_js = {
     "Delivery Note" : "public/js/delivery_note_list.js",
     "Purchase Receipt" : "public/js/purchase_receipt_list.js",
     "Sales Invoice" : "public/js/sales_invoice_list.js",
-    "Purchase Invoice" : "public/js/purchase_invoice_list.js"
+    "Purchase Invoice" : "public/js/purchase_invoice_list.js",
+    "Supplier" : "public/js/supplier_list.js"
 }
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}

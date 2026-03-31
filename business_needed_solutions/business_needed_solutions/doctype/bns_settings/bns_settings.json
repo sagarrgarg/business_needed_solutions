@@ -56,6 +56,11 @@
   "secondary_rate_display",
   "secondary_rate_field",
 
+  "tab_break_compliance",
+  "kyv_section",
+  "know_your_vendor_form",
+  "kyv_description_html",
+
   "tab_break_accounts"
  ],
  "fields": [
@@ -321,6 +326,27 @@
    "label": "Secondary Rate Field",
    "mandatory_depends_on": "secondary_rate_display",
    "options": "print_uom\nweight_uom"
+  },
+  {
+   "fieldname": "tab_break_compliance",
+   "fieldtype": "Tab Break",
+   "label": "Compliance"
+  },
+  {
+   "fieldname": "kyv_section",
+   "fieldtype": "Section Break",
+   "label": "Know Your Vendor (KYV)"
+  },
+  {
+   "fieldname": "know_your_vendor_form",
+   "fieldtype": "Attach",
+   "label": "Know Your Vendor Form Template",
+   "description": "Upload the blank KYV form template. Suppliers can download this from the Supplier list view."
+  },
+  {
+   "fieldname": "kyv_description_html",
+   "fieldtype": "HTML",
+   "options": "<p class=\"text-muted\">Upload the blank Know Your Vendor (KYV) form here. A <b>Download KYV Form</b> button will appear on the Supplier list view for users to download this template.</p>"
   },
   {
    "fieldname": "tab_break_accounts",
