@@ -172,11 +172,19 @@ def _get_bns_transfer_rate_for_pr_sle(sle) -> float:
     )
     if not pr or pr.docstatus != 1:
         return 0.0
-    if not is_after_internal_validation_cutoff(pr.get("posting_date")):
-        return 0.0
     source_ref = (pr.get("bns_inter_company_reference") or "").strip()
     if not source_ref:
         return 0.0
+
+    source_posting_date = None
+    for dt in ("Delivery Note", "Sales Invoice"):
+        sd = frappe.db.get_value(dt, source_ref, "posting_date")
+        if sd:
+            source_posting_date = sd
+            break
+    if not is_after_accounting_rewrite_cutoff(source_posting_date or pr.get("posting_date")):
+        return 0.0
+
     is_dn_linked = bool(pr.get("is_bns_internal_supplier") and frappe.db.exists("Delivery Note", source_ref))
     is_si_linked = frappe.db.exists("Sales Invoice", source_ref)
     if not (is_dn_linked or is_si_linked):
@@ -235,12 +243,13 @@ def _get_bns_transfer_rate_for_pi_sle(sle) -> float:
         return 0.0
     if not cint(pi.get("update_stock")):
         return 0.0
-    if not is_after_internal_validation_cutoff(pi.get("posting_date")):
-        return 0.0
     if not pi.get("is_bns_internal_supplier"):
         return 0.0
     source_ref = (pi.get("bns_inter_company_reference") or "").strip()
     if not source_ref or not frappe.db.exists("Sales Invoice", source_ref):
+        return 0.0
+    source_posting_date = frappe.db.get_value("Sales Invoice", source_ref, "posting_date")
+    if not is_after_accounting_rewrite_cutoff(source_posting_date or pi.get("posting_date")):
         return 0.0
 
     return transfer_rate
@@ -448,30 +457,85 @@ def validate_bns_internal_accounting_settings_for_dn_pr(
     )
 
 
-def _get_internal_validation_cutoff_date():
-    """Return configured posting-date cutoff for internal validations, if any."""
-    cutoff = frappe.db.get_single_value(
-        "BNS Branch Accounting Settings", "internal_validation_cutoff_date"
+def _get_internal_transfer_cutoff_date():
+    """Resolve Internal Transfer cutoff FY to year_start_date, or None if disabled."""
+    fy = frappe.db.get_single_value(
+        "BNS Branch Accounting Settings", "internal_transfer_cutoff_fy"
     )
-    if not cutoff:
+    if not fy:
         return None
-    try:
-        return getdate(cutoff)
-    except Exception:
-        return None
+    start = frappe.db.get_value("Fiscal Year", fy, "year_start_date")
+    return getdate(start) if start else None
 
 
-def is_after_internal_validation_cutoff(posting_date) -> bool:
-    """Return True when posting_date is on/after cutoff, or when no cutoff is set."""
-    cutoff = _get_internal_validation_cutoff_date()
-    if not cutoff:
-        return True
-    if not posting_date:
+def _get_accounting_rewrite_cutoff_date():
+    """Resolve Accounting Rewrite cutoff FY to year_start_date, or None if disabled."""
+    fy = frappe.db.get_single_value(
+        "BNS Branch Accounting Settings", "accounting_rewrite_cutoff_fy"
+    )
+    if not fy:
+        return None
+    start = frappe.db.get_value("Fiscal Year", fy, "year_start_date")
+    return getdate(start) if start else None
+
+
+def is_after_internal_transfer_cutoff(posting_date) -> bool:
+    """True when posting_date >= Internal Transfer cutoff FY start.
+    Returns False when the cutoff FY is empty (phase disabled)."""
+    cutoff = _get_internal_transfer_cutoff_date()
+    if not cutoff or not posting_date:
         return False
     try:
         return getdate(posting_date) >= cutoff
     except Exception:
         return False
+
+
+def is_after_accounting_rewrite_cutoff(posting_date) -> bool:
+    """True when posting_date >= Accounting Rewrite cutoff FY start
+    AND Phase 1 (Internal Transfer) is also active for that date."""
+    if not is_after_internal_transfer_cutoff(posting_date):
+        return False
+    cutoff = _get_accounting_rewrite_cutoff_date()
+    if not cutoff:
+        return False
+    try:
+        return getdate(posting_date) >= cutoff
+    except Exception:
+        return False
+
+
+def _resolve_source_posting_date(doc):
+    """For PR/PI, resolve the source DN/SI posting_date that governs the chain.
+    For DN/SI (source documents themselves), returns their own posting_date."""
+    if doc.doctype in ("Delivery Note", "Sales Invoice"):
+        return doc.get("posting_date")
+
+    ref = (doc.get("bns_inter_company_reference") or "").strip()
+    if not ref:
+        if doc.doctype == "Purchase Receipt":
+            ref = (doc.get("supplier_delivery_note") or "").strip()
+        elif doc.doctype == "Purchase Invoice":
+            ref = (doc.get("bill_no") or "").strip()
+
+    if ref:
+        for dt in ("Delivery Note", "Sales Invoice"):
+            pd = frappe.db.get_value(dt, ref, "posting_date")
+            if pd:
+                return pd
+
+    return doc.get("posting_date")
+
+
+# Deprecated aliases -- kept for backward compatibility with external callers
+def _get_internal_validation_cutoff_date():
+    """Deprecated: use _get_internal_transfer_cutoff_date instead."""
+    return _get_internal_transfer_cutoff_date()
+
+
+def is_after_internal_validation_cutoff(posting_date) -> bool:
+    """Deprecated: use is_after_internal_transfer_cutoff instead."""
+    return is_after_internal_transfer_cutoff(posting_date)
 
 
 def _get_pr_source_link_flags(doc) -> Dict[str, Any]:
@@ -516,24 +580,24 @@ def _resolve_pr_gstin_scope(doc, has_dn_link: bool, has_si_link: bool) -> Option
 
 
 def _is_bns_internal_same_gstin_delivery_note(doc) -> bool:
-    """Check DN is in scoped BNS internal same-GSTIN flow."""
+    """Check DN is in scoped BNS internal same-GSTIN flow.
+    Cutoff check is the caller's responsibility."""
     return bool(
         doc
         and doc.doctype == "Delivery Note"
         and doc.docstatus == 1
-        and is_after_internal_validation_cutoff(doc.get("posting_date"))
         and is_bns_internal_customer(doc)
         and (doc.get("billing_address_gstin") or "") == (doc.get("company_gstin") or "")
     )
 
 
 def _is_bns_internal_delivery_note(doc) -> bool:
-    """Check DN is in scoped BNS internal flow (same/different GSTIN)."""
+    """Check DN is in scoped BNS internal flow (same/different GSTIN).
+    Cutoff check is the caller's responsibility."""
     return bool(
         doc
         and doc.doctype == "Delivery Note"
         and doc.docstatus == 1
-        and is_after_internal_validation_cutoff(doc.get("posting_date"))
         and is_bns_internal_customer(doc)
     )
 
@@ -644,13 +708,13 @@ def _get_linked_delivery_note_for_pr(doc) -> Optional[str]:
 
 
 def _is_bns_internal_same_gstin_purchase_receipt(doc) -> bool:
-    """Check PR is in scoped BNS internal same-GSTIN DN->PR flow."""
+    """Check PR is in scoped BNS internal same-GSTIN DN->PR flow.
+    Cutoff check is the caller's responsibility."""
     if not (
         doc
         and doc.doctype == "Purchase Receipt"
         and doc.docstatus == 1
         and is_bns_internal_supplier(doc)
-        and is_after_internal_validation_cutoff(doc.get("posting_date"))
     ):
         return False
 
@@ -664,12 +728,12 @@ def _is_bns_internal_same_gstin_purchase_receipt(doc) -> bool:
 
 
 def _is_bns_internal_si_linked_purchase_receipt(doc) -> bool:
-    """Check PR is in scoped SI->PR transfer flow (different GSTIN style)."""
+    """Check PR is in scoped SI->PR transfer flow (different GSTIN style).
+    Cutoff check is the caller's responsibility."""
     if not (
         doc
         and doc.doctype == "Purchase Receipt"
         and doc.docstatus == 1
-        and is_after_internal_validation_cutoff(doc.get("posting_date"))
     ):
         return False
 
@@ -678,14 +742,14 @@ def _is_bns_internal_si_linked_purchase_receipt(doc) -> bool:
 
 
 def _is_bns_internal_different_gstin_purchase_invoice(doc) -> bool:
-    """Check PI is in scoped BNS internal different-GSTIN SI->PI flow."""
+    """Check PI is in scoped BNS internal different-GSTIN SI->PI flow.
+    Cutoff check is the caller's responsibility."""
     if not (
         doc
         and doc.doctype == "Purchase Invoice"
         and doc.docstatus == 1
         and is_bns_internal_supplier(doc)
         and cint(doc.get("update_stock"))
-        and is_after_internal_validation_cutoff(doc.get("posting_date"))
     ):
         return False
     source_ref = (doc.get("bns_inter_company_reference") or "").strip()
@@ -718,8 +782,7 @@ def validate_internal_purchase_receipt_linkage(doc, method: Optional[str] = None
     source_ref = (doc.get("bns_inter_company_reference") or "").strip()
     if not is_bns_internal_supplier(doc) and not source_ref:
         return
-    # Hard lock PRs that carry BNS source reference, regardless of cutoff.
-    if not is_after_internal_validation_cutoff(doc.get("posting_date")) and not source_ref:
+    if not is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc)) and not source_ref:
         return
 
     link_flags = _get_pr_source_link_flags(doc)
@@ -926,7 +989,7 @@ def validate_internal_purchase_invoice_linkage(doc, method: Optional[str] = None
         return
     if not is_bns_internal_supplier(doc):
         return
-    if not is_after_internal_validation_cutoff(doc.get("posting_date")):
+    if not is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc)):
         return
 
     company_gstin = (doc.get("company_gstin") or "").strip()
@@ -980,7 +1043,7 @@ def validate_internal_purchase_invoice_transfer_rate(doc, method: Optional[str] 
         return
     if not is_bns_internal_supplier(doc):
         return
-    if not is_after_internal_validation_cutoff(doc.get("posting_date")):
+    if not is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc)):
         return
 
     source_ref = (doc.get("bns_inter_company_reference") or "").strip()
@@ -1225,7 +1288,7 @@ def validate_internal_sales_invoice_linkage(doc, method: Optional[str] = None) -
         return
     if not is_bns_internal_customer(doc):
         return
-    if not is_after_internal_validation_cutoff(doc.get("posting_date")):
+    if not is_after_internal_transfer_cutoff(doc.get("posting_date")):
         return
 
     company_gstin = (doc.get("company_gstin") or "").strip()
@@ -1510,6 +1573,8 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     """Rewrite DN GL entries into BNS internal branch-accounting pattern."""
     if not _is_bns_internal_delivery_note(doc):
         return gl_entries
+    if not is_after_accounting_rewrite_cutoff(doc.get("posting_date")):
+        return gl_entries
 
     settings = _get_bns_branch_accounting_accounts()
     if not settings:
@@ -1579,6 +1644,8 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     is_si_linked_scope = _is_bns_internal_si_linked_purchase_receipt(doc)
     if not (is_dn_same_gstin_scope or is_si_linked_scope):
         return gl_entries
+    if not is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(doc)):
+        return gl_entries
 
     settings = _get_bns_branch_accounting_accounts()
     if not settings:
@@ -1646,6 +1713,8 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     if not (doc and doc.doctype == "Purchase Invoice" and doc.docstatus == 1):
         return gl_entries
     if not _is_bns_internal_purchase_invoice_from_si(doc):
+        return gl_entries
+    if not is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(doc)):
         return gl_entries
 
     settings = _get_bns_branch_accounting_accounts()
@@ -1819,7 +1888,7 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     """Rewrite SI GL entries into BNS internal different-GSTIN pattern."""
     if not _is_bns_internal_different_gstin_sales_invoice(doc):
         return gl_entries
-    if not is_after_internal_validation_cutoff(doc.get("posting_date")):
+    if not is_after_accounting_rewrite_cutoff(doc.get("posting_date")):
         return gl_entries
 
     settings = _get_bns_branch_accounting_accounts()
@@ -2062,7 +2131,9 @@ def _run_bns_gl_repost_correction(doc, force_override: bool = False) -> None:
             continue
         voucher_doc = frappe.get_doc(voucher_type, voucher_no)
         if voucher_type == "Delivery Note":
-            is_scope = _is_bns_internal_delivery_note(voucher_doc)
+            is_scope = _is_bns_internal_delivery_note(voucher_doc) and is_after_accounting_rewrite_cutoff(
+                voucher_doc.get("posting_date")
+            )
             # region agent log
             _bns_debug_log(
                 "H2",
@@ -2073,9 +2144,10 @@ def _run_bns_gl_repost_correction(doc, force_override: bool = False) -> None:
             # endregion
             if is_scope:
                 filtered_vouchers.append((voucher_type, voucher_no))
-        elif voucher_type == "Purchase Receipt" and _is_bns_internal_same_gstin_purchase_receipt(
-            voucher_doc
-        ):
+        elif voucher_type == "Purchase Receipt" and (
+            _is_bns_internal_same_gstin_purchase_receipt(voucher_doc)
+            or _is_bns_internal_si_linked_purchase_receipt(voucher_doc)
+        ) and is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(voucher_doc)):
             filtered_vouchers.append((voucher_type, voucher_no))
     # region agent log
     _bns_debug_log(
@@ -2554,7 +2626,9 @@ def _run_bns_gl_repost_accounting_correction(repost_doc_name: str, force_overrid
             continue
         doc = frappe.get_doc(voucher_type, voucher_no)
         if voucher_type == "Delivery Note":
-            is_scope = _is_bns_internal_delivery_note(doc)
+            is_scope = _is_bns_internal_delivery_note(doc) and is_after_accounting_rewrite_cutoff(
+                doc.get("posting_date")
+            )
             # region agent log
             _bns_debug_log(
                 "H2",
@@ -2569,7 +2643,12 @@ def _run_bns_gl_repost_accounting_correction(repost_doc_name: str, force_overrid
             # endregion
             if is_scope:
                 filtered.append((voucher_type, voucher_no))
-        elif voucher_type == "Purchase Receipt" and _is_bns_internal_same_gstin_purchase_receipt(doc):
+        elif voucher_type == "Purchase Receipt" and (
+            _is_bns_internal_same_gstin_purchase_receipt(doc)
+            or _is_bns_internal_si_linked_purchase_receipt(doc)
+        ) and is_after_accounting_rewrite_cutoff(
+            _resolve_source_posting_date(doc)
+        ):
             filtered.append((voucher_type, voucher_no))
 
     # region agent log
@@ -2618,8 +2697,10 @@ def _run_bns_gl_repost_accounting_correction(repost_doc_name: str, force_overrid
                 voucher_doc = frappe.get_doc(voucher_type, voucher_no)
             except Exception:
                 continue
-            if _is_bns_internal_delivery_note(voucher_doc) and not _is_same_gstin_internal_delivery_note(
-                voucher_doc
+            if (
+                _is_bns_internal_delivery_note(voucher_doc)
+                and is_after_accounting_rewrite_cutoff(voucher_doc.get("posting_date"))
+                and not _is_same_gstin_internal_delivery_note(voucher_doc)
             ):
                 force_mode = True
                 break
@@ -3487,6 +3568,12 @@ def make_bns_internal_purchase_receipt(source_name: str, target_doc: Optional[Di
         frappe.lock_doc("Delivery Note", source_name)
         dn = frappe.get_doc("Delivery Note", source_name)
 
+        if not is_after_internal_transfer_cutoff(dn.get("posting_date")):
+            frappe.throw(
+                _("Cannot create internal Purchase Receipt: source Delivery Note {0} is before the Internal Transfer Cutoff.").format(source_name),
+                title=_("Cutoff Date Restriction"),
+            )
+
         _validate_internal_delivery_note(dn)
 
         existing_pr = _get_existing_pr_for_source(dn.name)
@@ -3948,39 +4035,35 @@ def update_delivery_note_status_for_bns_internal(doc, method: Optional[str] = No
     """
     if doc.docstatus != 1:
         return
-    
-    # Guard: prevent infinite loops - if already updated, skip
+    if not is_after_internal_transfer_cutoff(doc.get("posting_date")):
+        return
+
     if doc.status == "BNS Internally Transferred":
         return
-    
-    # Check if customer is BNS internal
+
     if not is_bns_internal_customer(doc):
         return
 
     try:
-        # Check GSTIN match
         billing_address_gstin = getattr(doc, 'billing_address_gstin', None)
         company_gstin = getattr(doc, 'company_gstin', None)
-        
+
         if billing_address_gstin is not None and company_gstin is not None:
             if billing_address_gstin == company_gstin:
-                # SAME GSTIN - Set as internal transfer
                 per_billed = 100
                 doc.db_set("status", "BNS Internally Transferred", update_modified=False)
                 doc.db_set("per_billed", per_billed, update_modified=False)
                 doc.db_set("is_bns_internal_customer", 1, update_modified=False)
-                # Ensure GL gets rebuilt with BNS rewrite even if initial submit happened
-                # before patch load in this process.
-                _trigger_bns_internal_gl_repost(doc, source="dn_on_submit_status_update")
+                if is_after_accounting_rewrite_cutoff(doc.get("posting_date")):
+                    _trigger_bns_internal_gl_repost(doc, source="dn_on_submit_status_update")
                 frappe.clear_cache(doctype="Delivery Note")
                 logger.info(f"Updated Delivery Note {doc.name} status to BNS Internally Transferred (same GSTIN)")
             else:
-                # DIFFERENT GSTIN - Set as To Bill
                 doc.db_set("status", "To Bill", update_modified=False)
                 doc.db_set("is_bns_internal_customer", 0, update_modified=False)
                 frappe.clear_cache(doctype="Delivery Note")
                 logger.info(f"Updated Delivery Note {doc.name} status to To Bill (different GSTIN)")
-        
+
     except Exception as e:
         logger.error(f"Error updating Delivery Note status: {str(e)}")
         raise
@@ -4005,15 +4088,11 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
     """
     if doc.docstatus != 1:
         return
-    
-    # Guard: prevent infinite loops - if already updated, skip
+
     if doc.status == "BNS Internally Transferred":
         return
 
     try:
-        # Resolve source with canonical priority:
-        # 1) bns_inter_company_reference (authoritative)
-        # 2) supplier_delivery_note (legacy fallback only when canonical is empty)
         is_bns_internal = is_bns_internal_supplier(doc)
         source_ref = (doc.get("bns_inter_company_reference") or "").strip()
         legacy_ref = (doc.get("supplier_delivery_note") or "").strip()
@@ -4034,45 +4113,52 @@ def update_purchase_receipt_status_for_bns_internal(doc, method: Optional[str] =
             elif frappe.db.exists("Sales Invoice", legacy_ref):
                 source_si = legacy_ref
                 is_bns_internal = False
-        
-        # Update is_bns_internal_supplier field
+
+        effective_date = None
+        source_name = source_dn or source_si
+        if source_name:
+            for dt in ("Delivery Note", "Sales Invoice"):
+                sd = frappe.db.get_value(dt, source_name, "posting_date")
+                if sd:
+                    effective_date = sd
+                    break
+        if not effective_date:
+            effective_date = doc.get("posting_date")
+
+        if not is_after_internal_transfer_cutoff(effective_date):
+            return
+
         if is_bns_internal != doc.get("is_bns_internal_supplier"):
             doc.is_bns_internal_supplier = is_bns_internal
-        
+
         if is_bns_internal:
-            # TRANSFER UNDER SAME GSTIN - from DN
             per_billed = 100
             doc.db_set("status", "BNS Internally Transferred", update_modified=False)
             doc.db_set("per_billed", per_billed, update_modified=False)
             doc.db_set("is_bns_internal_supplier", 1, update_modified=False)
-            # Keep item-level BNS transfer rates aligned with DN item incoming_rate.
-            if source_dn:
-                _sync_pr_item_transfer_rate_from_dn(source_dn, pr_name=doc.name)
-                _mirror_pr_item_valuation_from_transfer_rate(doc.name)
-                _sync_pr_sle_from_transfer_rate(doc.name)
-            # Ensure GL gets rebuilt with BNS rewrite even if initial submit happened
-            # before patch load in this process.
-            _trigger_bns_internal_gl_repost(doc, source="pr_on_submit_status_update")
-            # Ensure Delivery Note is updated with linked PR (bidirectional link)
             if source_dn:
                 _update_delivery_note_reference(source_dn, doc.name)
                 frappe.clear_cache(doctype="Delivery Note")
+            if is_after_accounting_rewrite_cutoff(effective_date):
+                if source_dn:
+                    _sync_pr_item_transfer_rate_from_dn(source_dn, pr_name=doc.name)
+                    _mirror_pr_item_valuation_from_transfer_rate(doc.name)
+                    _sync_pr_sle_from_transfer_rate(doc.name)
+                _trigger_bns_internal_gl_repost(doc, source="pr_on_submit_status_update")
             frappe.clear_cache(doctype="Purchase Receipt")
             logger.info(f"Updated Purchase Receipt {doc.name} status to BNS Internally Transferred (from DN)")
         else:
-            # TRANSFER UNDER DIFFERENT GSTIN - from SI
-            # Status should remain "To Bill" (default), but ensure it's set
             if doc.status != "To Bill":
                 doc.db_set("status", "To Bill", update_modified=False)
             doc.db_set("is_bns_internal_supplier", 0, update_modified=False)
-            if source_si:
+            if source_si and is_after_accounting_rewrite_cutoff(effective_date):
                 _sync_pr_item_transfer_rate_from_si(source_si, pr_name=doc.name)
                 _mirror_pr_item_valuation_from_transfer_rate(doc.name)
                 _sync_pr_sle_from_transfer_rate(doc.name)
                 _trigger_bns_internal_gl_repost(doc, source="pr_si_on_submit_transfer_rate_sync")
             frappe.clear_cache(doctype="Purchase Receipt")
             logger.info(f"Updated Purchase Receipt {doc.name} status to To Bill (from SI)")
-        
+
     except Exception as e:
         logger.error(f"Error updating Purchase Receipt status: {str(e)}")
         raise
@@ -5127,6 +5213,12 @@ def make_bns_internal_purchase_invoice(source_name: str, target_doc: Optional[Di
         frappe.lock_doc("Sales Invoice", source_name)
         si = frappe.get_doc("Sales Invoice", source_name)
 
+        if not is_after_internal_transfer_cutoff(si.get("posting_date")):
+            frappe.throw(
+                _("Cannot create internal Purchase Invoice: source Sales Invoice {0} is before the Internal Transfer Cutoff.").format(source_name),
+                title=_("Cutoff Date Restriction"),
+            )
+
         _validate_internal_sales_invoice(si)
 
         existing_pi = _get_existing_pi_for_source(si.name)
@@ -5440,17 +5532,20 @@ def make_bns_internal_purchase_receipt_from_si(source_name: str, target_doc: Opt
     """
     try:
         si = frappe.get_doc("Sales Invoice", source_name)
-        
-        # Check if SI is made from Delivery Note (check items for delivery_note reference)
+
+        if not is_after_internal_transfer_cutoff(si.get("posting_date")):
+            frappe.throw(
+                _("Cannot create internal Purchase Receipt: source Sales Invoice {0} is before the Internal Transfer Cutoff.").format(source_name),
+                title=_("Cutoff Date Restriction"),
+            )
+
         has_dn_reference = False
         if si.items:
             has_dn_reference = any(item.get("delivery_note") for item in si.items if item.get("delivery_note"))
-        
-        # Validate sales invoice for internal customer
-        # Only require update_stock if SI is NOT made from DN
+
         if not has_dn_reference and not si.get("update_stock"):
             raise BNSValidationError(_("Sales Invoice must have 'Update Stock' enabled to create Purchase Receipt, or must be created from a Delivery Note"))
-        
+
         _validate_internal_sales_invoice(si)
 
         existing_pr = _get_existing_pr_for_source(si.name)
@@ -5679,16 +5774,17 @@ def update_sales_invoice_status_for_bns_internal(doc, method: Optional[str] = No
     """
     Update the status of a Sales Invoice to "BNS Internally Transferred" 
     when submitted for a BNS internal customer with different GST.
-    
+
     Args:
         doc: The Sales Invoice document
         method (Optional[str]): The method being called
     """
-    # Guard: prevent infinite loops - if already updated, skip
+    if not is_after_internal_transfer_cutoff(doc.get("posting_date")):
+        return
+
     if doc.status == "BNS Internally Transferred":
         return
-    
-    # Ensure is_bns_internal_customer is set from Customer if not already set
+
     if not doc.get("is_bns_internal_customer") and doc.customer:
         customer_internal = frappe.db.get_value("Customer", doc.customer, "is_bns_internal_customer")
         if customer_internal:
@@ -5740,99 +5836,84 @@ def update_sales_invoice_status_for_bns_internal(doc, method: Optional[str] = No
 
 def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] = None) -> None:
     """
-    Update the status of a Purchase Invoice to "BNS Internally Transferred" 
+    Update the status of a Purchase Invoice to "BNS Internally Transferred"
     when submitted for a BNS internal supplier with inter company reference.
-    
+
     This handles:
     1. PI created directly from SI (via bns_inter_company_reference)
     2. PI created from PR that was created from SI (via PR.bns_inter_company_reference)
-    
+
     Args:
         doc: The Purchase Invoice document
         method (Optional[str]): The method being called
     """
     if doc.docstatus != 1:
         return
-    
-    # Guard: prevent infinite loops - if already updated, skip
+
     if doc.status == "BNS Internally Transferred":
         return
-    
-    # Check if it's a BNS internal transfer
+
     is_bns_internal = is_bns_internal_supplier(doc)
     is_from_si = False
 
     if is_bns_internal:
         is_from_si = True
     elif doc.bns_inter_company_reference:
-        # Directly created from Sales Invoice (using bns_inter_company_reference)
-        # Check if bns_inter_company_reference points to a Sales Invoice
         if frappe.db.exists("Sales Invoice", doc.bns_inter_company_reference):
             is_from_si = True
     elif doc.items:
-        # Check if PI is created from PR that was created from SI
-        # Get Purchase Receipt references from items
         pr_names = set()
         for item in doc.items:
             if item.get("purchase_receipt"):
                 pr_names.add(item.purchase_receipt)
-        
-        # Check if any PR was created from SI
         if pr_names:
             for pr_name in pr_names:
                 pr_bns_ref = frappe.db.get_value("Purchase Receipt", pr_name, "bns_inter_company_reference")
-
                 if pr_bns_ref and frappe.db.exists("Sales Invoice", pr_bns_ref):
                     is_from_si = True
                     break
-    
+
     if not is_from_si:
         return
-    
+
+    effective_date = _resolve_source_posting_date(doc)
+    if not is_after_internal_transfer_cutoff(effective_date):
+        return
+
     try:
-        # Ensure is_bns_internal_supplier is set
         if not doc.get("is_bns_internal_supplier"):
             doc.is_bns_internal_supplier = 1
-        
-        # Do not set standard represents_company on PI; use BNS fields only.
-        
-        # Update status immediately on document and in database using db_set
+
         doc.status = "BNS Internally Transferred"
         doc.db_set("status", "BNS Internally Transferred", update_modified=False)
         doc.db_set("is_bns_internal_supplier", 1, update_modified=False)
-        
-        # Set bidirectional bns_inter_company_reference
+
         si_name = None
-        
-        # Check bns_inter_company_reference first
         if doc.bns_inter_company_reference and frappe.db.exists("Sales Invoice", doc.bns_inter_company_reference):
             si_name = doc.bns_inter_company_reference
-        # Check bill_no (supplier_invoice_no) - if it matches an SI name, use it
         elif doc.bill_no and frappe.db.exists("Sales Invoice", {"name": doc.bill_no, "docstatus": 1}):
             si_name = doc.bill_no
-            # Set PI's bns_inter_company_reference if not already set
             if not doc.bns_inter_company_reference:
                 doc.db_set("bns_inter_company_reference", si_name, update_modified=False)
-        # Update SI's bns_inter_company_reference to point back to PI
+
         if si_name:
             si = frappe.get_doc("Sales Invoice", si_name)
             if not si.get("bns_inter_company_reference") or si.bns_inter_company_reference != doc.name:
                 si.db_set("bns_inter_company_reference", doc.name, update_modified=False)
-                # Also ensure SI status is updated if not already
                 if si.status != "BNS Internally Transferred":
                     si.db_set("status", "BNS Internally Transferred", update_modified=False)
                 frappe.clear_cache(doctype="Sales Invoice")
                 logger.info(f"Updated Sales Invoice {si_name} bns_inter_company_reference to {doc.name}")
 
-        if si_name:
+        if si_name and is_after_accounting_rewrite_cutoff(effective_date):
             _sync_pi_item_transfer_rate_from_si(si_name, pi_name=doc.name)
             _mirror_pi_item_valuation_from_transfer_rate(doc.name)
             _trigger_pi_repost_for_transfer_rate(doc.name, source_repost_name=f"pi_submit::{doc.name}")
             _trigger_bns_internal_gl_repost(doc, source="pi_on_submit_transfer_rate_sync")
-        
+
         frappe.clear_cache(doctype="Purchase Invoice")
         logger.info(f"Updated Purchase Invoice {doc.name} status to BNS Internally Transferred")
-        
+
     except Exception as e:
         logger.error(f"Error updating Purchase Invoice status: {str(e)}")
         raise
@@ -6343,14 +6424,18 @@ def convert_purchase_invoice_to_bns_internal(purchase_invoice: str, sales_invoic
         BNSValidationError: If validation fails
     """
     try:
-        # Get Purchase Invoice
         pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
-        
-        # Validate Purchase Invoice is submitted
+
         if pi.docstatus != 1:
             raise BNSValidationError(_("Purchase Invoice must be submitted before converting to BNS Internal"))
-        
-        # Check if supplier is BNS internal
+
+        effective_date = _resolve_source_posting_date(pi)
+        if not is_after_internal_transfer_cutoff(effective_date):
+            frappe.throw(
+                _("Cannot convert Purchase Invoice {0} to BNS Internal: source document is before the Internal Transfer Cutoff.").format(purchase_invoice),
+                title=_("Cutoff Date Restriction"),
+            )
+
         supplier_internal = frappe.db.get_value("Supplier", pi.supplier, "is_bns_internal_supplier")
         if not supplier_internal:
             raise BNSValidationError(_("Supplier {0} is not marked as BNS Internal Supplier").format(pi.supplier))
@@ -6761,25 +6846,26 @@ def convert_purchase_receipt_to_bns_internal(purchase_receipt: str, delivery_not
         BNSValidationError: If validation fails
     """
     try:
-        # Get Purchase Receipt
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
-        
-        # Validate Purchase Receipt is submitted
+
         if pr.docstatus != 1:
             raise BNSValidationError(_("Purchase Receipt must be submitted before converting to BNS Internal"))
-        
-        # Check if supplier_delivery_note exists and is a DN
+
+        effective_date = _resolve_source_posting_date(pr)
+        if not is_after_internal_transfer_cutoff(effective_date):
+            frappe.throw(
+                _("Cannot convert Purchase Receipt {0} to BNS Internal: source document is before the Internal Transfer Cutoff.").format(purchase_receipt),
+                title=_("Cutoff Date Restriction"),
+            )
+
         if not pr.supplier_delivery_note:
             raise BNSValidationError(_("Purchase Receipt must be created from a Delivery Note (supplier_delivery_note is missing)"))
-        
+
         dn_exists = frappe.db.exists("Delivery Note", pr.supplier_delivery_note)
         if not dn_exists:
             raise BNSValidationError(_("Purchase Receipt supplier_delivery_note ({0}) is not a valid Delivery Note").format(pr.supplier_delivery_note))
-        
-        # Get the Delivery Note to validate GSTIN
+
         dn = frappe.get_doc("Delivery Note", pr.supplier_delivery_note)
-        
-        # Validate DN customer is BNS internal
         customer_internal = frappe.db.get_value("Customer", dn.customer, "is_bns_internal_customer")
         if not customer_internal:
             raise BNSValidationError(_("Delivery Note customer {0} is not marked as BNS Internal Customer").format(dn.customer))
@@ -7317,20 +7403,20 @@ def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
         frappe.lock_doc("Purchase Receipt", purchase_receipt)
         dn = frappe.get_doc("Delivery Note", delivery_note)
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
-        
-        # Validate both documents are submitted
+
         if dn.docstatus != 1:
             raise BNSValidationError(_("Delivery Note must be submitted before linking"))
-        
         if pr.docstatus != 1:
             raise BNSValidationError(_("Purchase Receipt must be submitted before linking"))
-        
-        # Validate PR's supplier_delivery_note matches DN name (only if supplier_delivery_note is set)
-        # Allow linking even if supplier_delivery_note is empty or doesn't match
+
+        if not is_after_internal_transfer_cutoff(dn.get("posting_date")):
+            frappe.throw(
+                _("Cannot link: Delivery Note {0} is before the Internal Transfer Cutoff.").format(delivery_note),
+                title=_("Cutoff Date Restriction"),
+            )
+
         if pr.supplier_delivery_note and pr.supplier_delivery_note != dn.name:
-            # If supplier_delivery_note is set but doesn't match, warn but allow
             logger.warning(f"Purchase Receipt {purchase_receipt} has supplier_delivery_note {pr.supplier_delivery_note} but linking to {delivery_note}")
-            # Don't raise error - allow manual linking
         
         # Validate GSTIN match (same GSTIN only)
         dn_billing_gstin = getattr(dn, 'billing_address_gstin', None)
@@ -7587,7 +7673,12 @@ def link_si_pr(sales_invoice: str, purchase_receipt: str) -> Dict:
         if pr.docstatus != 1:
             raise BNSValidationError(_("Purchase Receipt must be submitted before linking"))
 
-        # Validate different GSTIN only (SI->PR flow)
+        if not is_after_internal_transfer_cutoff(si.get("posting_date")):
+            frappe.throw(
+                _("Cannot link: Sales Invoice {0} is before the Internal Transfer Cutoff.").format(sales_invoice),
+                title=_("Cutoff Date Restriction"),
+            )
+
         si_billing_gstin = getattr(si, 'billing_address_gstin', None)
         si_company_gstin = getattr(si, 'company_gstin', None)
         if not si_billing_gstin or not si_company_gstin:
@@ -7720,13 +7811,17 @@ def link_si_pi(sales_invoice: str, purchase_invoice: str) -> Dict:
         frappe.lock_doc("Purchase Invoice", purchase_invoice)
         si = frappe.get_doc("Sales Invoice", sales_invoice)
         pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
-        
-        # Validate both documents are submitted
+
         if si.docstatus != 1:
             raise BNSValidationError(_("Sales Invoice must be submitted before linking"))
-        
         if pi.docstatus != 1:
             raise BNSValidationError(_("Purchase Invoice must be submitted before linking"))
+
+        if not is_after_internal_transfer_cutoff(si.get("posting_date")):
+            frappe.throw(
+                _("Cannot link: Sales Invoice {0} is before the Internal Transfer Cutoff.").format(sales_invoice),
+                title=_("Cutoff Date Restriction"),
+            )
         
         # Validate PI's bill_no matches SI name (only if bill_no is set)
         # Allow linking even if bill_no is empty or doesn't match
@@ -9351,11 +9446,9 @@ def verify_and_repost_internal_transfers(
         allow_cross_fy_repost = allow_cross_fy_repost.lower() in ("true", "1", "yes")
 
     if not cutoff_date:
-        cutoff_date = frappe.db.get_single_value(
-            "BNS Branch Accounting Settings", "internal_validation_cutoff_date"
-        )
+        cutoff_date = _get_internal_transfer_cutoff_date()
     if not cutoff_date:
-        frappe.throw(_("No cutoff date provided and none configured in BNS Branch Accounting Settings."))
+        frappe.throw(_("No cutoff date provided and no Internal Transfer Cutoff configured in BNS Branch Accounting Settings."))
 
     cutoff_date = getdate(cutoff_date)
 

@@ -49,7 +49,7 @@ BNS extends ERPNext with:
 - **Impacted:** DN, PR, SI, PI (client JS + doc_events).
 - **Credit Note → Debit Note:** SI credit notes (is_return=1) can be converted to PI debit notes via `make_bns_internal_purchase_invoice`. The function detects `is_return` on the source SI, sets `is_return=1` on the target PI, and resolves `return_against` by looking up the original PI linked to `si.return_against`. Item mapping uses `qty != 0` to handle negative quantities.
 - **Credit Note / Debit Note GL Rewrite:** `_rewrite_bns_internal_si_gl_entries` and `_rewrite_bns_internal_pi_gl_entries` are return-aware. When `is_return=1`, amounts are `abs()`-normalized and debit/credit sides are swapped: SI credit note puts Internal Branch Debtor on credit side and Internal Sales Transfer on debit side; PI debit note puts Internal Branch Creditor on debit side and Internal Purchase Transfer on credit side. Tax legs and stock valuation legs are similarly reversed.
-- **Settings:** BNS Branch Accounting Settings – `stock_in_transit_account`, `internal_sales_transfer_account`, `internal_purchase_transfer_account`, `internal_branch_debtor_account`, `internal_branch_creditor_account`, `enable_internal_dn_ewaybill`, `internal_validation_cutoff_date`.
+- **Settings:** BNS Branch Accounting Settings – `stock_in_transit_account`, `internal_sales_transfer_account`, `internal_purchase_transfer_account`, `internal_branch_debtor_account`, `internal_branch_creditor_account`, `enable_internal_dn_ewaybill`, `internal_transfer_cutoff_fy` (Link to Fiscal Year), `accounting_rewrite_cutoff_fy` (Link to Fiscal Year). Old `internal_validation_cutoff_date` is hidden/deprecated.
 - **PR/PI standard fields:** BNS does **not** set standard ERPNext fields `represents_company` or `inter_company_reference` / `inter_company_invoice_reference` on Purchase Receipt or Purchase Invoice. Only BNS fields are used: `bns_inter_company_reference`, `supplier_delivery_note`, `is_bns_internal_supplier`, etc. Representing-company logic uses Customer/Supplier `bns_represents_company` (with fallback read of `represents_company` for validation only).
 
 ### 3.2a Bulk Linkage Verification & Repost (`bns_branch_accounting/utils.py`)
@@ -213,7 +213,7 @@ BNS extends ERPNext with:
 - **Filters:** Company, From Date, To Date, Document Type (optional: DN/SI/PR/PI).
 - **Why:** Provides accounting integrity audit for internal transfers — identifies documents where the GL rewrite was skipped, partially applied, or overwritten by repost. Enables targeted bulk correction.
 - **Impacted:** Report output (read-only for display). Bulk repost actions create Repost Item Valuation entries or rebuild GL entries for flagged documents.
-- **Cutoff:** Respects `internal_validation_cutoff_date` from BNS Branch Accounting Settings as default `from_date`.
+- **Cutoff:** Respects `internal_transfer_cutoff_fy` from BNS Branch Accounting Settings (resolved to `year_start_date`) as default `from_date`.
 
 ### 3.12 Internal Transfer Receive Mismatch Report (`bns_branch_accounting/report/`)
 
@@ -225,7 +225,7 @@ BNS extends ERPNext with:
   - **SI→PR chain detection**: reports mismatches across SI→PR→PI chains in addition to direct SI→PI
 - **Why:** Provides comprehensive visibility into internal transfer linkage health, warehouse routing accuracy, and item-level integrity.
 - **Impacted:** Report output only (read-only). No data modifications.
-- **Cutoff:** Respects `internal_validation_cutoff_date` from BNS Branch Accounting Settings as default `from_date`.
+- **Cutoff:** Respects `internal_transfer_cutoff_fy` from BNS Branch Accounting Settings (resolved to `year_start_date`) as default `from_date`.
 
 ### 3.13 Batch/Serial Number Support in Reports (2026)
 
@@ -239,7 +239,7 @@ BNS extends ERPNext with:
 - **Cross-FY internal transfers:** If a source document (DN/SI) was submitted in the old FY without batch/serial info, but the Item now has `has_batch_no=1` or `has_serial_no=1`, `_duplicate_serial_and_batch_bundle()` logs a warning and skips SBB duplication. The target document (PR/PI) must have its batch/serial populated manually before submission.
 - **Recommended rollout procedure:**
   1. Complete all pending cross-FY internal transfers before enabling batch/serial on items.
-  2. Set `internal_validation_cutoff_date` in BNS Branch Accounting Settings to the new FY start date.
+  2. Set `internal_transfer_cutoff_fy` (and optionally `accounting_rewrite_cutoff_fy`) in BNS Branch Accounting Settings to the target Fiscal Year.
   3. Enable `has_batch_no` / `has_serial_no` on items after the cutoff.
   4. All new-FY transactions will carry batch/serial through the SBB duplication path.
 - **Report guidance:** When running reports with batch segregation across the FY boundary, filter by `from_date >= new FY start` to avoid split-timeline artifacts.
@@ -286,6 +286,36 @@ BNS extends ERPNext with:
 | Empty GSTINs treated as "same GSTIN" | MEDIUM | `_is_same_gstin_internal_delivery_note` now returns `False` when either GSTIN is empty/None, preventing incorrect GL rewrite for non-GST companies. |
 | Unlink doesn't reset status/flags | MEDIUM | `unlink_dn_pr` / `unlink_si_pi` now reset `is_bns_internal_customer`/`is_bns_internal_supplier`, `status`, and `per_billed` after clearing `bns_inter_company_reference`. |
 | link_si_pi hard-blocks re-linking | MEDIUM | Extended `_is_stale_inter_company_ref` to support SI/PI doctypes. Replaced hard-block in `link_si_pi` with stale-ref auto-clear pattern matching `link_dn_pr`. |
+
+### 8c. Two-Phase Cutoff Dates (2026)
+
+Replaced single `internal_validation_cutoff_date` (Date) with two Fiscal Year Link fields:
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `internal_transfer_cutoff_fy` | Link -> Fiscal Year | Phase 1: Status marking, flags, linking, validation, document creation. BNS internal logic applies from this FY's `year_start_date` onward. |
+| `accounting_rewrite_cutoff_fy` | Link -> Fiscal Year | Phase 2: GL entry rewriting, SLE valuation override, transfer rate sync, GL reposting. Requires Phase 1 to be active. |
+
+**Key rules:**
+
+1. **Fiscal Year only**: Users select a Fiscal Year, not a raw date. Cutoff is resolved to `Fiscal Year.year_start_date` at runtime.
+2. **Empty = disabled**: If a cutoff FY is not set, that phase does not fire. Reversal from old behavior where empty = "apply to everything".
+3. **Dependency rule**: Accounting Rewrite cannot be set without Internal Transfer. Accounting FY start cannot precede Transfer FY start. Enforced in `bns_branch_accounting_settings.py:validate()` and at runtime in `is_after_accounting_rewrite_cutoff()`.
+4. **Source document governs the chain**: The first/source document (DN or SI) posting date determines cutoff for the entire chain. If a DN is created before the cutoff, the PR created from it is also treated as pre-cutoff regardless of the PR's own posting date. Implemented via `_resolve_source_posting_date(doc)` helper.
+5. **Mixed on_submit functions**: `update_purchase_receipt_status_for_bns_internal` and `update_purchase_invoice_status_for_bns_internal` mix Phase 1 (status/flags) and Phase 2 (transfer rate sync, GL repost) operations. They use a split gating pattern: top-level Phase 1 guard, then Phase 2 operations individually wrapped in `is_after_accounting_rewrite_cutoff()`.
+6. **Manual repair tools bypass cutoff**: `_force_rebuild_bns_gl_for_voucher` and `bns_debug_internal_gl_scope` intentionally have no cutoff check to allow historical repair.
+7. **Migration**: On first save after upgrade, if both new FY fields are empty and old `internal_validation_cutoff_date` has a value, the settings controller auto-populates both new fields from `frappe.get_fiscal_year(old_date)`.
+
+**Helpers added to `bns_branch_accounting/utils.py`:**
+
+| Helper | Purpose |
+|--------|---------|
+| `_get_internal_transfer_cutoff_date()` | Resolves `internal_transfer_cutoff_fy` to `year_start_date` |
+| `_get_accounting_rewrite_cutoff_date()` | Resolves `accounting_rewrite_cutoff_fy` to `year_start_date` |
+| `is_after_internal_transfer_cutoff(posting_date)` | Phase 1 gate |
+| `is_after_accounting_rewrite_cutoff(posting_date)` | Phase 2 gate (includes Phase 1 check) |
+| `_resolve_source_posting_date(doc)` | Returns source DN/SI posting_date for PR/PI documents |
+| `is_after_internal_validation_cutoff(posting_date)` | Deprecated alias for `is_after_internal_transfer_cutoff` |
 
 ---
 
