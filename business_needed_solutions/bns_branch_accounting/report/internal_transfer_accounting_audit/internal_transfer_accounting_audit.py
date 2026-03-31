@@ -67,24 +67,12 @@ def _get_columns():
 # Cutoff helpers
 # ---------------------------------------------------------------------------
 
-def _get_internal_validation_cutoff_date():
-	"""Read global posting-date cutoff from BNS Branch Accounting Settings."""
-	cutoff = frappe.db.get_single_value(
-		"BNS Branch Accounting Settings", "internal_validation_cutoff_date"
-	)
-	if not cutoff:
-		return None
-	try:
-		return getdate(cutoff)
-	except Exception:
-		return None
-
-
 def _apply_cutoff_filters(filters):
 	"""Apply cutoff as default from_date when user has not provided one."""
 	if filters.get("from_date"):
 		return filters
-	cutoff = _get_internal_validation_cutoff_date()
+	from business_needed_solutions.bns_branch_accounting.utils import _get_internal_transfer_cutoff_date
+	cutoff = _get_internal_transfer_cutoff_date()
 	if cutoff:
 		filters["from_date"] = cutoff
 	return filters

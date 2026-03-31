@@ -15,6 +15,10 @@
   "internal_branch_creditor_account",
   "force_bns_internal_gl_rewrite",
   "internal_validation_cutoff_date",
+  "cutoff_dates_section",
+  "internal_transfer_cutoff_fy",
+  "cutoff_column_break",
+  "accounting_rewrite_cutoff_fy",
   "tab_ewaybill",
   "enable_internal_dn_ewaybill"
  ],
@@ -79,10 +83,35 @@
    "label": "Force BNS Internal GL Rewrite"
   },
   {
-   "description": "Apply internal linkage validations and mismatch checks only on or after this posting date. Legacy data before this date is ignored.",
+   "description": "Deprecated. Migrated to Fiscal Year based cutoff fields below.",
    "fieldname": "internal_validation_cutoff_date",
    "fieldtype": "Date",
+   "hidden": 1,
    "label": "Internal Validation Cutoff Date"
+  },
+  {
+   "fieldname": "cutoff_dates_section",
+   "fieldtype": "Section Break",
+   "label": "Cutoff Dates"
+  },
+  {
+   "description": "BNS internal transfer status, flags, and linking apply from the start of this fiscal year. Leave empty to disable all BNS internal logic.",
+   "fieldname": "internal_transfer_cutoff_fy",
+   "fieldtype": "Link",
+   "label": "Internal Transfer Cutoff",
+   "options": "Fiscal Year"
+  },
+  {
+   "fieldname": "cutoff_column_break",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "internal_transfer_cutoff_fy",
+   "description": "GL/SLE rewriting and transfer rate sync apply from the start of this fiscal year. Must be same or later than Internal Transfer Cutoff.",
+   "fieldname": "accounting_rewrite_cutoff_fy",
+   "fieldtype": "Link",
+   "label": "Accounting Rewrite Cutoff",
+   "options": "Fiscal Year"
   },
   {
    "fieldname": "tab_ewaybill",

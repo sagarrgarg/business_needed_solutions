@@ -35,14 +35,18 @@ frappe.query_reports["Internal Transfer Accounting Audit"] = {
   ],
 
   onload(report) {
-    if (report.get_filter("from_date") && !report.get_filter_value("from_date")) {
-      frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_validation_cutoff_date")
-        .then((cutoffDate) => {
-          if (cutoffDate && report.get_filter("from_date") && !report.get_filter_value("from_date")) {
-            report.set_filter_value("from_date", cutoffDate);
-          }
-        });
-    }
+    frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_transfer_cutoff_fy")
+      .then((fy) => {
+        if (fy) {
+          return frappe.db.get_value("Fiscal Year", fy, "year_start_date");
+        }
+      })
+      .then((r) => {
+        var startDate = r && r.message && r.message.year_start_date;
+        if (startDate && report.get_filter("from_date")) {
+          report.set_filter_value("from_date", startDate);
+        }
+      });
 
     report.page.add_inner_button(__("Repost SLE"), function () {
       _triggerBulkRepost(report, "sle");

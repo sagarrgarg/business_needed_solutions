@@ -177,8 +177,13 @@ frappe.ui.form.on('BNS Branch Accounting Settings', {
       }, 100);
     }, __('Actions'));
 
-    frm.add_custom_button(__('Verify & Repost Internal Transfers'), function() {
-      const cutoffDate = frm.doc.internal_validation_cutoff_date;
+    frm.add_custom_button(__('Verify & Repost Internal Transfers'), async function() {
+      let cutoffDate = null;
+      const cutoffFy = frm.doc.internal_transfer_cutoff_fy;
+      if (cutoffFy) {
+        const r = await frappe.db.get_value("Fiscal Year", cutoffFy, "year_start_date");
+        cutoffDate = (r && r.message && r.message.year_start_date) || null;
+      }
       let lastVerifyData = null;
 
       const escapeCsvField = function(val) {

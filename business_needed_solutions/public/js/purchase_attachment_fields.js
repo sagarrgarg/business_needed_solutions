@@ -74,6 +74,10 @@ frappe.ui.form.on('Purchase Receipt', {
 
 frappe.ui.form.on('Purchase Invoice', {
   refresh: function(frm) { setupPurchaseAttachmentFields(frm); },
-  base_grand_total: function(frm) { _refreshEwaybillVisibility(frm); },
-  update_stock: function(frm) { _refreshEwaybillVisibility(frm); }
+  base_grand_total: function(frm) {
+    if (!_isLinkedToPR(frm)) _refreshEwaybillVisibility(frm);
+  },
+  update_stock: function(frm) {
+    if (!_isLinkedToPR(frm)) _refreshEwaybillVisibility(frm);
+  }
 });

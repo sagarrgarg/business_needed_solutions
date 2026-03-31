@@ -195,7 +195,7 @@ frappe.ui.form.on('Purchase Receipt', {
                                 fieldtype: 'Link',
                                 options: 'Sales Invoice',
                                 reqd: 1,
-                                default: frm.doc.supplier_delivery_note && frappe.db.exists('Sales Invoice', frm.doc.supplier_delivery_note) ? frm.doc.supplier_delivery_note : null,
+                                default: frm.doc.supplier_delivery_note || null,
                                 get_filters: function() {
                                     const filters = { docstatus: 1 };
                                     if (frm.doc.company) {
