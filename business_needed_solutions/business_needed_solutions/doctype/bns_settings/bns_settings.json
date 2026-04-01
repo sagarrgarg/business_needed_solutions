@@ -28,6 +28,11 @@
   "stock_entry_controls_section",
   "enforce_stock_update_or_reference",
   "enable_per_warehouse_negative_stock_disallow",
+  "negative_stock_override_section",
+  "allow_negative_stock_override",
+  "negative_stock_cutoff_date",
+  "column_break_ns_override",
+  "negative_stock_override_roles",
   "purchase_attachment_section",
   "enforce_purchase_document_attachments",
 
@@ -183,6 +188,37 @@
    "fieldname": "enable_per_warehouse_negative_stock_disallow",
    "fieldtype": "Check",
    "label": "Enable Per-Warehouse Negative Stock Control"
+  },
+  {
+   "fieldname": "negative_stock_override_section",
+   "fieldtype": "Section Break",
+   "label": "Negative Stock Override"
+  },
+  {
+   "default": "0",
+   "description": "When ERPNext Stock Settings has 'Allow Negative Stock' OFF, allow selected roles to submit stock documents with negative stock up to the cutoff date.",
+   "fieldname": "allow_negative_stock_override",
+   "fieldtype": "Check",
+   "label": "Allow Negative Stock Override"
+  },
+  {
+   "depends_on": "eval:doc.allow_negative_stock_override",
+   "description": "Negative stock is allowed only for documents with posting date on or before this date. Leave blank for no cutoff.",
+   "fieldname": "negative_stock_cutoff_date",
+   "fieldtype": "Date",
+   "label": "Cutoff Date"
+  },
+  {
+   "fieldname": "column_break_ns_override",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "eval:doc.allow_negative_stock_override",
+   "description": "Roles that can bypass the negative stock restriction.",
+   "fieldname": "negative_stock_override_roles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Override Roles",
+   "options": "Has Role"
   },
   {
    "fieldname": "purchase_attachment_section",
@@ -357,7 +393,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-01-29 12:00:00.000000",
+ "modified": "2026-04-01 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Business Needed Solutions",
  "name": "BNS Settings",

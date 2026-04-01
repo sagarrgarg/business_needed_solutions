@@ -410,6 +410,7 @@ after_migrate = "business_needed_solutions.bns_branch_accounting.migration.after
 # Apply patches on app initialization
 after_app_init = [
 	"business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.apply_patches",
+	"business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.apply_patches",
 	"business_needed_solutions.business_needed_solutions.overrides.get_value_filters_fix.apply_patch",
 	"business_needed_solutions.bns_branch_accounting.utils.apply_bns_runtime_patches",
 ]

@@ -415,7 +415,35 @@ Replaced single `internal_validation_cutoff_date` (Date) with two Fiscal Year Li
 
 ---
 
-## 12. Post-Change Commands
+## 12. Negative Stock Override (Role-Based Bypass with Cutoff Date)
+
+### What Changed
+- Added fields to **BNS Settings** (Stock & Inventory → Negative Stock Override):
+  - `allow_negative_stock_override` (Check) — master toggle
+  - `negative_stock_cutoff_date` (Date) — posting-date cutoff
+  - `negative_stock_override_roles` (Table MultiSelect → Has Role) — authorised roles
+- Created **`overrides/negative_stock_override.py`** with:
+  - `should_override_negative_stock(posting_date)` — evaluates toggle, cutoff, and user roles
+  - `apply_patches()` — monkey-patches `make_sl_entries` and `update_entries_after.__init__` in `erpnext.stock.stock_ledger` to inject `allow_negative_stock=True` when override conditions are met
+- Added the patch to `after_app_init` in **hooks.py** (runs after the existing `warehouse_negative_stock` patches)
+
+### Why
+- During data migration or historical corrections, users need to submit stock transactions with posting dates in periods where stock may go negative temporarily (e.g., backdated entries). ERPNext's global "Allow Negative Stock" toggle is too broad — turning it on exposes all users to unrestricted negative stock.
+- This feature provides a surgical override: only designated roles can bypass, and only for documents posted on or before a cutoff date. After the cutoff, normal Stock Settings behaviour resumes automatically.
+
+### Relationship with Warehouse Negative Stock
+- **warehouse_negative_stock** adds restrictions (disallow negative stock per-warehouse when ERPNext allows it globally)
+- **negative_stock_override** removes restrictions (allow negative stock for specific roles when ERPNext disallows it globally)
+- The two compose correctly: when the override is active, warehouse-level restrictions still apply if both features are enabled simultaneously.
+
+### Impacted Modules
+- `business_needed_solutions.doctype.bns_settings` (new fields)
+- `business_needed_solutions.overrides.negative_stock_override` (new module)
+- `hooks.py` (`after_app_init`)
+
+---
+
+## 13. Post-Change Commands
 
 After changes to fields, JS, Vue, or assets:
 
