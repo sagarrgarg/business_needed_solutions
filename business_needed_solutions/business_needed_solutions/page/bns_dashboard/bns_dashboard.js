@@ -136,25 +136,25 @@ class BNSDashboard {
 						<div class="col-lg-2 col-md-4 col-6 mb-3">
 							<div class="metric-card mini" id="branch-dn-pending">
 								<div class="metric-value">--</div>
-								<div class="metric-label">${__("DN → PR Pending")}</div>
+								<div class="metric-label">${__("DN → PR Pending")}<br><small class="text-muted">${__("Same GSTIN")}</small></div>
 							</div>
 						</div>
 						<div class="col-lg-2 col-md-4 col-6 mb-3">
 							<div class="metric-card mini" id="branch-si-pending">
 								<div class="metric-value">--</div>
-								<div class="metric-label">${__("SI → PI Pending")}</div>
+								<div class="metric-label">${__("SI → PI Pending")}<br><small class="text-muted">${__("Diff GSTIN")}</small></div>
 							</div>
 						</div>
 						<div class="col-lg-2 col-md-4 col-6 mb-3">
 							<div class="metric-card mini" id="branch-total-dn">
 								<div class="metric-value">--</div>
-								<div class="metric-label">${__("Total Internal DNs")}</div>
+								<div class="metric-label">${__("Same GSTIN DNs")}</div>
 							</div>
 						</div>
 						<div class="col-lg-2 col-md-4 col-6 mb-3">
 							<div class="metric-card mini" id="branch-total-si">
 								<div class="metric-value">--</div>
-								<div class="metric-label">${__("Total Internal SIs")}</div>
+								<div class="metric-label">${__("Diff GSTIN SIs")}</div>
 							</div>
 						</div>
 						<div class="col-lg-2 col-md-4 col-6 mb-3">
@@ -174,7 +174,7 @@ class BNSDashboard {
 						<div class="col-lg-6 col-md-12 mb-3">
 							<div class="progress-card">
 								<div class="d-flex justify-content-between mb-1">
-									<span class="progress-card-label">${__("DN → PR Completion")}</span>
+									<span class="progress-card-label">${__("DN → PR Completion (Same GSTIN)")}</span>
 									<span class="progress-card-pct" id="branch-dn-pct">--</span>
 								</div>
 								<div class="progress" style="height: 8px;">
@@ -185,7 +185,7 @@ class BNSDashboard {
 						<div class="col-lg-6 col-md-12 mb-3">
 							<div class="progress-card">
 								<div class="d-flex justify-content-between mb-1">
-									<span class="progress-card-label">${__("SI → PI Completion")}</span>
+									<span class="progress-card-label">${__("SI → PI Completion (Diff GSTIN)")}</span>
 									<span class="progress-card-pct" id="branch-si-pct">--</span>
 								</div>
 								<div class="progress" style="height: 8px;">

@@ -1056,31 +1056,68 @@ def _get_accounting_metrics(company):
 
 
 def _get_branch_accounting_metrics(company):
-	"""Internal-transfer completion rates and repost health."""
+	"""
+	Internal-transfer completion rates and repost health.
+
+	DN → PR completion applies to same-GSTIN transfers only
+	(company_gstin = billing_address_gstin).
+	SI → PI completion applies to different-GSTIN transfers only
+	(company_gstin != billing_address_gstin).
+
+	Only documents posted on or after the Internal Transfer Cutoff FY
+	start date are counted, matching what the branch accounting reports show.
+	"""
+	from business_needed_solutions.bns_branch_accounting.utils import (
+		_get_internal_transfer_cutoff_date,
+	)
+
+	cutoff = _get_internal_transfer_cutoff_date()
+
+	SAME_GSTIN = (
+		"AND company_gstin IS NOT NULL AND company_gstin != '' "
+		"AND billing_address_gstin IS NOT NULL AND billing_address_gstin != '' "
+		"AND company_gstin = billing_address_gstin"
+	)
+	DIFF_GSTIN = (
+		"AND company_gstin IS NOT NULL AND company_gstin != '' "
+		"AND billing_address_gstin IS NOT NULL AND billing_address_gstin != '' "
+		"AND company_gstin != billing_address_gstin"
+	)
+
+	cutoff_clause = ""
+	params = (company,)
+	if cutoff:
+		cutoff_clause = "AND posting_date >= %s"
+		params = (company, cutoff)
+
 	dns_without_pr = frappe.db.sql(
 		"SELECT COUNT(*) FROM `tabDelivery Note` "
 		"WHERE docstatus=1 AND company=%s AND is_bns_internal_customer=1 "
-		"AND (bns_inter_company_reference IS NULL OR bns_inter_company_reference='')",
-		company,
+		"AND (bns_inter_company_reference IS NULL OR bns_inter_company_reference='') "
+		+ SAME_GSTIN + " " + cutoff_clause,
+		params,
 	)[0][0] or 0
 
 	sis_without_pi = frappe.db.sql(
 		"SELECT COUNT(*) FROM `tabSales Invoice` "
 		"WHERE docstatus=1 AND company=%s AND is_bns_internal_customer=1 "
-		"AND (bns_inter_company_reference IS NULL OR bns_inter_company_reference='')",
-		company,
+		"AND (bns_inter_company_reference IS NULL OR bns_inter_company_reference='') "
+		+ DIFF_GSTIN + " " + cutoff_clause,
+		params,
 	)[0][0] or 0
 
 	total_internal_dns = frappe.db.sql(
 		"SELECT COUNT(*) FROM `tabDelivery Note` "
-		"WHERE docstatus=1 AND company=%s AND is_bns_internal_customer=1",
-		company,
+		"WHERE docstatus=1 AND company=%s AND is_bns_internal_customer=1 "
+		+ SAME_GSTIN + " " + cutoff_clause,
+		params,
 	)[0][0] or 0
 
 	total_internal_sis = frappe.db.sql(
 		"SELECT COUNT(*) FROM `tabSales Invoice` "
-		"WHERE docstatus=1 AND company=%s AND is_bns_internal_customer=1",
-		company,
+		"WHERE docstatus=1 AND company=%s AND is_bns_internal_customer=1 "
+		+ DIFF_GSTIN + " " + cutoff_clause,
+		params,
 	)[0][0] or 0
 
 	pending_repost = frappe.db.count("Repost Item Valuation", {
@@ -1100,6 +1137,7 @@ def _get_branch_accounting_metrics(company):
 		"total_internal_sis": total_internal_sis,
 		"pending_repost": pending_repost,
 		"repost_tracking": repost_tracking,
+		"cutoff_date": str(cutoff),
 	}
 
 
@@ -1144,29 +1182,33 @@ def _get_stock_metrics(company):
 
 
 def _get_compliance_metrics(company):
-	"""Attachment and supplier-invoice compliance on PR / PI."""
+	"""Attachment and supplier-invoice compliance on PR / PI.
+	Excludes internal suppliers and return documents (consistent with
+	attachment_validation.py which skips returns)."""
+	NOT_INTERNAL_OR_RETURN = "AND is_bns_internal_supplier=0 AND is_return=0"
+
 	pr_without_attachment = frappe.db.sql(
 		"SELECT COUNT(*) FROM `tabPurchase Receipt` "
 		"WHERE docstatus=1 AND company=%s "
 		"AND (bns_supplier_invoice_attachment IS NULL OR bns_supplier_invoice_attachment='') "
-		"AND is_bns_internal_supplier=0", company
+		+ NOT_INTERNAL_OR_RETURN, company
 	)[0][0] or 0
 
 	total_prs = frappe.db.sql(
 		"SELECT COUNT(*) FROM `tabPurchase Receipt` "
-		"WHERE docstatus=1 AND company=%s AND is_bns_internal_supplier=0", company
+		"WHERE docstatus=1 AND company=%s " + NOT_INTERNAL_OR_RETURN, company
 	)[0][0] or 0
 
 	pi_without_attachment = frappe.db.sql(
 		"SELECT COUNT(*) FROM `tabPurchase Invoice` "
 		"WHERE docstatus=1 AND company=%s "
 		"AND (bns_supplier_invoice_attachment IS NULL OR bns_supplier_invoice_attachment='') "
-		"AND is_bns_internal_supplier=0", company
+		+ NOT_INTERNAL_OR_RETURN, company
 	)[0][0] or 0
 
 	total_pis = frappe.db.sql(
 		"SELECT COUNT(*) FROM `tabPurchase Invoice` "
-		"WHERE docstatus=1 AND company=%s AND is_bns_internal_supplier=0", company
+		"WHERE docstatus=1 AND company=%s " + NOT_INTERNAL_OR_RETURN, company
 	)[0][0] or 0
 
 	return {
