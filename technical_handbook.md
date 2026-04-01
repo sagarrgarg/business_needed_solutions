@@ -268,7 +268,7 @@ BNS extends ERPNext with:
 
 - **BNS Branch Accounting:** Uses `bns_inter_company_reference`, `bns_reference_dn`, `bns_reference_si`, etc. Custom fields are in fixtures.
 - **Patch:** `migrate_internal_dn_ewaybill_to_branch_accounting.py` – copies `enable_internal_dn_ewaybill` from BNS Settings to BNS Branch Accounting Settings before field removal.
-- **Warehouse negative stock:** Patches applied via `after_app_init` in hooks.
+- **Warehouse negative stock:** Patches applied via `before_request` / `before_job` hooks (each with internal guard for one-time application per worker process). Note: `after_app_init` is NOT a valid Frappe hook — it was silently ignored.
 
 ---
 
@@ -415,35 +415,46 @@ Replaced single `internal_validation_cutoff_date` (Date) with two Fiscal Year Li
 
 ---
 
-## 12. Negative Stock Override (Role-Based Bypass with Cutoff Date)
+## 12. Negative Stock Cutoff (Date-Based Restriction with Role Bypass)
 
 ### What Changed
-- Added fields to **BNS Settings** (Stock & Inventory → Negative Stock Override):
+- **BNS Settings** fields (Stock & Inventory → Negative Stock Override):
   - `allow_negative_stock_override` (Check) — master toggle
-  - `negative_stock_cutoff_date` (Date) — posting-date cutoff
-  - `negative_stock_override_roles` (Table MultiSelect → Has Role) — authorised roles
-- Created **`overrides/negative_stock_override.py`** with:
-  - `should_override_negative_stock(posting_date)` — evaluates toggle, cutoff, and user roles
-  - `apply_patches()` — monkey-patches `make_sl_entries` and `update_entries_after.__init__` in `erpnext.stock.stock_ledger` to inject `allow_negative_stock=True` when override conditions are met
-- Added the patch to `after_app_init` in **hooks.py** (runs after the existing `warehouse_negative_stock` patches)
+  - `negative_stock_cutoff_date` (Date) — posting dates AFTER this are restricted
+  - `negative_stock_override_roles` (Table MultiSelect → Has Role) — roles exempt from restriction
+- **`overrides/negative_stock_override.py`** — simple `before_submit` doc_event validation (no monkey-patching):
+  - `validate_negative_stock(doc, method)` — collects outgoing stock movements from the document, checks each against `Bin.actual_qty`, and throws if any item would go negative
+  - `should_restrict(posting_date)` — checks toggle, cutoff, roles, repost flag
+  - `_collect_outgoing(doc)` — handles Stock Entry (s_warehouse), DN, SI (update_stock), PR (rejected), Stock Reconciliation
 
-### Why
-- During data migration or historical corrections, users need to submit stock transactions with posting dates in periods where stock may go negative temporarily (e.g., backdated entries). ERPNext's global "Allow Negative Stock" toggle is too broad — turning it on exposes all users to unrestricted negative stock.
-- This feature provides a surgical override: only designated roles can bypass, and only for documents posted on or before a cutoff date. After the cutoff, normal Stock Settings behaviour resumes automatically.
+### Prerequisite
+ERPNext Stock Settings → **Allow Negative Stock = ON**. BNS validates outgoing movements in `before_submit` and blocks if posting_date is after the cutoff.
 
-### Relationship with Warehouse Negative Stock
-- **warehouse_negative_stock** adds restrictions (disallow negative stock per-warehouse when ERPNext allows it globally)
-- **negative_stock_override** removes restrictions (allow negative stock for specific roles when ERPNext disallows it globally)
-- The two compose correctly: when the override is active, warehouse-level restrictions still apply if both features are enabled simultaneously.
+### Behaviour Summary
+| Posting Date | User Role | Result |
+|---|---|---|
+| ≤ cutoff | has override role | Negative stock allowed |
+| ≤ cutoff | no override role | Negative stock BLOCKED |
+| > cutoff | any | Negative stock BLOCKED (no exceptions) |
+Override roles grant permission to go negative **only before/on** the cutoff.
+After the cutoff, nobody can go negative regardless of role.
+Per-item `allow_negative_stock` is **not** honoured — BNS overrides it.
 
 ### Impacted Modules
-- `business_needed_solutions.doctype.bns_settings` (new fields)
-- `business_needed_solutions.overrides.negative_stock_override` (new module)
-- `hooks.py` (`after_app_init`)
+- `business_needed_solutions.doctype.bns_settings` (fields)
+- `business_needed_solutions.overrides.negative_stock_override` (module)
+- `hooks.py` (`doc_events` → `before_submit` on 6 stock doctypes)
 
 ---
 
-## 13. Post-Change Commands
+## 13. get_value_filters_fix — Whitelisted Attribute
+
+### What Changed
+- `overrides/get_value_filters_fix.py` — the monkey-patched `patched_get_value` function now copies `is_whitelisted = True` from the original `frappe.client.get_value`. Without this attribute, Frappe's RPC dispatcher rejects the call with "Function is not whitelisted".
+
+---
+
+## 14. Post-Change Commands
 
 After changes to fields, JS, Vue, or assets:
 

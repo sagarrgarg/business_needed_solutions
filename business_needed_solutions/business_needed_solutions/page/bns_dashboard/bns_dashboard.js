@@ -52,48 +52,6 @@ class BNSDashboard {
 		this.wrapper.html(`
 			<div class="bns-dashboard-container">
 
-				<!-- ======= ACCOUNTING OVERVIEW ======= -->
-				<div class="bns-section">
-					<div class="bns-section-title">
-						<i class="fa fa-bar-chart"></i> ${__("Accounting Overview")}
-					</div>
-					<div class="row" id="accounting-cards">
-						<div class="col-lg-3 col-md-6 col-6 mb-3">
-							<div class="metric-card" id="metric-receivables">
-								<div class="metric-value text-primary">--</div>
-								<div class="metric-label">${__("Net Receivables")}</div>
-								<div class="metric-sub">${__("Pure AR (party-netted)")}</div>
-							</div>
-						</div>
-						<div class="col-lg-3 col-md-6 col-6 mb-3">
-							<div class="metric-card" id="metric-payables">
-								<div class="metric-value text-primary">--</div>
-								<div class="metric-label">${__("Net Payables")}</div>
-								<div class="metric-sub">${__("Pure AP (party-netted)")}</div>
-							</div>
-						</div>
-						<div class="col-lg-3 col-md-6 col-6 mb-3">
-							<div class="metric-card" id="metric-overdue-recv">
-								<div class="metric-value">--</div>
-								<div class="metric-label">${__("Overdue Receivables")}</div>
-							</div>
-						</div>
-						<div class="col-lg-3 col-md-6 col-6 mb-3">
-							<div class="metric-card" id="metric-overdue-pay">
-								<div class="metric-value">--</div>
-								<div class="metric-label">${__("Overdue Payables")}</div>
-							</div>
-						</div>
-					</div>
-					<div class="row">
-						<div class="col-12">
-							<div class="chart-wrapper" id="trend-chart-wrapper">
-								<div id="trend-chart-container"></div>
-							</div>
-						</div>
-					</div>
-				</div>
-
 				<!-- ======= BNS HEALTH INDICATORS ======= -->
 				<div class="bns-section">
 					<div class="bns-section-title">
@@ -854,23 +812,6 @@ class BNSDashboard {
 	render_health_overview(data) {
 		if (!data) return;
 
-		const fmt = (v) => format_currency(v, null, 0);
-
-		// --- Accounting cards ---
-		const acct = data.accounting || {};
-		this._set_metric("metric-receivables", fmt(acct.total_receivables), null, "info");
-		this._set_metric("metric-payables", fmt(acct.total_payables), null, "info");
-		this._set_metric(
-			"metric-overdue-recv", fmt(acct.overdue_receivables), null,
-			acct.overdue_receivables > 0 ? "danger" : "ok"
-		);
-		this._set_metric(
-			"metric-overdue-pay", fmt(acct.overdue_payables), null,
-			acct.overdue_payables > 0 ? "warn" : "ok"
-		);
-
-		this.render_trend_chart(acct.monthly_sales || [], acct.monthly_purchase || []);
-
 		// --- Branch Accounting cards ---
 		const ba = data.branch_accounting || {};
 		this._set_metric("branch-dn-pending", ba.dns_without_pr, null,
@@ -942,66 +883,6 @@ class BNSDashboard {
 		if (pct >= 90) bar.addClass("bg-success");
 		else if (pct >= 60) bar.addClass("bg-warning");
 		else bar.addClass("bg-danger");
-	}
-
-	render_trend_chart(sales, purchase) {
-		const container = this.wrapper.find("#trend-chart-container");
-		if (!sales.length && !purchase.length) {
-			container.html('<p class="text-muted text-center mb-0">' + __("No invoice data for the last 6 months.") + '</p>');
-			return;
-		}
-
-		const allMonths = [...new Set([
-			...sales.map(s => s.month),
-			...purchase.map(p => p.month),
-		])].sort();
-
-		const salesMap = {};
-		sales.forEach(s => { salesMap[s.month] = s.total; });
-		const purchaseMap = {};
-		purchase.forEach(p => { purchaseMap[p.month] = p.total; });
-
-		const labels = allMonths.map(m => {
-			const parts = m.split("-");
-			const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-			return monthNames[parseInt(parts[1]) - 1] + " " + parts[0].slice(2);
-		});
-
-		const salesData = allMonths.map(m => salesMap[m] || 0);
-		const purchaseData = allMonths.map(m => purchaseMap[m] || 0);
-
-		container.empty();
-
-		if (typeof frappe.Chart !== "undefined") {
-			new frappe.Chart(container[0], {
-				data: {
-					labels: labels,
-					datasets: [
-						{ name: __("Sales"), values: salesData },
-						{ name: __("Purchase"), values: purchaseData },
-					],
-				},
-				type: "bar",
-				height: 220,
-				colors: ["#2490EF", "#E24C4C"],
-				barOptions: { stacked: false, spaceRatio: 0.4 },
-				axisOptions: {
-					xIsSeries: true,
-					shortenYAxisNumbers: true,
-				},
-			});
-		} else {
-			let html = '<table class="table table-sm mb-0"><thead><tr>';
-			html += '<th>' + __("Month") + '</th><th class="text-right">' + __("Sales") + '</th><th class="text-right">' + __("Purchase") + '</th>';
-			html += '</tr></thead><tbody>';
-			allMonths.forEach((m, i) => {
-				html += '<tr><td>' + labels[i] + '</td>';
-				html += '<td class="text-right">' + format_currency(salesData[i], null, 0) + '</td>';
-				html += '<td class="text-right">' + format_currency(purchaseData[i], null, 0) + '</td></tr>';
-			});
-			html += '</tbody></table>';
-			container.html(html);
-		}
 	}
 
 	// =====================================================================

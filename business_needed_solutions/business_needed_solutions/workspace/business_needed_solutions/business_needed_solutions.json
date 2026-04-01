@@ -1,7 +1,7 @@
 {
  "charts": [],
- "content": "[{\"id\":\"bns-dashboard-shortcut\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"BNS Dashboard\",\"col\":4}},{\"id\":\"bns-settings-shortcut\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"BNS Settings\",\"col\":4}}]",
- "creation": "2026-01-31 10:00:00.000000",
+ "content": "[{\"id\": \"hc-header\", \"type\": \"header\", \"data\": {\"text\": \"Business Needed Solutions\", \"col\": 12, \"level\": 4}}, {\"id\": \"hc-sc-dashboard\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"BNS Dashboard\", \"col\": 3}}, {\"id\": \"hc-sc-settings\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"BNS Settings\", \"col\": 3}}, {\"id\": \"hc-sc-branch\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Branch Accounting Settings\", \"col\": 3}}, {\"id\": \"hc-sc-repost\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Repost Tracking\", \"col\": 3}}, {\"id\": \"hc-spacer-1\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hc-header-2\", \"type\": \"header\", \"data\": {\"text\": \"Pending Drafts\", \"col\": 12, \"level\": 5}}, {\"id\": \"hc-sc-dpi\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Draft Purchase Invoices\", \"col\": 3}}, {\"id\": \"hc-sc-dpr\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Draft Purchase Receipts\", \"col\": 3}}, {\"id\": \"hc-sc-dse\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Draft Stock Entries\", \"col\": 3}}, {\"id\": \"hc-sc-dsr\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Draft Stock Reconciliation\", \"col\": 3}}, {\"id\": \"hc-spacer-2\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hc-header-3\", \"type\": \"header\", \"data\": {\"text\": \"Overdue & Returns\", \"col\": 12, \"level\": 5}}, {\"id\": \"hc-sc-opi\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Overdue Purchase Invoices\", \"col\": 3}}, {\"id\": \"hc-sc-osi\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Overdue Sales Invoices\", \"col\": 3}}, {\"id\": \"hc-sc-rpi\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Return Purchase Invoices\", \"col\": 3}}, {\"id\": \"hc-sc-rsi\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Return Sales Invoices\", \"col\": 3}}, {\"id\": \"hc-spacer-3\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"hc-header-4\", \"type\": \"header\", \"data\": {\"text\": \"Queued Jobs\", \"col\": 12, \"level\": 5}}, {\"id\": \"hc-sc-riv\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Queued Repost Item Valuation\", \"col\": 4}}, {\"id\": \"hc-sc-upi\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Unpaid Purchase Invoices\", \"col\": 4}}, {\"id\": \"hc-sc-usi\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Unpaid Sales Invoices\", \"col\": 4}}, {\"id\": \"hc-spacer-4\", \"type\": \"spacer\", \"data\": {\"col\": 12}}]",
+ "creation": "2026-04-01 10:00:00.000000",
  "docstatus": 0,
  "doctype": "Workspace",
  "for_user": "",
@@ -32,9 +32,42 @@
    "type": "Link"
   },
   {
+   "dependencies": "",
    "hidden": 0,
    "is_query_report": 0,
-   "label": "Reports",
+   "label": "BNS Branch Accounting Settings",
+   "link_count": 0,
+   "link_to": "BNS Branch Accounting Settings",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Stock Settings",
+   "link_count": 0,
+   "link_to": "Stock Settings",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "BNS Repost Tracking",
+   "link_count": 0,
+   "link_to": "BNS Repost Tracking",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Accounting Reports",
    "link_count": 0,
    "link_type": "DocType",
    "onboard": 0,
@@ -44,20 +77,9 @@
    "dependencies": "",
    "hidden": 0,
    "is_query_report": 1,
-   "label": "Internal Transfer Receive Mismatch",
+   "label": "Party GL",
    "link_count": 0,
-   "link_to": "Internal Transfer Receive Mismatch",
-   "link_type": "Report",
-   "onboard": 0,
-   "type": "Link"
-  },
-  {
-   "dependencies": "",
-   "hidden": 0,
-   "is_query_report": 1,
-   "label": "Negative Stock Resolution Report",
-   "link_count": 0,
-   "link_to": "Negative Stock Resolution Report",
+   "link_to": "Party GL",
    "link_type": "Report",
    "onboard": 0,
    "type": "Link"
@@ -77,15 +99,238 @@
    "dependencies": "",
    "hidden": 0,
    "is_query_report": 1,
-   "label": "Party GL",
+   "label": "Pure Accounts Receivable Summary",
    "link_count": 0,
-   "link_to": "Party GL",
+   "link_to": "Pure Accounts Receivable Summary",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Pure Accounts Payable Summary",
+   "link_count": 0,
+   "link_to": "Pure Accounts Payable Summary",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Unlinked Customer-Supplier by PAN",
+   "link_count": 0,
+   "link_to": "Unlinked Customer-Supplier by PAN",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Branch Accounting",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Internal Transfer Accounting Audit",
+   "link_count": 0,
+   "link_to": "Internal Transfer Accounting Audit",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Internal Transfer Receive Mismatch",
+   "link_count": 0,
+   "link_to": "Internal Transfer Receive Mismatch",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "BNS Repost Tracking",
+   "link_count": 0,
+   "link_to": "BNS Repost Tracking",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Stock Reports",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Outgoing Stock Audit - 1 BNS",
+   "link_count": 0,
+   "link_to": "Outgoing Stock Audit - 1 BNS",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Stock Ledger Negative Episodes",
+   "link_count": 0,
+   "link_to": "Stock Ledger Negative Episodes",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Negative Stock Resolution Report",
+   "link_count": 0,
+   "link_to": "Negative Stock Resolution Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Transactions",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Purchase Invoice",
+   "link_count": 0,
+   "link_to": "Purchase Invoice",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Purchase Receipt",
+   "link_count": 0,
+   "link_to": "Purchase Receipt",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Sales Invoice",
+   "link_count": 0,
+   "link_to": "Sales Invoice",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Delivery Note",
+   "link_count": 0,
+   "link_to": "Delivery Note",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Stock Entry",
+   "link_count": 0,
+   "link_to": "Stock Entry",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Stock Reconciliation",
+   "link_count": 0,
+   "link_to": "Stock Reconciliation",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Repost Item Valuation",
+   "link_count": 0,
+   "link_to": "Repost Item Valuation",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Other Reports",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Expected Sales Person Wise Predicted Transaction Summary",
+   "link_count": 0,
+   "link_to": "Expected Sales Person Wise Predicted Transaction Summary",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Almonds Sorting Report",
+   "link_count": 0,
+   "link_to": "Almonds Sorting Report",
    "link_type": "Report",
    "onboard": 0,
    "type": "Link"
   }
  ],
- "modified": "2026-01-31 10:00:00.000000",
+ "modified": "2026-04-01 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "Business Needed Solutions",
  "name": "Business Needed Solutions",
@@ -96,7 +341,7 @@
  "quick_lists": [],
  "restrict_to_domain": "",
  "roles": [],
- "sequence_id": 25,
+ "sequence_id": 26,
  "shortcuts": [
   {
    "color": "Blue",
@@ -114,6 +359,123 @@
    "link_to": "BNS Settings",
    "restrict_to_domain": "",
    "stats_filter": "",
+   "type": "DocType"
+  },
+  {
+   "color": "Green",
+   "doc_view": "",
+   "label": "Branch Accounting Settings",
+   "link_to": "BNS Branch Accounting Settings",
+   "restrict_to_domain": "",
+   "stats_filter": "",
+   "type": "DocType"
+  },
+  {
+   "color": "Orange",
+   "doc_view": "List",
+   "label": "Repost Tracking",
+   "link_to": "BNS Repost Tracking",
+   "restrict_to_domain": "",
+   "stats_filter": "",
+   "type": "DocType"
+  },
+  {
+   "color": "Red",
+   "doc_view": "List",
+   "label": "Draft Purchase Invoices",
+   "link_to": "Purchase Invoice",
+   "restrict_to_domain": "",
+   "stats_filter": "{\"docstatus\": 0}",
+   "type": "DocType"
+  },
+  {
+   "color": "Red",
+   "doc_view": "List",
+   "label": "Draft Purchase Receipts",
+   "link_to": "Purchase Receipt",
+   "restrict_to_domain": "",
+   "stats_filter": "{\"docstatus\": 0}",
+   "type": "DocType"
+  },
+  {
+   "color": "Yellow",
+   "doc_view": "List",
+   "label": "Draft Stock Entries",
+   "link_to": "Stock Entry",
+   "restrict_to_domain": "",
+   "stats_filter": "{\"docstatus\": 0}",
+   "type": "DocType"
+  },
+  {
+   "color": "Yellow",
+   "doc_view": "List",
+   "label": "Draft Stock Reconciliation",
+   "link_to": "Stock Reconciliation",
+   "restrict_to_domain": "",
+   "stats_filter": "{\"docstatus\": 0}",
+   "type": "DocType"
+  },
+  {
+   "color": "Red",
+   "doc_view": "List",
+   "label": "Overdue Purchase Invoices",
+   "link_to": "Purchase Invoice",
+   "restrict_to_domain": "",
+   "stats_filter": "{\"docstatus\": 1, \"status\": \"Overdue\"}",
+   "type": "DocType"
+  },
+  {
+   "color": "Red",
+   "doc_view": "List",
+   "label": "Overdue Sales Invoices",
+   "link_to": "Sales Invoice",
+   "restrict_to_domain": "",
+   "stats_filter": "{\"docstatus\": 1, \"status\": \"Overdue\"}",
+   "type": "DocType"
+  },
+  {
+   "color": "Pink",
+   "doc_view": "List",
+   "label": "Return Purchase Invoices",
+   "link_to": "Purchase Invoice",
+   "restrict_to_domain": "",
+   "stats_filter": "{\"docstatus\": 1, \"is_return\": 1}",
+   "type": "DocType"
+  },
+  {
+   "color": "Pink",
+   "doc_view": "List",
+   "label": "Return Sales Invoices",
+   "link_to": "Sales Invoice",
+   "restrict_to_domain": "",
+   "stats_filter": "{\"docstatus\": 1, \"is_return\": 1}",
+   "type": "DocType"
+  },
+  {
+   "color": "Orange",
+   "doc_view": "List",
+   "label": "Queued Repost Item Valuation",
+   "link_to": "Repost Item Valuation",
+   "restrict_to_domain": "",
+   "stats_filter": "{\"docstatus\": 1, \"status\": [\"in\", [\"Queued\", \"In Progress\"]]}",
+   "type": "DocType"
+  },
+  {
+   "color": "Cyan",
+   "doc_view": "List",
+   "label": "Unpaid Purchase Invoices",
+   "link_to": "Purchase Invoice",
+   "restrict_to_domain": "",
+   "stats_filter": "{\"docstatus\": 1, \"outstanding_amount\": [\">\", 0], \"status\": \"Unpaid\"}",
+   "type": "DocType"
+  },
+  {
+   "color": "Cyan",
+   "doc_view": "List",
+   "label": "Unpaid Sales Invoices",
+   "link_to": "Sales Invoice",
+   "restrict_to_domain": "",
+   "stats_filter": "{\"docstatus\": 1, \"outstanding_amount\": [\">\", 0], \"status\": \"Unpaid\"}",
    "type": "DocType"
   }
  ],

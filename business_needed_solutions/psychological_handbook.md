@@ -141,9 +141,7 @@
   - Detail sections (expense fixables, party link, transfer mismatch) are collapsed by default to keep the overview clean; power users expand them for drill-down.
   - The trend chart uses frappe.Chart when available and degrades to a table when not. Never break the page for a missing charting library.
   - The workspace (bns_health_check.json) is a navigation hub, not a dashboard. It links to the dashboard page, settings, and all reports grouped by domain. Don't add metrics to the workspace itself; keep them in the dashboard page where they are actionable.
-- Negative Stock Override philosophy:
-  - ERPNext's global "Allow Negative Stock" toggle is binary and risky: ON exposes all users/warehouses, OFF blocks legitimate backdated corrections. BNS provides a middle ground — surgical override by role and posting-date window.
-  - The cutoff date is the critical safeguard. It lets admins say "allow negative stock for historical data before X, but enforce discipline going forward." Once the cutoff passes, the override is inert without needing to manually disable it.
-  - Override roles should be granted sparingly (e.g., only to Accounts Manager or a dedicated migration role). The feature is not a substitute for good inventory discipline — it's an escape hatch for legitimate data correction windows.
-  - The override is implemented via monkey-patches on ERPNext's stock ledger functions (make_sl_entries, update_entries_after) rather than doc_events, because stock validation happens deep inside the SLE creation chain. Patching at the source ensures no code path can bypass the override check.
-  - Reposting is explicitly excluded — the override only applies to interactive submissions, not to background valuation recalculations. This prevents unintended side effects during automated repost jobs.
+- Negative Stock Cutoff philosophy:
+  - Work WITH ERPNext, not against it. Keep Stock Settings "Allow Negative Stock" ON globally, use a simple `before_submit` doc_event to validate outgoing movements after the cutoff date. No monkey-patching — same pattern as `submission_restriction`.
+  - The cutoff date is the key: "allow negative stock for historical corrections before X, enforce discipline after X." Override roles provide escape hatches for authorized users even after the cutoff.
+  - CRITICAL anti-pattern: do NOT monkey-patch ERPNext stock ledger functions for this. `after_app_init` is not a valid Frappe hook, `build()` runs inside `update_entries_after.__init__`, and the patching complexity is not worth it. A simple before_submit check against `Bin.actual_qty` is sufficient and transparent.

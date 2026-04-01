@@ -209,6 +209,10 @@ doc_events = {
         "validate": "business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.validate_sle_warehouse_negative_stock"
     },
     "Stock Entry": {
+        "before_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
+            "business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.validate_negative_stock",
+        ],
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Delivery Note": {
@@ -216,7 +220,11 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.overrides.billing_location.set_customer_address_from_billing_location",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_delivery_note_return"
         ],
-        "before_submit": "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
+        "before_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
+            "business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.validate_negative_stock",
+            "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
+        ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.bns_branch_accounting.gst_integration.validate_internal_dn_vehicle_no",
@@ -228,6 +236,8 @@ doc_events = {
     "Purchase Receipt": {
         "validate": "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
         "before_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
+            "business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.validate_negative_stock",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
             "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments"
@@ -240,6 +250,10 @@ doc_events = {
         "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.unlink_references_on_purchase_cancel"
     },
     "Stock Reconciliation": {
+        "before_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
+            "business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.validate_negative_stock",
+        ],
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Sales Invoice": {
@@ -249,6 +263,10 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_customer_return",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_sales_invoice_linkage",
         ],
+        "before_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
+            "business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.validate_negative_stock",
+        ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.bns_branch_accounting.utils.update_sales_invoice_status_for_bns_internal"
@@ -256,7 +274,11 @@ doc_events = {
         "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.cancel_linked_purchase_docs_for_sales_invoice"
     },
     "Purchase Invoice": {
-        "before_submit": "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments",
+        "before_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
+            "business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.validate_negative_stock",
+            "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments",
+        ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.bns_branch_accounting.utils.update_purchase_invoice_status_for_bns_internal"
@@ -335,6 +357,7 @@ fixtures = [
 #
 override_whitelisted_methods = {
 	"frappe.desk.form.linked_with.get_submitted_linked_docs": "business_needed_solutions.bns_branch_accounting.overrides.cancel_dialog.get_submitted_linked_docs",
+	"frappe.client.get_value": "business_needed_solutions.business_needed_solutions.overrides.get_value_filters_fix.get_value",
 }
 
 # Allow Delivery Note in Repost Accounting Ledger processing.
@@ -407,11 +430,12 @@ repost_allowed_doctypes = ["Delivery Note"]
 # Migration hook to ensure BNS branch-accounting setup is applied after migrations
 after_migrate = "business_needed_solutions.bns_branch_accounting.migration.after_migrate"
 
-# Apply patches on app initialization
-after_app_init = [
-	"business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.apply_patches",
-	"business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.apply_patches",
-	"business_needed_solutions.business_needed_solutions.overrides.get_value_filters_fix.apply_patch",
+# Runtime monkey-patches that must be available on any request/job.
+# Stock-specific patches are applied via doc_events (before_submit) instead.
+# get_value_filters_fix is handled via override_whitelisted_methods.
+_global_runtime_patches = [
 	"business_needed_solutions.bns_branch_accounting.utils.apply_bns_runtime_patches",
 ]
+before_request = _global_runtime_patches
+before_job = _global_runtime_patches
 
