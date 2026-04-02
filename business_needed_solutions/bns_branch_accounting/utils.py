@@ -1347,7 +1347,10 @@ def validate_internal_purchase_invoice_si_parity(doc, method: Optional[str] = No
     if company_gstin and billing_gstin and company_gstin == billing_gstin:
         return
 
-    result = validate_si_pi_items_match(si_name, doc.name, check_all=True)
+    tolerance = flt(
+        frappe.db.get_single_value("BNS Branch Accounting Settings", "si_pi_amount_tolerance") or 0
+    )
+    result = validate_si_pi_items_match(si_name, doc.name, check_all=True, amount_tolerance=tolerance)
     if result.get("match"):
         return
 
@@ -6308,19 +6311,25 @@ def get_purchase_invoice_by_supplier_invoice(sales_invoice: str) -> Dict:
 
 
 @frappe.whitelist()
-def validate_si_pi_items_match(sales_invoice: str, purchase_invoice: str, check_all: bool = False) -> Dict:
-    """
-    Validate that all Sales Invoice items and quantities match Purchase Invoice items.
-    Optionally also validates taxable values, grand totals, and taxes.
-    
+def validate_si_pi_items_match(
+    sales_invoice: str,
+    purchase_invoice: str,
+    check_all: bool = False,
+    amount_tolerance: float = 0.0,
+) -> Dict:
+    """Validate that all Sales Invoice items and quantities match Purchase Invoice items.
+
     Args:
-        sales_invoice (str): Name of the Sales Invoice
-        purchase_invoice (str): Name of the Purchase Invoice
-        check_all (bool): If True, also validates taxable values, totals, and taxes
-        
+        sales_invoice: Name of the Sales Invoice.
+        purchase_invoice: Name of the Purchase Invoice.
+        check_all: If True, also validates taxable values, totals, and taxes.
+        amount_tolerance: Absolute amount below which taxable value, grand total,
+            and tax differences are ignored. Does not affect item/qty checks.
+
     Returns:
-        Dict: Validation result with match status and details
+        Validation result with match status and details.
     """
+    amount_tolerance = flt(amount_tolerance or 0)
     try:
         si = frappe.get_doc("Sales Invoice", sales_invoice)
         pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
@@ -6396,11 +6405,11 @@ def validate_si_pi_items_match(sales_invoice: str, purchase_invoice: str, check_
                         "pi_qty": pi_data["qty"]
                     })
                 
-                # Check taxable value mismatch if check_all is True (no tolerance)
                 if check_all:
                     si_taxable_value = si_data["base_net_amount"] if si_data["base_net_amount"] > 0 else si_data["net_amount"]
                     pi_taxable_value = pi_data["base_net_amount"] if pi_data["base_net_amount"] > 0 else pi_data["net_amount"]
-                    if round(flt(si_taxable_value), 2) != round(flt(pi_taxable_value), 2):
+                    diff = abs(round(flt(si_taxable_value), 2) - round(flt(pi_taxable_value), 2))
+                    if diff > amount_tolerance:
                         taxable_value_mismatches.append({
                             "item_code": item_code,
                             "si_taxable_value": si_taxable_value,
@@ -6423,22 +6432,23 @@ def validate_si_pi_items_match(sales_invoice: str, purchase_invoice: str, check_
         if check_all:
             si_grand_total = flt(si.grand_total or 0)
             pi_grand_total = flt(pi.grand_total or 0)
-            if round(si_grand_total, 2) != round(pi_grand_total, 2):
+            gt_diff = abs(round(si_grand_total, 2) - round(pi_grand_total, 2))
+            if gt_diff > amount_tolerance:
                 grand_total_mismatch = {
                     "si_total": si_grand_total,
                     "pi_total": pi_grand_total,
                     "diff": si_grand_total - pi_grand_total
                 }
             
-            # Compare total taxes and charges in company currency (no tolerance)
             si_base_taxes = flt(si.base_total_taxes_and_charges or 0)
             if si_base_taxes == 0:
                 si_base_taxes = flt(si.total_taxes_and_charges or 0)
             pi_base_taxes = flt(pi.base_total_taxes_and_charges or 0)
             if pi_base_taxes == 0:
                 pi_base_taxes = flt(pi.total_taxes_and_charges or 0)
-            
-            if round(si_base_taxes, 2) != round(pi_base_taxes, 2):
+
+            tax_diff = abs(round(si_base_taxes, 2) - round(pi_base_taxes, 2))
+            if tax_diff > amount_tolerance:
                 tax_mismatch = {
                     "si_tax": si_base_taxes,
                     "pi_tax": pi_base_taxes,

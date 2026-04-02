@@ -19,6 +19,8 @@
   "internal_transfer_cutoff_fy",
   "cutoff_column_break",
   "accounting_rewrite_cutoff_fy",
+  "validation_section",
+  "si_pi_amount_tolerance",
   "tab_ewaybill",
   "enable_internal_dn_ewaybill"
  ],
@@ -114,6 +116,18 @@
    "options": "Fiscal Year"
   },
   {
+   "fieldname": "validation_section",
+   "fieldtype": "Section Break",
+   "label": "Validation"
+  },
+  {
+   "default": "0",
+   "description": "Maximum acceptable amount difference (per line item taxable value, grand total, and total taxes) between source Sales Invoice and Purchase Invoice. Differences below this threshold are ignored during SI-PI parity validation. Set 0 for exact match.",
+   "fieldname": "si_pi_amount_tolerance",
+   "fieldtype": "Currency",
+   "label": "SI-PI Amount Tolerance"
+  },
+  {
    "fieldname": "tab_ewaybill",
    "fieldtype": "Tab Break",
    "label": "e-Waybill"
@@ -129,7 +143,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-02-16 12:00:00.000000",
+ "modified": "2026-04-03 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "BNS Branch Accounting",
  "name": "BNS Branch Accounting Settings",
