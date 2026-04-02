@@ -1036,13 +1036,22 @@ def validate_internal_purchase_invoice_linkage(doc, method: Optional[str] = None
 
 
 def _resolve_si_name_for_internal_pi(doc) -> Optional[str]:
-    """Resolve linked Sales Invoice name from PI header (reference or bill_no)."""
+    """Resolve linked Sales Invoice name from PI header, bill_no, or PR chain."""
     ref = (doc.get("bns_inter_company_reference") or "").strip()
     if ref and frappe.db.exists("Sales Invoice", ref):
         return ref
     bill = (doc.get("bill_no") or "").strip()
     if bill and frappe.db.exists("Sales Invoice", bill):
         return bill
+    pr_names = sorted(
+        {(row.get("purchase_receipt") or "").strip()
+         for row in (doc.get("items") or [])
+         if (row.get("purchase_receipt") or "").strip()}
+    )
+    for pr_name in pr_names:
+        pr_ref = (frappe.db.get_value("Purchase Receipt", pr_name, "bns_inter_company_reference") or "").strip()
+        if pr_ref and frappe.db.exists("Sales Invoice", pr_ref):
+            return pr_ref
     return None
 
 
@@ -1314,6 +1323,66 @@ def validate_internal_purchase_invoice_transfer_rate(doc, method: Optional[str] 
             ).format(", ".join(missing_rows)),
             title=_("Missing Internal Transfer Rate"),
         )
+
+
+def validate_internal_purchase_invoice_si_parity(doc, method: Optional[str] = None) -> None:
+    """Block PI submit when items/amounts/taxes diverge from the linked Sales Invoice.
+
+    Runs on before_submit for BNS internal different-GSTIN PI flows.
+    Drafts can be edited freely; only submission is gated.
+    """
+    if doc.doctype != "Purchase Invoice":
+        return
+    if not is_bns_internal_supplier(doc):
+        return
+    if not is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc)):
+        return
+
+    si_name = _resolve_si_name_for_internal_pi(doc)
+    if not si_name:
+        return
+
+    company_gstin = (doc.get("company_gstin") or "").strip()
+    billing_gstin = (doc.get("billing_address_gstin") or "").strip()
+    if company_gstin and billing_gstin and company_gstin == billing_gstin:
+        return
+
+    result = validate_si_pi_items_match(si_name, doc.name, check_all=True)
+    if result.get("match"):
+        return
+
+    errors: List[str] = []
+    for item in (result.get("missing_items") or [])[:5]:
+        errors.append(_("Item {0}: SI qty {1}, PI missing").format(item["item_code"], item["si_qty"]))
+    for item in (result.get("qty_mismatches") or [])[:5]:
+        errors.append(_("Item {0}: SI qty {1}, PI qty {2}").format(item["item_code"], item["si_qty"], item["pi_qty"]))
+    for item in (result.get("taxable_value_mismatches") or [])[:5]:
+        errors.append(
+            _("Item {0}: SI taxable {1:.2f}, PI taxable {2:.2f}").format(
+                item["item_code"], item["si_taxable_value"], item["pi_taxable_value"]
+            )
+        )
+    gt = result.get("grand_total_mismatch")
+    if gt:
+        errors.append(
+            _("Grand Total: SI {0:.2f} vs PI {1:.2f} (diff {2:.2f})").format(
+                gt["si_total"], gt["pi_total"], abs(gt["diff"])
+            )
+        )
+    tx = result.get("tax_mismatch")
+    if tx:
+        errors.append(
+            _("Total Taxes: SI {0:.2f} vs PI {1:.2f} (diff {2:.2f})").format(
+                tx["si_tax"], tx["pi_tax"], abs(tx["diff"])
+            )
+        )
+
+    frappe.throw(
+        _(
+            "Purchase Invoice does not match source Sales Invoice {0}:\n{1}"
+        ).format(si_name, "\n".join(errors)),
+        title=_("Internal SI-PI Parity Mismatch"),
+    )
 
 
 def _throw_si_dn_mismatch(
@@ -5324,33 +5393,18 @@ def refresh_si_transfer_rate_after_repost(doc, method: Optional[str] = None) -> 
 
 
 def _is_bns_internal_purchase_invoice_from_si(doc) -> bool:
-    """Return True when submitted PI belongs to BNS internal SI->PI/SI->PR flow."""
+    """Return True when submitted PI belongs to BNS internal SI->PI/SI->PR flow.
+
+    Delegates to is_bns_internal_supplier for direct flag check, then falls back
+    to _resolve_si_name_for_internal_pi (header ref, bill_no, PR chain).
+    """
     if not doc or doc.doctype != "Purchase Invoice" or doc.docstatus != 1:
         return False
 
     if is_bns_internal_supplier(doc):
         return True
 
-    si_ref = (doc.get("bns_inter_company_reference") or "").strip()
-    if si_ref and frappe.db.exists("Sales Invoice", si_ref):
-        return True
-
-    bill_no = (doc.get("bill_no") or "").strip()
-    if bill_no and frappe.db.exists("Sales Invoice", {"name": bill_no, "docstatus": 1}):
-        return True
-
-    pr_names = {row.get("purchase_receipt") for row in (doc.items or []) if row.get("purchase_receipt")}
-    if pr_names:
-        linked_si = frappe.get_all(
-            "Purchase Receipt",
-            filters={"name": ("in", list(pr_names)), "docstatus": 1},
-            fields=["bns_inter_company_reference"],
-        )
-        for pr in linked_si:
-            if pr.get("bns_inter_company_reference") and frappe.db.exists("Sales Invoice", pr.bns_inter_company_reference):
-                return True
-
-    return False
+    return bool(_resolve_si_name_for_internal_pi(doc))
 
 
 def _reassert_sales_invoice_bns_internal_status(si_name: str) -> bool:
@@ -6096,17 +6150,15 @@ def update_sales_invoice_status_for_bns_internal(doc, method: Optional[str] = No
 
 
 def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] = None) -> None:
-    """
-    Update the status of a Purchase Invoice to "BNS Internally Transferred"
-    when submitted for a BNS internal supplier with inter company reference.
+    """Set PI status to 'BNS Internally Transferred' on submit for SI-backed internal PIs.
 
-    This handles:
-    1. PI created directly from SI (via bns_inter_company_reference)
-    2. PI created from PR that was created from SI (via PR.bns_inter_company_reference)
+    Uses the canonical _is_bns_internal_purchase_invoice_from_si detection
+    and _resolve_si_name_for_internal_pi resolver so the same rule set governs
+    submit-time status assignment and post-repost reassertion.
 
     Args:
-        doc: The Purchase Invoice document
-        method (Optional[str]): The method being called
+        doc: The Purchase Invoice document.
+        method: Hook method name (unused).
     """
     if doc.docstatus != 1:
         return
@@ -6114,27 +6166,7 @@ def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] =
     if doc.status == "BNS Internally Transferred":
         return
 
-    is_bns_internal = is_bns_internal_supplier(doc)
-    is_from_si = False
-
-    if is_bns_internal:
-        is_from_si = True
-    elif doc.bns_inter_company_reference:
-        if frappe.db.exists("Sales Invoice", doc.bns_inter_company_reference):
-            is_from_si = True
-    elif doc.items:
-        pr_names = set()
-        for item in doc.items:
-            if item.get("purchase_receipt"):
-                pr_names.add(item.purchase_receipt)
-        if pr_names:
-            for pr_name in pr_names:
-                pr_bns_ref = frappe.db.get_value("Purchase Receipt", pr_name, "bns_inter_company_reference")
-                if pr_bns_ref and frappe.db.exists("Sales Invoice", pr_bns_ref):
-                    is_from_si = True
-                    break
-
-    if not is_from_si:
+    if not _is_bns_internal_purchase_invoice_from_si(doc):
         return
 
     effective_date = _resolve_source_posting_date(doc)
@@ -6149,13 +6181,9 @@ def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] =
         doc.db_set("status", "BNS Internally Transferred", update_modified=False)
         doc.db_set("is_bns_internal_supplier", 1, update_modified=False)
 
-        si_name = None
-        if doc.bns_inter_company_reference and frappe.db.exists("Sales Invoice", doc.bns_inter_company_reference):
-            si_name = doc.bns_inter_company_reference
-        elif doc.bill_no and frappe.db.exists("Sales Invoice", {"name": doc.bill_no, "docstatus": 1}):
-            si_name = doc.bill_no
-            if not doc.bns_inter_company_reference:
-                doc.db_set("bns_inter_company_reference", si_name, update_modified=False)
+        si_name = _resolve_si_name_for_internal_pi(doc)
+        if si_name and not doc.get("bns_inter_company_reference"):
+            doc.db_set("bns_inter_company_reference", si_name, update_modified=False)
 
         if si_name:
             si = frappe.get_doc("Sales Invoice", si_name)
@@ -6171,6 +6199,8 @@ def update_purchase_invoice_status_for_bns_internal(doc, method: Optional[str] =
             _mirror_pi_item_valuation_from_transfer_rate(doc.name)
             _trigger_pi_repost_for_transfer_rate(doc.name, source_repost_name=f"pi_submit::{doc.name}")
             _trigger_bns_internal_gl_repost(doc, source="pi_on_submit_transfer_rate_sync")
+
+            doc.db_set("status", "BNS Internally Transferred", update_modified=False)
 
         frappe.clear_cache(doctype="Purchase Invoice")
         logger.info(f"Updated Purchase Invoice {doc.name} status to BNS Internally Transferred")

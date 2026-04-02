@@ -145,3 +145,12 @@
   - Work WITH ERPNext, not against it. Keep Stock Settings "Allow Negative Stock" ON globally, use a simple `before_submit` doc_event to validate outgoing movements after the cutoff date. No monkey-patching — same pattern as `submission_restriction`.
   - The cutoff date is the key: "allow negative stock for historical corrections before X, enforce discipline after X." Override roles provide escape hatches for authorized users even after the cutoff.
   - CRITICAL anti-pattern: do NOT monkey-patch ERPNext stock ledger functions for this. `after_app_init` is not a valid Frappe hook, `build()` runs inside `update_entries_after.__init__`, and the patching complexity is not worth it. A simple before_submit check against `Bin.actual_qty` is sufficient and transparent.
+- Submit-time SI-PI parity invariant:
+  - An internal PI must never submit when its items, quantities, taxable values, grand total, or taxes diverge from the source Sales Invoice.
+  - Validation runs on `before_submit` (not `validate`) so drafts remain freely editable; only final submission is gated.
+  - The resolver for source SI must be canonical: `_resolve_si_name_for_internal_pi` covers header ref, `bill_no`, and PR chain. Never inline a separate SI lookup.
+  - `_is_bns_internal_purchase_invoice_from_si` must delegate to the same resolver — duplicating detection logic is an anti-pattern that caused silent submit-through in production.
+- PI status finality on submit:
+  - After `on_submit`, an SI-backed PI must end in `BNS Internally Transferred`, never `Overdue`.
+  - ERPNext may compute `Overdue` status during repost or outstanding recalculation; the BNS status setter must reassert after any repost trigger in the submit path.
+  - Do not rely on post-repost hooks alone for status correctness — the submit flow itself must leave the document in the correct terminal state.
