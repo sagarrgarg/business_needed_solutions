@@ -69,7 +69,12 @@ function _refreshEwaybillVisibility(frm) {
 
 frappe.ui.form.on('Purchase Receipt', {
   refresh: function(frm) { setupPurchaseAttachmentFields(frm); },
-  base_grand_total: function(frm) { _refreshEwaybillVisibility(frm); }
+  base_grand_total: function(frm) { _refreshEwaybillVisibility(frm); },
+  items_remove: function(frm) { _refreshEwaybillVisibility(frm); }
+});
+
+frappe.ui.form.on('Purchase Receipt Item', {
+  item_code: function(frm) { _refreshEwaybillVisibility(frm); }
 });
 
 frappe.ui.form.on('Purchase Invoice', {
@@ -78,6 +83,15 @@ frappe.ui.form.on('Purchase Invoice', {
     if (!_isLinkedToPR(frm)) _refreshEwaybillVisibility(frm);
   },
   update_stock: function(frm) {
+    if (!_isLinkedToPR(frm)) _refreshEwaybillVisibility(frm);
+  },
+  items_remove: function(frm) {
+    if (!_isLinkedToPR(frm)) _refreshEwaybillVisibility(frm);
+  }
+});
+
+frappe.ui.form.on('Purchase Invoice Item', {
+  item_code: function(frm) {
     if (!_isLinkedToPR(frm)) _refreshEwaybillVisibility(frm);
   }
 });

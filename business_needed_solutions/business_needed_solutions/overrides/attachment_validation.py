@@ -10,11 +10,13 @@ expected on the PR.  Builty/LR attachment is always optional.
 Toggle: BNS Settings > Stock & Inventory > Enforce Purchase Document Attachments
 """
 
+import json
+import logging
+from typing import Optional
+
 import frappe
 from frappe import _, bold
-from frappe.utils import flt
-from typing import Optional
-import logging
+from frappe.utils import cint, flt
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +83,8 @@ def _is_ewaybill_required(doc) -> bool:
 
     Conditions (all must be true):
       1. GST Settings has enable_e_waybill turned on.
-      2. The document contains stock items (PR always does; PI only when
-         update_stock is on or at least one line item is a stock item).
+      2. At least one line item is a stock item (goods). update_stock alone
+         does not count — non-stock-only PIs must not require e-Waybill.
       3. abs(base_grand_total) >= e_waybill_threshold from GST Settings.
     """
     try:
@@ -92,7 +94,7 @@ def _is_ewaybill_required(doc) -> bool:
     except Exception:
         return False
 
-    if doc.doctype == "Purchase Invoice" and not _has_stock_items(doc):
+    if doc.doctype in ("Purchase Invoice", "Purchase Receipt") and not _has_stock_items(doc):
         return False
 
     threshold = _get_ewaybill_threshold()
@@ -103,15 +105,13 @@ def _is_ewaybill_required(doc) -> bool:
 
 
 def _has_stock_items(doc) -> bool:
-    """Check whether a Purchase Invoice involves stock items."""
-    if doc.get("update_stock"):
-        return True
-
+    """True if at least one row references an Item with is_stock_item set."""
     for item in doc.items or []:
-        is_stock = frappe.get_cached_value("Item", item.item_code, "is_stock_item")
-        if is_stock:
+        code = item.get("item_code")
+        if not code:
+            continue
+        if cint(frappe.get_cached_value("Item", code, "is_stock_item")):
             return True
-
     return False
 
 
@@ -152,6 +152,9 @@ def check_ewaybill_applicability(doctype, base_grand_total, update_stock=0, item
     Client-callable endpoint to determine whether the e-Waybill field should be
     visible/mandatory for the current document state.
 
+    For PI/PR, requires at least one stock item row (``update_stock`` is ignored
+    for that check; kept only for API compatibility).
+
     Returns dict: {"required": bool, "threshold": float}
     """
     if not _is_attachment_validation_enabled():
@@ -169,20 +172,19 @@ def check_ewaybill_applicability(doctype, base_grand_total, update_stock=0, item
         return {"required": False, "threshold": 0}
 
     has_stock = True
-    if doctype == "Purchase Invoice":
-        if not int(update_stock or 0):
-            has_stock = False
-            if items_json:
-                import json
-                try:
-                    items = json.loads(items_json) if isinstance(items_json, str) else items_json
-                except (json.JSONDecodeError, TypeError):
-                    items = []
-                for item in items:
-                    item_code = item.get("item_code")
-                    if item_code and frappe.get_cached_value("Item", item_code, "is_stock_item"):
-                        has_stock = True
-                        break
+    if doctype in ("Purchase Invoice", "Purchase Receipt"):
+        items = []
+        if items_json:
+            try:
+                items = json.loads(items_json) if isinstance(items_json, str) else items_json
+            except (json.JSONDecodeError, TypeError):
+                items = []
+        has_stock = False
+        for item in items:
+            item_code = item.get("item_code") if isinstance(item, dict) else None
+            if item_code and cint(frappe.get_cached_value("Item", item_code, "is_stock_item")):
+                has_stock = True
+                break
 
     if not has_stock:
         return {"required": False, "threshold": threshold}

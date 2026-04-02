@@ -254,7 +254,7 @@ BNS extends ERPNext with:
   - `bns_supplier_invoice_attachment` — Attach (mandatory on submit when feature enabled).
   - `bns_ewaybill_attachment` — Attach (hidden when e-Waybill is not applicable; mandatory when visible and document meets threshold).
   - `bns_builty_attachment` — Attach (always optional, for transport builty / lorry receipt).
-- **e-Waybill field visibility:** Controlled client-side via `purchase_attachment_fields.js` calling `check_ewaybill_applicability` API. Field is hidden when: e-Waybill is disabled in GST Settings, document has no stock items (PI without update_stock), or `abs(base_grand_total) < e_waybill_threshold`.
+- **e-Waybill field visibility:** Controlled client-side via `purchase_attachment_fields.js` calling `check_ewaybill_applicability` API. Field is hidden when: e-Waybill is disabled in GST Settings, **no line has a stock item** (``update_stock`` alone does not count; non-stock-only PIs never require e-Waybill), or `abs(base_grand_total) < e_waybill_threshold`. Same stock-item rule applies to PR.
 - **Rules:**
   - **PR:** `bns_supplier_invoice_attachment` required. `bns_ewaybill_attachment` required when threshold met. `bns_builty_attachment` always optional.
   - **PI created from PR:** Exempt — all 3 fields are hidden, dashboard headline links to the PR.
