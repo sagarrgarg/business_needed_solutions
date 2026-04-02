@@ -1035,6 +1035,245 @@ def validate_internal_purchase_invoice_linkage(doc, method: Optional[str] = None
     )
 
 
+def _resolve_si_name_for_internal_pi(doc) -> Optional[str]:
+    """Resolve linked Sales Invoice name from PI header (reference or bill_no)."""
+    ref = (doc.get("bns_inter_company_reference") or "").strip()
+    if ref and frappe.db.exists("Sales Invoice", ref):
+        return ref
+    bill = (doc.get("bill_no") or "").strip()
+    if bill and frappe.db.exists("Sales Invoice", bill):
+        return bill
+    return None
+
+
+def _build_si_rate_maps_for_pi(si_name: str) -> Tuple[Dict[str, float], List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
+    """Load SI item rates, per-name map, and item_code buckets for PI line matching."""
+    si_items = frappe.get_all(
+        "Sales Invoice Item",
+        filters={"parent": si_name},
+        fields=["name", "item_code", "qty", "stock_qty", "incoming_rate"],
+    )
+    si_rate_by_item: Dict[str, float] = {}
+    for d in si_items:
+        rate = flt(d.incoming_rate or 0) or flt(
+            frappe.db.get_value("Sales Invoice Item", d.name, "incoming_rate") or 0
+        )
+        si_rate_by_item[d.name] = rate
+
+    si_item_buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for d in si_items:
+        rate = si_rate_by_item.get(d.name, 0)
+        si_item_buckets[d.item_code].append(
+            {
+                "name": d.name,
+                "qty": flt(d.qty or 0),
+                "stock_qty": flt(d.stock_qty or d.qty or 0),
+                "remaining_qty": flt(d.qty or 0),
+                "remaining_stock_qty": flt(d.stock_qty or d.qty or 0),
+                "rate": rate,
+            }
+        )
+    return si_rate_by_item, si_items, si_item_buckets
+
+
+def _consume_si_bucket_for_pi_line(
+    bucket_list: List[Dict[str, Any]], pi_qty: float, pi_stock_qty: float
+) -> Tuple[Optional[str], float]:
+    """Match one PI line to an SI bucket row (same logic as _match_and_set_item_references)."""
+    if not bucket_list:
+        return None, 0.0
+    for si_item_data in bucket_list:
+        if si_item_data["remaining_qty"] <= 0:
+            continue
+        if pi_stock_qty > 0 and si_item_data["remaining_stock_qty"] > 0:
+            if round(pi_stock_qty, 6) == round(si_item_data["remaining_stock_qty"], 6):
+                name = si_item_data["name"]
+                rate = flt(si_item_data["rate"] or 0)
+                si_item_data["remaining_qty"] = 0
+                si_item_data["remaining_stock_qty"] = 0
+                return name, rate
+        elif round(pi_qty, 6) == round(si_item_data["remaining_qty"], 6):
+            name = si_item_data["name"]
+            rate = flt(si_item_data["rate"] or 0)
+            si_item_data["remaining_qty"] = 0
+            si_item_data["remaining_stock_qty"] = 0
+            return name, rate
+    for si_item_data in bucket_list:
+        if si_item_data["remaining_qty"] > 0:
+            name = si_item_data["name"]
+            rate = flt(si_item_data["rate"] or 0)
+            if pi_stock_qty > 0 and si_item_data["remaining_stock_qty"] > 0:
+                si_item_data["remaining_stock_qty"] -= pi_stock_qty
+            else:
+                si_item_data["remaining_qty"] -= pi_qty
+            return name, rate
+    return None, 0.0
+
+
+def _get_outgoing_rate_from_si_stock_ledger(
+    si_name: str, item_code: str, warehouse: Optional[str] = None
+) -> float:
+    """Read valuation from latest non-cancelled Sales Invoice Stock Ledger row for this item."""
+    if not si_name or not item_code:
+        return 0.0
+    filters: Dict[str, Any] = {
+        "voucher_type": "Sales Invoice",
+        "voucher_no": si_name,
+        "item_code": item_code,
+        "is_cancelled": 0,
+    }
+    if warehouse:
+        filters["warehouse"] = warehouse
+    rows = frappe.get_all(
+        "Stock Ledger Entry",
+        filters=filters,
+        fields=["incoming_rate", "stock_value", "actual_qty"],
+        order_by="posting_date desc, posting_time desc, creation desc",
+        limit=20,
+    )
+    for row in rows:
+        ir = flt(row.incoming_rate or 0)
+        if ir > 0:
+            return ir
+        aq = flt(row.actual_qty or 0)
+        sv = flt(row.stock_value or 0)
+        if aq != 0 and sv != 0:
+            return abs(sv) / abs(aq)
+    if warehouse:
+        return _get_outgoing_rate_from_si_stock_ledger(si_name, item_code, None)
+    return 0.0
+
+
+def _resolve_pi_item_transfer_rate_extras(
+    item: Dict[str, Any],
+    si_name: str,
+    si_rate_by_item: Dict[str, float],
+    pr_item_rates: Dict[str, float],
+    si_item_buckets: Dict[str, List[Dict[str, Any]]],
+) -> Tuple[float, Optional[str]]:
+    """
+    After sales_invoice_item and pr_detail lookups, resolve rate via item_code match or SLE.
+
+    Returns (rate, si_item_name_to_link) when a bucket match can backfill sales_invoice_item.
+    """
+    source_rate: Optional[float] = None
+    si_item_for_link: Optional[str] = None
+
+    sii = (item.get("sales_invoice_item") or "").strip()
+    if sii:
+        r = si_rate_by_item.get(sii)
+        if r is not None and flt(r) > 0:
+            return flt(r), sii
+
+    pr_detail = (item.get("pr_detail") or "").strip()
+    if pr_detail:
+        pr_r = pr_item_rates.get(pr_detail, 0)
+        if flt(pr_r) > 0:
+            return flt(pr_r), si_item_for_link
+
+    item_code = item.get("item_code")
+    pi_qty = flt(item.get("qty") or 0)
+    pi_stock_qty = flt(item.get("stock_qty") or pi_qty)
+    if item_code and item_code in si_item_buckets:
+        matched_name, matched_rate = _consume_si_bucket_for_pi_line(
+            si_item_buckets[item_code], pi_qty, pi_stock_qty
+        )
+        if matched_name:
+            si_item_for_link = matched_name
+            source_rate = flt(matched_rate or 0)
+            if source_rate <= 0:
+                source_rate = flt(si_rate_by_item.get(matched_name) or 0) or flt(
+                    frappe.db.get_value("Sales Invoice Item", matched_name, "incoming_rate") or 0
+                )
+            if source_rate > 0:
+                return source_rate, si_item_for_link
+
+    if item_code:
+        sle_rate = _get_outgoing_rate_from_si_stock_ledger(
+            si_name, item_code, item.get("warehouse")
+        )
+        if sle_rate > 0:
+            return sle_rate, si_item_for_link
+
+    return 0.0, si_item_for_link
+
+
+def apply_internal_pi_transfer_rates_from_si(doc, si_name: Optional[str] = None) -> int:
+    """
+    Populate Purchase Invoice Item.bns_transfer_rate before validate/submit.
+
+    Uses SI item link, PR item rate, item_code/qty bucket match, then Stock Ledger
+    (Sales Invoice voucher) as fallback when incoming_rate / links are missing.
+    """
+    if doc.doctype != "Purchase Invoice":
+        return 0
+    if not cint(doc.get("update_stock")):
+        return 0
+    if not is_bns_internal_supplier(doc):
+        return 0
+    if not is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc)):
+        return 0
+
+    resolved_si = si_name or _resolve_si_name_for_internal_pi(doc)
+    if not resolved_si:
+        return 0
+
+    pii_meta = frappe.get_meta("Purchase Invoice Item")
+    if not pii_meta.has_field("bns_transfer_rate"):
+        return 0
+
+    si_rate_by_item, _si_rows, si_item_buckets = _build_si_rate_maps_for_pi(resolved_si)
+    pi_items_list = list(doc.get("items") or [])
+    pr_detail_names = sorted(
+        {(it.get("pr_detail") or "").strip() for it in pi_items_list if (it.get("pr_detail") or "").strip()}
+    )
+    pr_item_rates: Dict[str, float] = {}
+    if pr_detail_names:
+        pr_rows = frappe.get_all(
+            "Purchase Receipt Item",
+            filters={"name": ("in", pr_detail_names)},
+            fields=["name", "bns_transfer_rate"],
+        )
+        pr_item_rates = {r.name: flt(r.bns_transfer_rate or 0) for r in pr_rows}
+
+    updated = 0
+    for item in pi_items_list:
+        if flt(item.get("qty") or 0) <= 0:
+            continue
+        if flt(item.get("bns_transfer_rate") or 0) > 0:
+            continue
+        if item.get("item_code") and not cint(
+            frappe.db.get_value("Item", item.get("item_code"), "is_stock_item")
+        ):
+            continue
+
+        rate, link_si = _resolve_pi_item_transfer_rate_extras(
+            item, resolved_si, si_rate_by_item, pr_item_rates, si_item_buckets
+        )
+        if rate <= 0:
+            continue
+
+        item.bns_transfer_rate = flt(rate)
+        updated += 1
+        if (
+            link_si
+            and pii_meta.has_field("sales_invoice_item")
+            and not (item.get("sales_invoice_item") or "").strip()
+        ):
+            item.sales_invoice_item = link_si
+
+        row_name = item.get("name")
+        if row_name and frappe.db.exists("Purchase Invoice Item", row_name):
+            db_vals: Dict[str, Any] = {"bns_transfer_rate": flt(rate)}
+            if link_si and pii_meta.has_field("sales_invoice_item"):
+                db_vals["sales_invoice_item"] = link_si
+            frappe.db.set_value("Purchase Invoice Item", row_name, db_vals, update_modified=False)
+
+    if updated:
+        frappe.clear_cache(doctype="Purchase Invoice")
+    return updated
+
+
 def validate_internal_purchase_invoice_transfer_rate(doc, method: Optional[str] = None) -> None:
     """Require PI item transfer-rate for internal SI-linked update-stock PI rows."""
     if doc.doctype != "Purchase Invoice":
@@ -1046,13 +1285,15 @@ def validate_internal_purchase_invoice_transfer_rate(doc, method: Optional[str] 
     if not is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc)):
         return
 
-    source_ref = (doc.get("bns_inter_company_reference") or "").strip()
-    if not source_ref or not frappe.db.exists("Sales Invoice", source_ref):
+    si_name = _resolve_si_name_for_internal_pi(doc)
+    if not si_name:
         return
 
     pii_meta = frappe.get_meta("Purchase Invoice Item")
     if not pii_meta.has_field("bns_transfer_rate"):
         return
+
+    apply_internal_pi_transfer_rates_from_si(doc, si_name=si_name)
 
     missing_rows = []
     for item in (doc.get("items") or []):
@@ -4659,15 +4900,6 @@ def _sync_pi_item_transfer_rate_from_si(si_name: str, pi_name: Optional[str] = N
     if not pi_item_meta.has_field("bns_transfer_rate"):
         return 0
 
-    si_items = frappe.get_all(
-        "Sales Invoice Item",
-        filters={"parent": si_name},
-        fields=["name", "incoming_rate"],
-    )
-    if not si_items:
-        return 0
-
-    si_rate_by_item = {d.name: flt(d.incoming_rate or 0) for d in si_items}
     if pi_name:
         pi_names = [pi_name] if frappe.db.exists("Purchase Invoice", pi_name) else []
     else:
@@ -4678,10 +4910,23 @@ def _sync_pi_item_transfer_rate_from_si(si_name: str, pi_name: Optional[str] = N
     updated_count = 0
     for current_pi in pi_names:
         current_pi_updated = False
+        si_rate_by_item, _, si_item_buckets = _build_si_rate_maps_for_pi(si_name)
+        if not si_rate_by_item:
+            continue
         pi_items = frappe.get_all(
             "Purchase Invoice Item",
             filters={"parent": current_pi},
-            fields=["name", "sales_invoice_item", "purchase_receipt", "pr_detail", "bns_transfer_rate"],
+            fields=[
+                "name",
+                "item_code",
+                "qty",
+                "stock_qty",
+                "warehouse",
+                "sales_invoice_item",
+                "purchase_receipt",
+                "pr_detail",
+                "bns_transfer_rate",
+            ],
         )
 
         pr_item_rates: Dict[str, float] = {}
@@ -4708,12 +4953,30 @@ def _sync_pi_item_transfer_rate_from_si(si_name: str, pi_name: Optional[str] = N
 
             # For SI->PR->PI chain, keep PI transfer-rate aligned from PR item linkage.
             # PR owns stock SLE/GL legs, but PI transfer-rate should remain consistent.
-            if source_rate is None:
+            if source_rate is None or flt(source_rate) <= 0:
                 pr_detail = (item.get("pr_detail") or "").strip()
                 if pr_detail:
                     source_rate = pr_item_rates.get(pr_detail)
 
-            if source_rate is None:
+            if source_rate is None or flt(source_rate) <= 0:
+                rate2, link2 = _resolve_pi_item_transfer_rate_extras(
+                    item, si_name, si_rate_by_item, pr_item_rates, si_item_buckets
+                )
+                if rate2 > 0:
+                    source_rate = rate2
+                    link2 = (link2 or "").strip()
+                    if link2 and pi_item_meta.has_field("sales_invoice_item"):
+                        cur_link = (item.get("sales_invoice_item") or "").strip()
+                        if not cur_link:
+                            frappe.db.set_value(
+                                "Purchase Invoice Item",
+                                item.get("name"),
+                                "sales_invoice_item",
+                                link2,
+                                update_modified=False,
+                            )
+
+            if source_rate is None or flt(source_rate) <= 0:
                 continue
             if flt(item.get("bns_transfer_rate") or 0) != flt(source_rate):
                 frappe.db.set_value(
