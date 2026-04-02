@@ -7,6 +7,9 @@ and Purchase Invoice before submission via dedicated Attach fields on the doctyp
 When a PI is created from a PR, the PI is exempt because the attachments are
 expected on the PR.  Builty/LR attachment is always optional.
 
+BNS internal supplier: no attachment validation; fields are hidden in the client
+(see purchase_attachment_fields.js). External supplier restores normal rules.
+
 Toggle: BNS Settings > Stock & Inventory > Enforce Purchase Document Attachments
 """
 
@@ -38,6 +41,9 @@ def validate_purchase_attachments(doc, method: Optional[str] = None) -> None:
     if doc.get("is_return"):
         return
 
+    if _is_bns_internal_supplier_scope(doc):
+        return
+
     if doc.doctype == "Purchase Receipt":
         _require_supplier_invoice(doc)
         if _is_ewaybill_required(doc):
@@ -63,6 +69,23 @@ def _is_attachment_validation_enabled() -> bool:
         )
     except Exception:
         return False
+
+
+def _is_bns_internal_supplier_scope(doc) -> bool:
+    """
+    True when PR/PI supplier is a BNS internal branch supplier.
+
+    Uses the document flag when set; otherwise reads Supplier master so drafts
+    stay consistent after changing supplier before save.
+    """
+    if doc.doctype not in ("Purchase Receipt", "Purchase Invoice"):
+        return False
+    if cint(doc.get("is_bns_internal_supplier")):
+        return True
+    supplier = doc.get("supplier")
+    if not supplier:
+        return False
+    return bool(frappe.db.get_value("Supplier", supplier, "is_bns_internal_supplier"))
 
 
 def _require_supplier_invoice(doc) -> None:
@@ -147,7 +170,14 @@ def _get_ewaybill_threshold() -> float:
 
 
 @frappe.whitelist()
-def check_ewaybill_applicability(doctype, base_grand_total, update_stock=0, items_json=None):
+def check_ewaybill_applicability(
+    doctype,
+    base_grand_total,
+    update_stock=0,
+    items_json=None,
+    is_bns_internal_supplier=0,
+    supplier=None,
+):
     """
     Client-callable endpoint to determine whether the e-Waybill field should be
     visible/mandatory for the current document state.
@@ -159,6 +189,13 @@ def check_ewaybill_applicability(doctype, base_grand_total, update_stock=0, item
     """
     if not _is_attachment_validation_enabled():
         return {"required": False, "threshold": 0}
+
+    if cint(is_bns_internal_supplier):
+        return {"required": False, "threshold": _get_ewaybill_threshold()}
+    if supplier and bool(
+        frappe.db.get_value("Supplier", supplier, "is_bns_internal_supplier")
+    ):
+        return {"required": False, "threshold": _get_ewaybill_threshold()}
 
     try:
         enable_ewaybill = frappe.db.get_single_value("GST Settings", "enable_e_waybill")

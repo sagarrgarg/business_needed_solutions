@@ -7,6 +7,8 @@
  * When visible, it becomes mandatory on submit.
  * Builty / LR Copy is always optional.
  * When PI is linked to a PR, the entire section is hidden with an info note.
+ * When supplier is BNS internal, the section is hidden and nothing is required;
+ * switching to an external supplier restores normal behaviour (after refresh/supplier change).
  */
 
 function setupPurchaseAttachmentFields(frm) {
@@ -17,8 +19,33 @@ function setupPurchaseAttachmentFields(frm) {
     return;
   }
 
-  _showAttachmentSection(frm);
-  _refreshEwaybillVisibility(frm);
+  _resolveBnsInternalSupplier(frm, function(internal) {
+    if (internal) {
+      _hideAttachmentSection(frm);
+      return;
+    }
+    _showAttachmentSection(frm);
+    _refreshEwaybillVisibility(frm);
+  });
+}
+
+function _resolveBnsInternalSupplier(frm, callback) {
+  if (!frm.doc.supplier) {
+    callback(false);
+    return;
+  }
+  if (cint(frm.doc.is_bns_internal_supplier)) {
+    callback(true);
+    return;
+  }
+  frappe.db.get_value(
+    'Supplier',
+    frm.doc.supplier,
+    'is_bns_internal_supplier',
+    function(r) {
+      callback(r && cint(r.is_bns_internal_supplier));
+    }
+  );
 }
 
 function _isLinkedToPR(frm) {
@@ -42,33 +69,44 @@ function _showAttachmentSection(frm) {
 }
 
 function _refreshEwaybillVisibility(frm) {
-  frappe.call({
-    method: 'business_needed_solutions.business_needed_solutions.overrides.attachment_validation.check_ewaybill_applicability',
-    args: {
-      doctype: frm.doc.doctype,
-      base_grand_total: frm.doc.base_grand_total || 0,
-      update_stock: frm.doc.update_stock || 0,
-      items_json: JSON.stringify((frm.doc.items || []).map(function(d) { return {item_code: d.item_code}; }))
-    },
-    callback: function(r) {
-      if (!r || !r.message) return;
-
-      var ewaybillRequired = r.message.required;
-      frm.toggle_display('bns_ewaybill_attachment', ewaybillRequired);
-      frm.toggle_reqd('bns_ewaybill_attachment', ewaybillRequired && frm.doc.docstatus === 0);
-
-      if (ewaybillRequired && frm.doc.docstatus === 0 && frm.fields_dict.bns_ewaybill_attachment) {
-        frm.fields_dict.bns_ewaybill_attachment.set_description(
-          __('Required: Net total exceeds e-Waybill threshold of {0}',
-            [frappe.format(r.message.threshold, {fieldtype: 'Currency'})])
-        );
-      }
+  _resolveBnsInternalSupplier(frm, function(internal) {
+    if (internal) {
+      frm.toggle_display('bns_ewaybill_attachment', false);
+      frm.toggle_reqd('bns_ewaybill_attachment', false);
+      return;
     }
+    frappe.call({
+      method: 'business_needed_solutions.business_needed_solutions.overrides.attachment_validation.check_ewaybill_applicability',
+      args: {
+        doctype: frm.doc.doctype,
+        base_grand_total: frm.doc.base_grand_total || 0,
+        update_stock: frm.doc.update_stock || 0,
+        items_json: JSON.stringify((frm.doc.items || []).map(function(d) { return {item_code: d.item_code}; })),
+        is_bns_internal_supplier: cint(frm.doc.is_bns_internal_supplier),
+        supplier: frm.doc.supplier || ''
+      },
+      callback: function(r) {
+        if (!r || !r.message) return;
+
+        var ewaybillRequired = r.message.required;
+        frm.toggle_display('bns_ewaybill_attachment', ewaybillRequired);
+        frm.toggle_reqd('bns_ewaybill_attachment', ewaybillRequired && frm.doc.docstatus === 0);
+
+        if (ewaybillRequired && frm.doc.docstatus === 0 && frm.fields_dict.bns_ewaybill_attachment) {
+          frm.fields_dict.bns_ewaybill_attachment.set_description(
+            __('Required: Net total exceeds e-Waybill threshold of {0}',
+              [frappe.format(r.message.threshold, {fieldtype: 'Currency'})])
+          );
+        }
+      }
+    });
   });
 }
 
 frappe.ui.form.on('Purchase Receipt', {
   refresh: function(frm) { setupPurchaseAttachmentFields(frm); },
+  supplier: function(frm) { setupPurchaseAttachmentFields(frm); },
+  is_bns_internal_supplier: function(frm) { setupPurchaseAttachmentFields(frm); },
   base_grand_total: function(frm) { _refreshEwaybillVisibility(frm); },
   items_remove: function(frm) { _refreshEwaybillVisibility(frm); }
 });
@@ -79,6 +117,8 @@ frappe.ui.form.on('Purchase Receipt Item', {
 
 frappe.ui.form.on('Purchase Invoice', {
   refresh: function(frm) { setupPurchaseAttachmentFields(frm); },
+  supplier: function(frm) { setupPurchaseAttachmentFields(frm); },
+  is_bns_internal_supplier: function(frm) { setupPurchaseAttachmentFields(frm); },
   base_grand_total: function(frm) {
     if (!_isLinkedToPR(frm)) _refreshEwaybillVisibility(frm);
   },

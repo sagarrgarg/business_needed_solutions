@@ -249,6 +249,7 @@ BNS extends ERPNext with:
 
 - **What:** `before_submit` hook for Purchase Receipt and Purchase Invoice that enforces mandatory attachments via dedicated Attach fields on each doctype.
 - **Why:** Supplier invoices (and e-Waybills when applicable) must be on file before a purchase document is finalized. Prevents submission without supporting documents. Using explicit Attach fields (instead of generic File attachments) provides clear separation between document types.
+- **BNS internal supplier:** When `is_bns_internal_supplier` is set on the document or the linked **Supplier** master is internal, validation is skipped and the attachment section is hidden in the UI. Changing supplier to an external party (or clearing internal on Supplier) restores enforcement on next refresh / supplier change.
 - **Custom Fields (on both PR and PI):**
   - `bns_purchase_attachments_section` — Section Break, collapsible.
   - `bns_supplier_invoice_attachment` — Attach (mandatory on submit when feature enabled).
@@ -256,7 +257,7 @@ BNS extends ERPNext with:
   - `bns_builty_attachment` — Attach (always optional, for transport builty / lorry receipt).
 - **e-Waybill field visibility:** Controlled client-side via `purchase_attachment_fields.js` calling `check_ewaybill_applicability` API. Field is hidden when: e-Waybill is disabled in GST Settings, **no line has a stock item** (``update_stock`` alone does not count; non-stock-only PIs never require e-Waybill), or `abs(base_grand_total) < e_waybill_threshold`. Same stock-item rule applies to PR.
 - **Rules:**
-  - **PR:** `bns_supplier_invoice_attachment` required. `bns_ewaybill_attachment` required when threshold met. `bns_builty_attachment` always optional.
+  - **PR:** `bns_supplier_invoice_attachment` required (except BNS internal supplier). `bns_ewaybill_attachment` required when threshold met. `bns_builty_attachment` always optional.
   - **PI created from PR:** Exempt — all 3 fields are hidden, dashboard headline links to the PR.
   - **PI created directly (no PR items):** Same rules as PR.
 - **Settings:** BNS Settings > Stock & Inventory > `enforce_purchase_document_attachments` (Check, default off).
