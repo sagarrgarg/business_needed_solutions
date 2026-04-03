@@ -154,3 +154,8 @@
   - After `on_submit`, an SI-backed PI must end in `BNS Internally Transferred`, never `Overdue`.
   - ERPNext may compute `Overdue` status during repost or outstanding recalculation; the BNS status setter must reassert after any repost trigger in the submit path.
   - Do not rely on post-repost hooks alone for status correctness — the submit flow itself must leave the document in the correct terminal state.
+- Transfer-rate chain completeness (DN→SI→PI):
+  - PI `bns_transfer_rate` must never fail because an intermediate document has a zero rate. The resolver must walk the full chain: SI item → DN Item → DN SLE.
+  - SI `incoming_rate` is often 0 for non-update-stock SIs because ERPNext only writes SLE for update-stock SIs. The DN is the stock-valuation authority in these cases.
+  - `_build_si_rate_maps_for_pi` is the single point where SI rates are loaded for PI consumption. DN backfill must happen here so all downstream consumers (bucket match, item link, sync) see correct rates.
+  - The final DN SLE fallback in `_resolve_pi_item_transfer_rate_extras` is a safety net — it should rarely be needed if `_build_si_rate_maps_for_pi` backfills correctly, but it catches edge cases where SI items lack DN linkage fields.

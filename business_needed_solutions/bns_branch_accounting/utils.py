@@ -1055,18 +1055,59 @@ def _resolve_si_name_for_internal_pi(doc) -> Optional[str]:
     return None
 
 
+def _get_rate_from_dn_stock_ledger(
+    dn_name: str, item_code: str, warehouse: Optional[str] = None
+) -> float:
+    """Read valuation from Delivery Note Stock Ledger Entry for this item."""
+    if not dn_name or not item_code:
+        return 0.0
+    filters: Dict[str, Any] = {
+        "voucher_type": "Delivery Note",
+        "voucher_no": dn_name,
+        "item_code": item_code,
+        "is_cancelled": 0,
+    }
+    if warehouse:
+        filters["warehouse"] = warehouse
+    rows = frappe.get_all(
+        "Stock Ledger Entry",
+        filters=filters,
+        fields=["incoming_rate", "stock_value", "actual_qty"],
+        order_by="posting_date desc, posting_time desc, creation desc",
+        limit=20,
+    )
+    for row in rows:
+        ir = flt(row.incoming_rate or 0)
+        if ir > 0:
+            return ir
+        aq = flt(row.actual_qty or 0)
+        sv = flt(row.stock_value or 0)
+        if aq != 0 and sv != 0:
+            return abs(sv) / abs(aq)
+    if warehouse:
+        return _get_rate_from_dn_stock_ledger(dn_name, item_code, None)
+    return 0.0
+
+
 def _build_si_rate_maps_for_pi(si_name: str) -> Tuple[Dict[str, float], List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
-    """Load SI item rates, per-name map, and item_code buckets for PI line matching."""
+    """Load SI item rates, per-name map, and item_code buckets for PI line matching.
+
+    When SI item incoming_rate is 0 and the item links to a DN (via delivery_note
+    + dn_detail), backfills from DN Item.incoming_rate then DN SLE.
+    """
     si_items = frappe.get_all(
         "Sales Invoice Item",
         filters={"parent": si_name},
-        fields=["name", "item_code", "qty", "stock_qty", "incoming_rate"],
+        fields=["name", "item_code", "qty", "stock_qty", "incoming_rate",
+                "delivery_note", "dn_detail"],
     )
     si_rate_by_item: Dict[str, float] = {}
     for d in si_items:
         rate = flt(d.incoming_rate or 0) or flt(
             frappe.db.get_value("Sales Invoice Item", d.name, "incoming_rate") or 0
         )
+        if rate <= 0:
+            rate = _resolve_rate_from_dn_chain(d)
         si_rate_by_item[d.name] = rate
 
     si_item_buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
@@ -1083,6 +1124,33 @@ def _build_si_rate_maps_for_pi(si_name: str) -> Tuple[Dict[str, float], List[Dic
             }
         )
     return si_rate_by_item, si_items, si_item_buckets
+
+
+def _resolve_rate_from_dn_chain(si_item: Dict[str, Any]) -> float:
+    """Resolve incoming_rate for an SI item from its linked Delivery Note.
+
+    Fallback order:
+    1. DN Item.incoming_rate (via dn_detail)
+    2. DN Stock Ledger Entry (via delivery_note + item_code)
+    """
+    dn_name = (si_item.get("delivery_note") or "").strip()
+    dn_detail = (si_item.get("dn_detail") or "").strip()
+    item_code = si_item.get("item_code")
+
+    if not dn_name:
+        return 0.0
+
+    if dn_detail:
+        dn_ir = flt(
+            frappe.db.get_value("Delivery Note Item", dn_detail, "incoming_rate") or 0
+        )
+        if dn_ir > 0:
+            return dn_ir
+
+    if item_code:
+        return _get_rate_from_dn_stock_ledger(dn_name, item_code)
+
+    return 0.0
 
 
 def _consume_si_bucket_for_pi_line(
@@ -1159,11 +1227,21 @@ def _resolve_pi_item_transfer_rate_extras(
     si_rate_by_item: Dict[str, float],
     pr_item_rates: Dict[str, float],
     si_item_buckets: Dict[str, List[Dict[str, Any]]],
+    si_dn_map: Optional[Dict[str, str]] = None,
 ) -> Tuple[float, Optional[str]]:
-    """
-    After sales_invoice_item and pr_detail lookups, resolve rate via item_code match or SLE.
+    """Resolve PI item transfer-rate through the full fallback chain.
 
-    Returns (rate, si_item_name_to_link) when a bucket match can backfill sales_invoice_item.
+    Fallback order:
+    1. SI item link (sales_invoice_item) → SI incoming_rate (already DN-backfilled)
+    2. PR item link (pr_detail) → PR bns_transfer_rate
+    3. Item-code/qty bucket match → SI incoming_rate
+    4. SI Stock Ledger Entry
+    5. DN Stock Ledger Entry (via SI item → delivery_note link)
+
+    Args:
+        si_dn_map: {si_item_name: delivery_note_name} for DN SLE fallback.
+
+    Returns (rate, si_item_name_to_link).
     """
     source_rate: Optional[float] = None
     si_item_for_link: Optional[str] = None
@@ -1204,6 +1282,21 @@ def _resolve_pi_item_transfer_rate_extras(
         if sle_rate > 0:
             return sle_rate, si_item_for_link
 
+    if item_code and si_dn_map:
+        ref_si_item = si_item_for_link or sii
+        dn_name = si_dn_map.get(ref_si_item or "") if ref_si_item else None
+        if not dn_name:
+            for _si_item_name, _dn in si_dn_map.items():
+                if _dn:
+                    dn_name = _dn
+                    break
+        if dn_name:
+            dn_sle_rate = _get_rate_from_dn_stock_ledger(
+                dn_name, item_code, item.get("warehouse")
+            )
+            if dn_sle_rate > 0:
+                return dn_sle_rate, si_item_for_link
+
     return 0.0, si_item_for_link
 
 
@@ -1231,7 +1324,14 @@ def apply_internal_pi_transfer_rates_from_si(doc, si_name: Optional[str] = None)
     if not pii_meta.has_field("bns_transfer_rate"):
         return 0
 
-    si_rate_by_item, _si_rows, si_item_buckets = _build_si_rate_maps_for_pi(resolved_si)
+    si_rate_by_item, si_rows, si_item_buckets = _build_si_rate_maps_for_pi(resolved_si)
+
+    si_dn_map: Dict[str, str] = {}
+    for d in si_rows:
+        dn = (d.get("delivery_note") or "").strip()
+        if dn:
+            si_dn_map[d.name] = dn
+
     pi_items_list = list(doc.get("items") or [])
     pr_detail_names = sorted(
         {(it.get("pr_detail") or "").strip() for it in pi_items_list if (it.get("pr_detail") or "").strip()}
@@ -1257,7 +1357,8 @@ def apply_internal_pi_transfer_rates_from_si(doc, si_name: Optional[str] = None)
             continue
 
         rate, link_si = _resolve_pi_item_transfer_rate_extras(
-            item, resolved_si, si_rate_by_item, pr_item_rates, si_item_buckets
+            item, resolved_si, si_rate_by_item, pr_item_rates, si_item_buckets,
+            si_dn_map=si_dn_map,
         )
         if rate <= 0:
             continue
@@ -4982,9 +5083,14 @@ def _sync_pi_item_transfer_rate_from_si(si_name: str, pi_name: Optional[str] = N
     updated_count = 0
     for current_pi in pi_names:
         current_pi_updated = False
-        si_rate_by_item, _, si_item_buckets = _build_si_rate_maps_for_pi(si_name)
+        si_rate_by_item, si_rows, si_item_buckets = _build_si_rate_maps_for_pi(si_name)
         if not si_rate_by_item:
             continue
+        si_dn_map: Dict[str, str] = {}
+        for d in si_rows:
+            dn = (d.get("delivery_note") or "").strip()
+            if dn:
+                si_dn_map[d.name] = dn
         pi_items = frappe.get_all(
             "Purchase Invoice Item",
             filters={"parent": current_pi},
@@ -5032,7 +5138,8 @@ def _sync_pi_item_transfer_rate_from_si(si_name: str, pi_name: Optional[str] = N
 
             if source_rate is None or flt(source_rate) <= 0:
                 rate2, link2 = _resolve_pi_item_transfer_rate_extras(
-                    item, si_name, si_rate_by_item, pr_item_rates, si_item_buckets
+                    item, si_name, si_rate_by_item, pr_item_rates, si_item_buckets,
+                    si_dn_map=si_dn_map,
                 )
                 if rate2 > 0:
                     source_rate = rate2
