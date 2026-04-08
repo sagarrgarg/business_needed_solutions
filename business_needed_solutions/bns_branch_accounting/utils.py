@@ -4799,7 +4799,12 @@ def _sync_pr_sle_from_transfer_rate(pr_name: str) -> int:
 
 
 def _mirror_pi_item_valuation_from_transfer_rate(pi_name: str) -> int:
-    """Mirror PI item valuation_rate from bns_transfer_rate for SI->PI flow."""
+    """Mirror PI item valuation_rate from bns_transfer_rate for SI->PI flow.
+
+    Only applies when the PI's governing source date is after the accounting
+    rewrite cutoff so that the GL rewrite is also active. Without the GL rewrite,
+    changing valuation_rate would cause a debit/credit imbalance during repost.
+    """
     if not pi_name or not frappe.db.exists("Purchase Invoice", pi_name):
         return 0
 
@@ -4814,6 +4819,8 @@ def _mirror_pi_item_valuation_from_transfer_rate(pi_name: str) -> int:
         return 0
     source_ref = (pi.get("bns_inter_company_reference") or "").strip()
     if not source_ref or not frappe.db.exists("Sales Invoice", source_ref):
+        return 0
+    if not is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(pi)):
         return 0
 
     updated_count = 0
@@ -4844,12 +4851,19 @@ def _mirror_pi_item_valuation_from_transfer_rate(pi_name: str) -> int:
 
 
 def _sync_pi_sle_from_transfer_rate(pi_name: str) -> int:
-    """Sync PI Stock Ledger Entry incoming values from PI Item transfer-rate."""
+    """Sync PI Stock Ledger Entry incoming values from PI Item transfer-rate.
+
+    Only applies when the PI's governing source date is after the accounting
+    rewrite cutoff. Modifying SLE without the corresponding GL rewrite causes
+    debit/credit imbalance on the PI.
+    """
     if not pi_name or not frappe.db.exists("Purchase Invoice", pi_name):
         return 0
 
     pi = frappe.get_doc("Purchase Invoice", pi_name)
     if pi.docstatus != 1 or not cint(pi.get("update_stock")):
+        return 0
+    if not is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(pi)):
         return 0
 
     transfer_rate_by_item = {}
@@ -5261,7 +5275,12 @@ def _trigger_pr_repost_for_transfer_rate(pr_name: str, source_repost_name: str) 
 
 
 def _trigger_pi_repost_for_transfer_rate(pi_name: str, source_repost_name: str) -> bool:
-    """Trigger PI repost after transfer-rate mirror with lock-first and finally cleanup."""
+    """Trigger PI repost after transfer-rate mirror with lock-first and finally cleanup.
+
+    Only triggers when the PI's governing source date is after the accounting
+    rewrite cutoff so the GL rewrite is active during the repost. Without the GL
+    rewrite, the repost would produce imbalanced GL entries.
+    """
     if not pi_name or not frappe.db.exists("Purchase Invoice", pi_name):
         return False
     per_repost_key = f"bns_transfer_rate_pi_repost::{source_repost_name}::{pi_name}"
@@ -5285,6 +5304,9 @@ def _trigger_pi_repost_for_transfer_rate(pi_name: str, source_repost_name: str) 
         return False
     source_ref = (pi.get("bns_inter_company_reference") or "").strip()
     if not source_ref or not frappe.db.exists("Sales Invoice", source_ref):
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
+        return False
+    if not is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(pi)):
         _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
         return False
     try:

@@ -18,6 +18,12 @@ The app is designed to be **configurable via settings** – most features can be
 
 ---
 
+### Decision note (2026-04-09, PI transfer-rate repost cutoff gate)
+- The BNS internal transfer system has two phases: Phase 1 (internal transfer cutoff) and Phase 2 (accounting rewrite cutoff). Phase 2 requires Phase 1. The GL rewrite that restructures PI GL entries into the BNS internal pattern only activates after Phase 2.
+- Three functions (`_mirror_pi_item_valuation_from_transfer_rate`, `_sync_pi_sle_from_transfer_rate`, `_trigger_pi_repost_for_transfer_rate`) were modifying stock valuation and triggering reposts using only supplier/SI-link checks, without verifying the Phase 2 cutoff. This created a dangerous mismatch: stock values were rewritten to the transfer rate, but the GL structure remained standard — producing a debit/credit imbalance.
+- **Anti-pattern:** any function that modifies `valuation_rate` (ERPNext standard field) or triggers SLE/GL repost for internal PIs MUST check `is_after_accounting_rewrite_cutoff`, because the GL rewrite is the only thing that makes these modified values balance. Writing `bns_transfer_rate` (BNS custom field) is safe without the cutoff check — it's informational.
+- **Rule:** SLE mutation and GL rewrite must always be in lockstep. If one is gated by a cutoff, the other must be gated identically.
+
 ### Decision note (2026-04-09, suppress repost error emails)
 - Repost failures are transient in most cases (timeouts, deadlocks) and ERPNext already retries automatically. The error emails to Stock Managers added noise without actionable value — the Failed status on the document itself and Error Logs are sufficient for investigation.
 - Monkey-patching `notify_error_to_stock_managers` to a no-op is the least invasive approach — it preserves all other error handling (Error Log creation, status update, traceback storage on the document).

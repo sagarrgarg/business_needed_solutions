@@ -6,6 +6,29 @@
 
 ---
 
+## 2026-04-09 – Fix PI transfer-rate repost cutoff gate (debit/credit imbalance)
+
+### What Changed
+Three PI transfer-rate functions in `bns_branch_accounting/utils.py` were missing an `is_after_accounting_rewrite_cutoff` check, causing them to fire for PIs that were after the internal transfer cutoff (Phase 1) but before the accounting rewrite cutoff (Phase 2). This produced a debit/credit imbalance because the GL rewrite — which restructures PI GL entries for the transfer pattern — only activates after Phase 2.
+
+**Fixed functions:**
+- `_mirror_pi_item_valuation_from_transfer_rate` — now skips if PI source date < accounting rewrite cutoff; prevents overwriting ERPNext's standard `valuation_rate` with `bns_transfer_rate` when the GL rewrite won't run.
+- `_sync_pi_sle_from_transfer_rate` — now skips if PI source date < accounting rewrite cutoff; prevents modifying SLE `incoming_rate` and `stock_value_difference` without the matching GL structure.
+- `_trigger_pi_repost_for_transfer_rate` — now releases lock and returns early if PI source date < accounting rewrite cutoff; prevents triggering `repost_future_sle_and_gle()` that would generate imbalanced GL entries.
+
+### Why
+Only BNS internal supplier PIs were getting "Debit and Credit not equal" errors during Repost Item Valuation. Root cause: the mirror/sync/repost chain modified stock valuations to use the transfer rate, but the GL rewrite (gated by Phase 2 cutoff) did not apply, so ERPNext's standard GL code produced stock GL at the transfer rate vs. creditor GL at the original grand total.
+
+### Impacted Modules
+- `bns_branch_accounting/utils.py` (transfer-rate chain for PI)
+- Repost Item Valuation `on_change` hooks (`refresh_si_transfer_rate_after_repost`)
+
+### Migration Implications
+- No schema changes; code-only fix. Deploy and clear cache.
+- For already-corrupted PIs: cancel and re-submit the PI, or delete the stuck Repost Item Valuation entry.
+
+---
+
 ## 2026-04-09 – Suppress Repost Item Valuation error emails
 
 ### What changed
