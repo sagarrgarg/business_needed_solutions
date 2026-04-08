@@ -6,6 +6,25 @@
 
 ---
 
+## 2026-04-09 – Suppress Repost Item Valuation error emails
+
+### What changed
+- **`bns_branch_accounting/utils.py`**:
+  - New `_suppress_repost_error_emails()` replaces ERPNext's `notify_error_to_stock_managers` with a no-op.
+  - Applied both on module import (eager) and via `apply_bns_runtime_patches()` (before_request / before_job hooks) so it covers the hourly scheduler worker that runs `repost_entries()`.
+  - Guarded by `_BNS_REPOST_EMAIL_SUPPRESSED` flag and a `_bns_suppressed` sentinel on the function to prevent double-patching.
+
+### Why it changed
+- Repost Item Valuation failures already create an Error Log and set the document status to Failed. The emails to Stock Managers were noisy and not actionable — errors are visible on the document itself and in the BNS dashboard repost tracker.
+
+### Impacted modules
+- ERPNext `repost_item_valuation.py` — `notify_error_to_stock_managers` is replaced at runtime. Error logging and status tracking are unaffected.
+
+### Migration implications
+- None. Clear cache after deployment.
+
+---
+
 ## 2026-04-09 – Negative stock override: exclude non-stock items
 
 ### What changed

@@ -18,6 +18,10 @@ The app is designed to be **configurable via settings** – most features can be
 
 ---
 
+### Decision note (2026-04-09, suppress repost error emails)
+- Repost failures are transient in most cases (timeouts, deadlocks) and ERPNext already retries automatically. The error emails to Stock Managers added noise without actionable value — the Failed status on the document itself and Error Logs are sufficient for investigation.
+- Monkey-patching `notify_error_to_stock_managers` to a no-op is the least invasive approach — it preserves all other error handling (Error Log creation, status update, traceback storage on the document).
+
 ### Decision note (2026-04-09, negative stock override skips non-stock items)
 - The negative stock cutoff feature is a **stock** guard — it must only validate items that actually maintain bin/SLE quantities (`is_stock_item=1`). Non-stock items on mixed documents (e.g. service line on a Delivery Note) must pass through unchecked.
 - The batch lookup (`_get_stock_item_set`) avoids per-row DB hits. The set is built once per document submit, which is acceptable since the items table is bounded and submit is not a hot path.

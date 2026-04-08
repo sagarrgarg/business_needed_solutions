@@ -3413,11 +3413,47 @@ def _trigger_bns_internal_gl_repost(doc, source: str) -> bool:
         return False
 
 
+_BNS_REPOST_EMAIL_SUPPRESSED = False
+
+
+def _suppress_repost_error_emails() -> None:
+    """Replace ERPNext's repost error emailer with a no-op.
+
+    Repost Item Valuation failures already create an Error Log and set the
+    document status to Failed. The emails to Stock Managers are noisy and
+    not actionable for most teams; errors are visible on the document and
+    in the BNS dashboard repost tracker.
+    """
+    global _BNS_REPOST_EMAIL_SUPPRESSED
+    if _BNS_REPOST_EMAIL_SUPPRESSED:
+        return
+
+    try:
+        from erpnext.stock.doctype.repost_item_valuation import (
+            repost_item_valuation as riv_module,
+        )
+
+        if getattr(riv_module.notify_error_to_stock_managers, "_bns_suppressed", False):
+            _BNS_REPOST_EMAIL_SUPPRESSED = True
+            return
+
+        def _noop(doc, traceback):
+            pass
+
+        _noop._bns_suppressed = True
+        riv_module.notify_error_to_stock_managers = _noop
+        _BNS_REPOST_EMAIL_SUPPRESSED = True
+        logger.info("Suppressed Repost Item Valuation error emails")
+    except Exception as e:
+        logger.error("Failed to suppress repost error emails: %s", str(e))
+
+
 # Best-effort eager patching on module import.
 _apply_bns_transfer_rate_stock_ledger_patch()
 _apply_bns_internal_gl_rewrite_patch()
 _apply_bns_repost_gl_failsafe_patch()
 _apply_bns_repost_accounting_ledger_patch()
+_suppress_repost_error_emails()
 
 
 def apply_bns_runtime_patches() -> None:
@@ -3429,6 +3465,7 @@ def apply_bns_runtime_patches() -> None:
     _apply_bns_internal_gl_rewrite_patch()
     _apply_bns_repost_gl_failsafe_patch()
     _apply_bns_repost_accounting_ledger_patch()
+    _suppress_repost_error_emails()
 
 
 def is_bns_internal_customer(doc) -> bool:
