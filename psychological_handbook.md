@@ -18,6 +18,11 @@ The app is designed to be **configurable via settings** – most features can be
 
 ---
 
+### Decision note (2026-04-09, PR/SI transfer-rate chain cutoff gate)
+- The same Phase 2 rule that applies to PI functions applies identically to PR functions: `_mirror_pr_item_valuation_from_transfer_rate`, `_sync_pr_sle_from_transfer_rate`, `_trigger_pr_repost_for_transfer_rate` must all check `is_after_accounting_rewrite_cutoff` before modifying ERPNext standard fields.
+- `_sync_si_item_incoming_rate_from_dn` modifies `Sales Invoice Item.incoming_rate` which feeds into downstream PI/PR transfer-rate resolution. Gating it behind Phase 2 prevents cascading rate changes for pre-cutoff documents.
+- **Anti-pattern (generalized):** ANY function in the transfer-rate chain that writes to ERPNext standard fields (`valuation_rate`, `incoming_rate`, `stock_value_difference`) or triggers `repost_future_sle_and_gle` / `make_gl_entries` MUST be gated by `is_after_accounting_rewrite_cutoff`. Writing BNS custom fields (`bns_transfer_rate`) is safe without the gate.
+
 ### Decision note (2026-04-09, PI transfer-rate repost cutoff gate)
 - The BNS internal transfer system has two phases: Phase 1 (internal transfer cutoff) and Phase 2 (accounting rewrite cutoff). Phase 2 requires Phase 1. The GL rewrite that restructures PI GL entries into the BNS internal pattern only activates after Phase 2.
 - Three functions (`_mirror_pi_item_valuation_from_transfer_rate`, `_sync_pi_sle_from_transfer_rate`, `_trigger_pi_repost_for_transfer_rate`) were modifying stock valuation and triggering reposts using only supplier/SI-link checks, without verifying the Phase 2 cutoff. This created a dangerous mismatch: stock values were rewritten to the transfer rate, but the GL structure remained standard — producing a debit/credit imbalance.

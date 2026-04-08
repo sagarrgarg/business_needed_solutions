@@ -2142,13 +2142,100 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     return rewritten
 
 
+def _balance_bns_internal_pi_gl_entries(
+    doc, gl_entries: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Balance PI GL entries for BNS internal PIs in the Phase 1 window.
+
+    When repost changes Stock In Hand (valuation shift) but Creditors stays
+    fixed to grand_total, the GL becomes imbalanced.  This function absorbs
+    the difference via the expense / COGS account so debit == credit.
+
+    Only called for PIs that are after internal_transfer_cutoff but before
+    accounting_rewrite_cutoff (Phase 1 window).
+    """
+    if not gl_entries:
+        return gl_entries
+
+    debit_total = sum(flt(row.get("debit") or 0) for row in gl_entries)
+    credit_total = sum(flt(row.get("credit") or 0) for row in gl_entries)
+    diff = flt(debit_total - credit_total, 2)
+
+    if abs(diff) < 0.01:
+        return gl_entries
+
+    expense_account = None
+    for item in (doc.get("items") or []):
+        acct = (item.get("expense_account") or "").strip()
+        if acct:
+            expense_account = acct
+            break
+    if not expense_account:
+        expense_account = frappe.get_cached_value(
+            "Company", doc.company, "stock_adjustment_account"
+        )
+    if not expense_account:
+        expense_account = frappe.get_cached_value(
+            "Company", doc.company, "default_expense_account"
+        )
+    if not expense_account:
+        logger.error(
+            "Cannot balance PI GL for %s: no expense account found (diff=%s)",
+            doc.name, diff,
+        )
+        return gl_entries
+
+    existing_expense_entry = None
+    for row in gl_entries:
+        if row.get("account") == expense_account:
+            existing_expense_entry = row
+            break
+
+    if existing_expense_entry:
+        cur_debit = flt(existing_expense_entry.get("debit") or 0)
+        cur_credit = flt(existing_expense_entry.get("credit") or 0)
+        if diff > 0:
+            new_credit = cur_credit + diff
+            existing_expense_entry["credit"] = flt(new_credit, 2)
+            existing_expense_entry["credit_in_account_currency"] = flt(new_credit, 2)
+        else:
+            new_debit = cur_debit + abs(diff)
+            existing_expense_entry["debit"] = flt(new_debit, 2)
+            existing_expense_entry["debit_in_account_currency"] = flt(new_debit, 2)
+    else:
+        template = gl_entries[0] if gl_entries else {}
+        adjustment_entry = dict(template)
+        adjustment_entry["account"] = expense_account
+        adjustment_entry["against"] = doc.get("credit_to") or ""
+        if diff > 0:
+            adjustment_entry["debit"] = 0
+            adjustment_entry["debit_in_account_currency"] = 0
+            adjustment_entry["credit"] = flt(abs(diff), 2)
+            adjustment_entry["credit_in_account_currency"] = flt(abs(diff), 2)
+        else:
+            adjustment_entry["debit"] = flt(abs(diff), 2)
+            adjustment_entry["debit_in_account_currency"] = flt(abs(diff), 2)
+            adjustment_entry["credit"] = 0
+            adjustment_entry["credit_in_account_currency"] = 0
+        gl_entries.append(adjustment_entry)
+
+    logger.info(
+        "Balanced PI GL for %s: diff=%s adjusted via %s",
+        doc.name, diff, expense_account,
+    )
+    return gl_entries
+
+
 def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Rewrite PI GL entries into BNS internal SI->PI stock-transfer pattern."""
     if not (doc and doc.doctype == "Purchase Invoice" and doc.docstatus == 1):
         return gl_entries
     if not _is_bns_internal_purchase_invoice_from_si(doc):
         return gl_entries
-    if not is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(doc)):
+    source_date = _resolve_source_posting_date(doc)
+    if not is_after_accounting_rewrite_cutoff(source_date):
+        if is_after_internal_transfer_cutoff(source_date):
+            return _balance_bns_internal_pi_gl_entries(doc, gl_entries)
         return gl_entries
 
     settings = _get_bns_branch_accounting_accounts()
@@ -4707,7 +4794,11 @@ def _get_submitted_pis_for_si(si_name: str) -> list[str]:
 
 
 def _mirror_pr_item_valuation_from_transfer_rate(pr_name: str) -> int:
-    """Mirror PR item valuation_rate from bns_transfer_rate for DN->PR same-GSTIN flow."""
+    """Mirror PR item valuation_rate from bns_transfer_rate for DN->PR same-GSTIN flow.
+
+    Only applies when the PR's governing source date is after the accounting
+    rewrite cutoff so that the GL rewrite is also active.
+    """
     if not pr_name or not frappe.db.exists("Purchase Receipt", pr_name):
         return 0
 
@@ -4725,6 +4816,8 @@ def _mirror_pr_item_valuation_from_transfer_rate(pr_name: str) -> int:
         (pr.get("is_bns_internal_supplier") and frappe.db.exists("Delivery Note", source_ref))
         or frappe.db.exists("Sales Invoice", source_ref)
     ):
+        return 0
+    if not is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(pr)):
         return 0
 
     updated_count = 0
@@ -4755,7 +4848,12 @@ def _mirror_pr_item_valuation_from_transfer_rate(pr_name: str) -> int:
 
 
 def _sync_pr_sle_from_transfer_rate(pr_name: str) -> int:
-    """Sync PR Stock Ledger Entry incoming values from PR Item transfer-rate."""
+    """Sync PR Stock Ledger Entry incoming values from PR Item transfer-rate.
+
+    Only applies when the PR's governing source date is after the accounting
+    rewrite cutoff. Modifying SLE without the corresponding GL rewrite causes
+    valuation drift.
+    """
     if not pr_name or not frappe.db.exists("Purchase Receipt", pr_name):
         return 0
 
@@ -4770,6 +4868,8 @@ def _sync_pr_sle_from_transfer_rate(pr_name: str) -> int:
         (pr.get("is_bns_internal_supplier") and frappe.db.exists("Delivery Note", source_ref))
         or frappe.db.exists("Sales Invoice", source_ref)
     ):
+        return 0
+    if not is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(pr)):
         return 0
 
     transfer_rate_by_item = {}
@@ -5006,8 +5106,14 @@ def _sync_si_item_incoming_rate_from_dn(
 
     This is required for DN->SI chains where ERPNext repost updates DN valuation
     but does not always push updated incoming_rate into existing SI item rows.
+
+    Only applies when the DN posting date is after the accounting rewrite cutoff
+    to keep SI incoming_rate stable for pre-Phase-2 documents.
     """
     if not dn_name or not frappe.db.exists("Delivery Note", dn_name):
+        return 0, set()
+    dn_posting_date = frappe.db.get_value("Delivery Note", dn_name, "posting_date")
+    if not is_after_accounting_rewrite_cutoff(dn_posting_date):
         return 0, set()
 
     dn_items = frappe.get_all(
@@ -5250,7 +5356,11 @@ def _sync_pi_item_transfer_rate_from_si(si_name: str, pi_name: Optional[str] = N
 
 
 def _trigger_pr_repost_for_transfer_rate(pr_name: str, source_repost_name: str) -> bool:
-    """Trigger PR repost after transfer-rate mirror with lock-first and finally cleanup."""
+    """Trigger PR repost after transfer-rate mirror with lock-first and finally cleanup.
+
+    Only triggers when the PR's governing source date is after the accounting
+    rewrite cutoff so the GL rewrite is active during the repost.
+    """
     if not pr_name or not frappe.db.exists("Purchase Receipt", pr_name):
         return False
     per_repost_key = f"bns_transfer_rate_pr_repost::{source_repost_name}::{pr_name}"
@@ -5277,6 +5387,9 @@ def _trigger_pr_repost_for_transfer_rate(pr_name: str, source_repost_name: str) 
         (pr.get("is_bns_internal_supplier") and frappe.db.exists("Delivery Note", source_ref))
         or frappe.db.exists("Sales Invoice", source_ref)
     ):
+        _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
+        return False
+    if not is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(pr)):
         _release_bns_repost_lock(scope, repost_doc_name, voucher_type, voucher_no)
         return False
     try:

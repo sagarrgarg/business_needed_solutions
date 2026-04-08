@@ -6,6 +6,29 @@
 
 ---
 
+## 2026-04-09 – Fix PR transfer-rate chain + SI incoming_rate sync cutoff gates
+
+### What Changed
+Four more functions in `bns_branch_accounting/utils.py` were missing `is_after_accounting_rewrite_cutoff` checks — the exact PR/SI analog of the PI bug fixed earlier.
+
+**Fixed functions:**
+- `_mirror_pr_item_valuation_from_transfer_rate` — now skips if PR source date < accounting rewrite cutoff; prevents overwriting `Purchase Receipt Item.valuation_rate` (ERPNext standard field) without the GL rewrite being active.
+- `_sync_pr_sle_from_transfer_rate` — now skips if PR source date < accounting rewrite cutoff; prevents modifying SLE `incoming_rate`/`stock_value_difference` and force-rebuilding GL without the matching GL structure.
+- `_trigger_pr_repost_for_transfer_rate` — now releases lock and returns early if PR source date < accounting rewrite cutoff; prevents triggering `repost_future_sle_and_gle()` that could produce misaligned SLE/GL.
+- `_sync_si_item_incoming_rate_from_dn` — now skips if DN posting date < accounting rewrite cutoff; keeps `Sales Invoice Item.incoming_rate` stable for pre-Phase-2 documents.
+
+### Why
+Same class of bug as the PI chain: these functions modified ERPNext standard fields or triggered reposts without verifying that the GL rewrite (Phase 2 gated) would also be active. The PR case is lower severity because PR GL entries tend to self-balance, but the downstream ripple effects on linked PIs and SLE valuation chains made this a correctness risk.
+
+### Impacted Modules
+- `bns_branch_accounting/utils.py` (transfer-rate chain for PR, SI incoming_rate sync)
+- Repost Item Valuation `on_change` hooks (`refresh_pr_transfer_rate_after_repost`)
+
+### Migration Implications
+- No schema changes; code-only fix. Deploy and clear cache.
+
+---
+
 ## 2026-04-09 – Fix PI transfer-rate repost cutoff gate (debit/credit imbalance)
 
 ### What Changed
