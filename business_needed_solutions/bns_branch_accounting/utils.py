@@ -1360,7 +1360,7 @@ def apply_internal_pi_transfer_rates_from_si(doc, si_name: Optional[str] = None)
             item, resolved_si, si_rate_by_item, pr_item_rates, si_item_buckets,
             si_dn_map=si_dn_map,
         )
-        if rate <= 0:
+        if rate < 0:
             continue
 
         item.bns_transfer_rate = flt(rate)
@@ -1405,21 +1405,41 @@ def validate_internal_purchase_invoice_transfer_rate(doc, method: Optional[str] 
 
     apply_internal_pi_transfer_rates_from_si(doc, si_name=si_name)
 
+    si_rate_by_item, _si_rows, si_item_buckets = _build_si_rate_maps_for_pi(si_name)
+
     missing_rows = []
     for item in (doc.get("items") or []):
         if flt(item.get("qty") or 0) <= 0:
             continue
         if flt(item.get("bns_transfer_rate") or 0) > 0:
             continue
-        # Skip non-stock rows in update_stock PI only if item is actually non-stock.
-        if item.get("item_code") and not cint(frappe.db.get_value("Item", item.get("item_code"), "is_stock_item")):
+        if item.get("item_code") and not cint(
+            frappe.db.get_value("Item", item.get("item_code"), "is_stock_item")
+        ):
             continue
-        missing_rows.append(f"#{cint(item.get('idx') or 0) or '?'} {item.get('item_code') or item.get('item_name') or item.get('name')}")
+
+        si_item_link = (item.get("sales_invoice_item") or "").strip()
+        expected_rate = 0.0
+        if si_item_link and si_item_link in si_rate_by_item:
+            expected_rate = flt(si_rate_by_item[si_item_link])
+        elif item.get("item_code") and item.get("item_code") in si_item_buckets:
+            bucket = si_item_buckets[item.get("item_code")]
+            if bucket:
+                expected_rate = max(flt(b.get("rate") or 0) for b in bucket)
+
+        if expected_rate <= 0:
+            continue
+
+        missing_rows.append(
+            f"#{cint(item.get('idx') or 0) or '?'} "
+            f"{item.get('item_code') or item.get('item_name') or item.get('name')}"
+        )
 
     if missing_rows:
         frappe.throw(
             _(
                 "Internal SI->PI transfer-rate is missing for these rows: {0}. "
+                "The linked Sales Invoice has a positive incoming_rate for these items. "
                 "Please fetch SI incoming_rate into bns_transfer_rate before submit."
             ).format(", ".join(missing_rows)),
             title=_("Missing Internal Transfer Rate"),
