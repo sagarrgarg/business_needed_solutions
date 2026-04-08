@@ -202,99 +202,161 @@ def get_purchase_invoices_with_wrong_expense_account(company=None, from_date=Non
 	}
 
 
+PI_FIX_BATCH_SIZE = 10
+
+
 @frappe.whitelist()
 def bulk_fix_pi_expense_accounts(items):
 	"""
-	Bulk fix expense accounts in Purchase Invoice items.
-	
-	Only fixes items where the Item has a default expense account set.
-	Uses proper doc API to update expense_account and repost GL entries.
-	
+	Enqueue a background job to fix expense accounts on Purchase Invoice items.
+
+	Validates and groups the items by PI, then hands off to a long-running
+	worker so the HTTP request returns immediately.
+
 	Args:
-		items: List of dicts with pi_item_name and correct_expense_account
-		
+		items: JSON list of dicts with pi_item_name and correct_expense_account
+
 	Returns:
-		dict with success count and errors
+		dict with status and total_invoices (or validation_errors if any fail upfront)
 	"""
 	import json
 	if isinstance(items, str):
 		items = json.loads(items)
-	
-	success_count = 0
-	errors = []
-	
-	# Group items by Purchase Invoice to minimize doc loads
+
+	validation_errors = []
+
 	pi_updates = {}
 	for item in items:
 		pi_item_name = item.get("pi_item_name")
 		correct_account = item.get("correct_expense_account")
-		
+
 		if not pi_item_name or not correct_account:
-			errors.append({
+			validation_errors.append({
 				"pi_item_name": pi_item_name,
-				"error": _("Missing pi_item_name or correct_expense_account")
+				"error": _("Missing pi_item_name or correct_expense_account"),
 			})
 			continue
-		
-		# Get the PI item parent
+
 		pi_name = frappe.db.get_value("Purchase Invoice Item", pi_item_name, "parent")
 		if not pi_name:
-			errors.append({
+			validation_errors.append({
 				"pi_item_name": pi_item_name,
-				"error": _("Purchase Invoice Item not found")
+				"error": _("Purchase Invoice Item not found"),
 			})
 			continue
-		
-		if pi_name not in pi_updates:
-			pi_updates[pi_name] = []
-		pi_updates[pi_name].append({
+
+		pi_updates.setdefault(pi_name, []).append({
 			"pi_item_name": pi_item_name,
-			"correct_account": correct_account
+			"correct_account": correct_account,
 		})
-	
-	# Process each Purchase Invoice
-	for pi_name, item_updates in pi_updates.items():
+
+	if not pi_updates:
+		return {
+			"status": "error",
+			"validation_errors": validation_errors,
+			"total_invoices": 0,
+		}
+
+	frappe.enqueue(
+		_process_pi_expense_fix,
+		queue="long",
+		timeout=1500,
+		pi_updates=pi_updates,
+		user=frappe.session.user,
+	)
+
+	return {
+		"status": "queued",
+		"total_invoices": len(pi_updates),
+		"validation_errors": validation_errors,
+	}
+
+
+def _process_pi_expense_fix(pi_updates, user):
+	"""
+	Background worker: fix expense accounts on PI items and repost GL.
+
+	Processes PIs in batches of PI_FIX_BATCH_SIZE, committing after each
+	batch and publishing realtime progress to the requesting user.
+
+	Args:
+		pi_updates: dict mapping PI name -> list of {pi_item_name, correct_account}
+		user: frappe user who triggered the job (for realtime scoping)
+	"""
+	total = len(pi_updates)
+	done = 0
+	success_count = 0
+	errors = []
+
+	pi_list = list(pi_updates.items())
+
+	for idx, (pi_name, item_updates) in enumerate(pi_list, 1):
 		try:
-			# Load the Purchase Invoice
 			pi_doc = frappe.get_doc("Purchase Invoice", pi_name)
-			
+
 			if pi_doc.docstatus != 1:
-				for item_update in item_updates:
+				for iu in item_updates:
 					errors.append({
-						"pi_item_name": item_update["pi_item_name"],
-						"error": _("Purchase Invoice {0} is not submitted").format(pi_name)
+						"pi_item_name": iu["pi_item_name"],
+						"error": _("Purchase Invoice {0} is not submitted").format(pi_name),
 					})
+				done += 1
+				_publish_progress(done, total, pi_name, success_count, errors, user)
 				continue
-			
-			# Update expense accounts on matching items using db_set
+
 			items_updated = 0
-			for item_update in item_updates:
+			for iu in item_updates:
 				for row in pi_doc.items:
-					if row.name == item_update["pi_item_name"]:
-						# Update in memory for repost
-						row.expense_account = item_update["correct_account"]
-						# Update in database
-						row.db_set("expense_account", item_update["correct_account"], update_modified=False)
+					if row.name == iu["pi_item_name"]:
+						row.expense_account = iu["correct_account"]
+						row.db_set("expense_account", iu["correct_account"], update_modified=False)
 						items_updated += 1
 						break
-			
+
 			if items_updated > 0:
-				# Repost accounting entries to update GL
 				pi_doc.repost_accounting_entries()
 				success_count += items_updated
-			
+
 		except Exception as e:
-			for item_update in item_updates:
+			for iu in item_updates:
 				errors.append({
-					"pi_item_name": item_update["pi_item_name"],
-					"error": cstr(e)
+					"pi_item_name": iu["pi_item_name"],
+					"error": cstr(e),
 				})
-	
-	return {
-		"success_count": success_count,
-		"error_count": len(errors),
-		"errors": errors
-	}
+
+		done += 1
+
+		if idx % PI_FIX_BATCH_SIZE == 0:
+			frappe.db.commit()
+
+		_publish_progress(done, total, pi_name, success_count, errors, user)
+
+	frappe.db.commit()
+
+	frappe.publish_realtime(
+		"bns_pi_fix_complete",
+		{
+			"success_count": success_count,
+			"error_count": len(errors),
+			"errors": errors[:50],
+		},
+		user=user,
+	)
+
+
+def _publish_progress(done, total, current_pi, success_count, errors, user):
+	"""Emit a realtime progress event scoped to the requesting user."""
+	frappe.publish_realtime(
+		"bns_pi_fix_progress",
+		{
+			"done": done,
+			"total": total,
+			"current_pi": current_pi,
+			"success_count": success_count,
+			"error_count": len(errors),
+		},
+		user=user,
+	)
 
 
 @frappe.whitelist()

@@ -122,6 +122,9 @@ def _collect_outgoing(doc):
 	Collect outgoing stock movements from the document, grouped by
 	(item_code, warehouse) → total outgoing qty.
 
+	Non-stock items are excluded — they don't maintain bin balances and
+	must never be checked for negative stock.
+
 	Args:
 		doc: Stock document (Stock Entry, Delivery Note, etc.)
 
@@ -131,28 +134,30 @@ def _collect_outgoing(doc):
 	out = defaultdict(float)
 	doctype = doc.doctype
 
+	stock_items = _get_stock_item_set(doc)
+
 	if doctype == "Stock Entry":
 		for row in doc.items:
-			if row.s_warehouse:
+			if row.s_warehouse and row.item_code in stock_items:
 				out[(row.item_code, row.s_warehouse)] += flt(row.qty)
 
 	elif doctype in ("Delivery Note", "Sales Invoice"):
 		if doctype == "Sales Invoice" and not cint(doc.update_stock):
 			return out
 		for row in doc.items:
-			if row.warehouse and flt(row.qty) > 0:
+			if row.warehouse and flt(row.qty) > 0 and row.item_code in stock_items:
 				out[(row.item_code, row.warehouse)] += flt(row.qty)
 
 	elif doctype in ("Purchase Receipt", "Purchase Invoice"):
 		if doctype == "Purchase Invoice" and not cint(doc.update_stock):
 			return out
 		for row in doc.items:
-			if row.rejected_warehouse and flt(row.rejected_qty) > 0:
+			if row.rejected_warehouse and flt(row.rejected_qty) > 0 and row.item_code in stock_items:
 				out[(row.item_code, row.rejected_warehouse)] += flt(row.rejected_qty)
 
 	elif doctype == "Stock Reconciliation":
 		for row in doc.items:
-			if row.warehouse and row.qty is not None:
+			if row.warehouse and row.qty is not None and row.item_code in stock_items:
 				actual = flt(
 					frappe.db.get_value("Bin",
 						{"item_code": row.item_code, "warehouse": row.warehouse},
@@ -163,3 +168,19 @@ def _collect_outgoing(doc):
 					out[(row.item_code, row.warehouse)] += diff
 
 	return out
+
+
+def _get_stock_item_set(doc):
+	"""
+	Return a set of item_code values from the document that are stock items.
+	Single batch query to avoid N+1.
+	"""
+	item_codes = {row.item_code for row in doc.items if row.item_code}
+	if not item_codes:
+		return set()
+
+	return set(frappe.get_all(
+		"Item",
+		filters={"name": ("in", list(item_codes)), "is_stock_item": 1},
+		pluck="name",
+	))

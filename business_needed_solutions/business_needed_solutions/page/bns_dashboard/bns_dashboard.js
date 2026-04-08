@@ -1159,10 +1159,10 @@ class BNSDashboard {
 		const self = this;
 
 		frappe.confirm(
-			__("Fix expense accounts for {0} PI items?", [selected.length]),
+			__("Fix expense accounts for {0} PI items? This will run in the background.", [selected.length]),
 			async function () {
 				const btn = self.wrapper.find("#btn-bulk-fix");
-				btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i>');
+				btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> ' + __("Queuing..."));
 
 				try {
 					const result = await frappe.call({
@@ -1172,33 +1172,124 @@ class BNSDashboard {
 
 					const data = result.message;
 
-					if (data.success_count > 0) {
-						frappe.show_alert({
-							message: __("Fixed {0} items", [data.success_count]),
-							indicator: "green",
-						});
-					}
-
-					if (data.error_count > 0) {
+					if (data.status === "error") {
 						let errorMsg = "";
-						data.errors.forEach(function (e) {
-							errorMsg += e.pi_item_name + ": " + e.error + "<br>";
+						(data.validation_errors || []).forEach(function (e) {
+							errorMsg += (e.pi_item_name || "?") + ": " + e.error + "<br>";
 						});
 						frappe.msgprint({
-							title: __("Some failed"),
+							title: __("Validation failed"),
+							message: errorMsg || __("No fixable items found."),
+							indicator: "red",
+						});
+						btn.prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix"));
+						return;
+					}
+
+					if (data.validation_errors && data.validation_errors.length > 0) {
+						let errorMsg = "";
+						data.validation_errors.forEach(function (e) {
+							errorMsg += (e.pi_item_name || "?") + ": " + e.error + "<br>";
+						});
+						frappe.msgprint({
+							title: __("Some items skipped"),
 							message: errorMsg,
 							indicator: "orange",
 						});
 					}
 
-					self.refresh();
+					self.show_fix_progress(data.total_invoices);
 				} catch (e) {
 					frappe.msgprint(__("Failed: {0}", [e.message || e]));
-				} finally {
 					btn.prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix"));
 				}
 			}
 		);
+	}
+
+	// ── Realtime progress for background PI fix ──────────────────────
+
+	show_fix_progress(total) {
+		this.fix_in_progress = true;
+
+		const btn = this.wrapper.find("#btn-bulk-fix");
+		btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> ' + __("Processing..."));
+		this.wrapper.find("#btn-select-all-fixable").prop("disabled", true);
+
+		const container = this.wrapper.find("#table-pi-wrong");
+		container.before(`
+			<div id="pi-fix-progress" class="mb-3" style="padding: 10px; background: var(--control-bg); border-radius: 6px;">
+				<div class="d-flex justify-content-between align-items-center mb-1">
+					<span class="text-muted" style="font-size: 0.85rem;" id="pi-fix-status">
+						<i class="fa fa-spinner fa-spin"></i> ${__("Processing 0 / {0} invoices...", [total])}
+					</span>
+					<span class="text-muted" style="font-size: 0.8rem;" id="pi-fix-pct">0%</span>
+				</div>
+				<div class="progress" style="height: 8px;">
+					<div class="progress-bar bg-primary progress-bar-striped progress-bar-animated"
+						 id="pi-fix-bar" role="progressbar" style="width: 0%; transition: width 0.4s ease;"></div>
+				</div>
+			</div>
+		`);
+
+		const self = this;
+
+		this._onFixProgress = function (data) {
+			const pct = Math.round((data.done / data.total) * 100);
+			self.wrapper.find("#pi-fix-bar").css("width", pct + "%");
+			self.wrapper.find("#pi-fix-pct").text(pct + "%");
+			self.wrapper.find("#pi-fix-status").html(
+				'<i class="fa fa-spinner fa-spin"></i> ' +
+				__("Processing {0} / {1} invoices... ({2} items fixed)", [data.done, data.total, data.success_count])
+			);
+		};
+
+		this._onFixComplete = function (data) {
+			self.hide_fix_progress();
+
+			if (data.success_count > 0) {
+				frappe.show_alert({
+					message: __("Fixed {0} items across background batch", [data.success_count]),
+					indicator: "green",
+				});
+			}
+
+			if (data.error_count > 0) {
+				let errorMsg = "";
+				(data.errors || []).forEach(function (e) {
+					errorMsg += (e.pi_item_name || "?") + ": " + e.error + "<br>";
+				});
+				frappe.msgprint({
+					title: __("{0} items failed", [data.error_count]),
+					message: errorMsg,
+					indicator: "orange",
+				});
+			}
+
+			self.refresh();
+		};
+
+		frappe.realtime.on("bns_pi_fix_progress", this._onFixProgress);
+		frappe.realtime.on("bns_pi_fix_complete", this._onFixComplete);
+	}
+
+	hide_fix_progress() {
+		this.fix_in_progress = false;
+
+		this.wrapper.find("#pi-fix-progress").remove();
+
+		const btn = this.wrapper.find("#btn-bulk-fix");
+		btn.prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix"));
+		this.wrapper.find("#btn-select-all-fixable").prop("disabled", false);
+
+		if (this._onFixProgress) {
+			frappe.realtime.off("bns_pi_fix_progress", this._onFixProgress);
+			this._onFixProgress = null;
+		}
+		if (this._onFixComplete) {
+			frappe.realtime.off("bns_pi_fix_complete", this._onFixComplete);
+			this._onFixComplete = null;
+		}
 	}
 
 	// =====================================================================

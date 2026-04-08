@@ -24,8 +24,9 @@ import frappe
 from frappe import _
 from frappe.utils import today, flt, getdate
 
-# No tolerance: compare rounded values so matching SI-PI (e.g. after link_si_pi) are not falsely reported as mismatch.
-# Amounts: round to 2 decimals; qty: round to 6 decimals. This avoids float representation noise without allowing any business tolerance.
+# Amounts: round to 2 decimals; qty: round to 6 decimals.
+# DN-PR uses hardcoded tolerances (₹5 / 0.01).
+# SI-PI uses si_pi_amount_tolerance from BNS Branch Accounting Settings.
 
 
 def _amounts_equal(a, b):
@@ -33,9 +34,21 @@ def _amounts_equal(a, b):
 	return round(flt(a or 0), 2) == round(flt(b or 0), 2)
 
 
+def _amounts_within_tolerance(a, b, tolerance):
+	"""Compare amounts allowing a configurable tolerance (absolute value)."""
+	return abs(round(flt(a or 0), 2) - round(flt(b or 0), 2)) <= flt(tolerance or 0)
+
+
 def _qtys_equal(a, b):
 	"""Compare quantities with no tolerance; round to 6 decimals."""
 	return round(flt(a or 0), 6) == round(flt(b or 0), 6)
+
+
+def _get_si_pi_amount_tolerance():
+	"""Load the SI-PI amount tolerance from BNS Branch Accounting Settings."""
+	return flt(
+		frappe.db.get_single_value("BNS Branch Accounting Settings", "si_pi_amount_tolerance") or 0
+	)
 
 
 @frappe.whitelist()
@@ -852,6 +865,8 @@ def get_sales_invoice_mismatches(filters=None):
 		frappe.log_error(f"Error in get_sales_invoice_mismatches: {str(e)}")
 		si_results = []
 	
+	amount_tolerance = _get_si_pi_amount_tolerance()
+
 	mismatches = []
 	for si in si_results:
 		si_name = si.get("name") or ""
@@ -899,7 +914,7 @@ def get_sales_invoice_mismatches(filters=None):
 			chain_type = "DN->SI->PI" if has_dn_ref else "SI->PI"
 
 		# Check for Purchase Invoice mismatch
-		pi_mismatch = check_si_pi_mismatch(si_name, si_items, si_doc)
+		pi_mismatch = check_si_pi_mismatch(si_name, si_items, si_doc, amount_tolerance)
 		
 		# Also check SI->PR->PI chain for PR mismatch
 		pr_mismatch_info = _check_si_pr_chain_mismatch(si_name, si_items, si_pr_ref)
@@ -1029,11 +1044,18 @@ def _check_si_pr_chain_mismatch(si_name, si_items, si_pr_ref):
 	}
 
 
-def check_si_pi_mismatch(si_name, si_items, si_doc):
+def check_si_pi_mismatch(si_name, si_items, si_doc, amount_tolerance=0):
 	"""
 	Check if Sales Invoice has matching Purchase Invoice.
 	Compares quantities, taxable values, grand totals, and total taxes.
-	
+	Amount comparisons respect si_pi_amount_tolerance from settings.
+
+	Args:
+		si_name: Sales Invoice name
+		si_items: list of SI item dicts
+		si_doc: Sales Invoice document
+		amount_tolerance: maximum allowed absolute difference for amounts (from settings)
+
 	Returns:
 		dict: Mismatch information or None if no mismatch
 	"""
@@ -1128,10 +1150,9 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 						"pi_qty": total_pi_qty
 					})
 			
-			# Check taxable value mismatch (no tolerance; rounded comparison)
 			si_taxable_value = si_base_net_amount if si_base_net_amount > 0 else si_net_amount
 			pi_taxable_value = total_pi_base_net_amount if total_pi_base_net_amount > 0 else total_pi_net_amount
-			if not _amounts_equal(si_taxable_value, pi_taxable_value):
+			if not _amounts_within_tolerance(si_taxable_value, pi_taxable_value, amount_tolerance):
 				taxable_value_mismatches.append({
 					"item": si_item.get("item_code") or "",
 					"si_taxable_value": si_taxable_value,
@@ -1171,16 +1192,14 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 	except Exception as e:
 		frappe.log_error(f"Error checking extra PI items: {str(e)}")
 	
-	# Check grand total mismatch (no tolerance; rounded comparison)
 	grand_total_mismatch = None
-	if not _amounts_equal(si_doc.grand_total, pi_grand_total):
+	if not _amounts_within_tolerance(si_doc.grand_total, pi_grand_total, amount_tolerance):
 		grand_total_mismatch = {
 			"si_total": flt(si_doc.grand_total or 0),
 			"pi_total": pi_grand_total,
 			"diff": flt(si_doc.grand_total or 0) - pi_grand_total
 		}
 	
-	# Check tax mismatch (compare in company currency - base_total_taxes_and_charges; no tolerance)
 	tax_mismatch = None
 	si_base_taxes = flt(si_doc.base_total_taxes_and_charges or 0)
 	if si_base_taxes == 0:
@@ -1188,7 +1207,7 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 	if pi_base_taxes == 0:
 		pi_base_taxes = pi_total_taxes
 	
-	if not _amounts_equal(si_base_taxes, pi_base_taxes):
+	if not _amounts_within_tolerance(si_base_taxes, pi_base_taxes, amount_tolerance):
 		tax_mismatch = {
 			"si_tax": si_base_taxes,
 			"pi_tax": pi_base_taxes,
@@ -1236,7 +1255,7 @@ def check_si_pi_mismatch(si_name, si_items, si_doc):
 					break
 				sv = s["base_net_amount"] if s["base_net_amount"] > 0 else s["net_amount"]
 				pv = p["base_net_amount"] if p["base_net_amount"] > 0 else p["net_amount"]
-				if not _amounts_equal(sv, pv):
+				if not _amounts_within_tolerance(sv, pv, amount_tolerance):
 					agg_match = False
 					break
 			for ic in pi_agg:

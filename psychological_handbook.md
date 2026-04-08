@@ -18,6 +18,24 @@ The app is designed to be **configurable via settings** – most features can be
 
 ---
 
+### Decision note (2026-04-09, negative stock override skips non-stock items)
+- The negative stock cutoff feature is a **stock** guard — it must only validate items that actually maintain bin/SLE quantities (`is_stock_item=1`). Non-stock items on mixed documents (e.g. service line on a Delivery Note) must pass through unchecked.
+- The batch lookup (`_get_stock_item_set`) avoids per-row DB hits. The set is built once per document submit, which is acceptable since the items table is bounded and submit is not a hot path.
+
+### Decision note (2026-04-09, SI-PI amount tolerance on reports)
+- The mismatch report must be consistent with submit-time validation: if a PI was accepted within the configured tolerance, the report must not flag it as a mismatch. Inconsistency erodes trust in the dashboard counts.
+- Tolerance applies only to amounts (taxable value, grand total, taxes). Qty remains strict — quantity discrepancies are a counting/operational error, not a rounding issue.
+- DN-PR comparisons in the same report keep their existing hardcoded tolerances (₹5 for amounts, 0.01 for qty/tax) because those reflect a different workflow (same-GSTIN stock transfers) and have no corresponding settings field. Unifying them is a future consideration.
+
+### Decision note (2026-04-09, PI expense fix batching)
+- GL reposting is the most expensive operation in the fix cycle (~0.5-2s per PI). Synchronous processing of 50+ PIs exceeds web-request timeouts.
+- Background processing via `frappe.enqueue` is the Frappe-native solution: the user's browser is never blocked, partial progress is committed every 10 PIs so a worker crash does not lose all work, and realtime events keep the UI informed.
+- Batch size 10 balances commit overhead vs durability. Timeout 1500s (25 min) covers ~500 PIs with headroom.
+- No new DocType for job tracking: realtime events are ephemeral. If the user navigates away, the job still completes; the next dashboard load shows updated data. This avoids schema bloat for a correction workflow that should trend toward zero usage.
+- Errors are collected per-PI so one bad invoice does not abort the rest (same as the prior synchronous behavior).
+
+---
+
 ## 2. Business Reasoning
 
 ### 2.1 Submission Restriction

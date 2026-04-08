@@ -6,6 +6,71 @@
 
 ---
 
+## 2026-04-09 – Negative stock override: exclude non-stock items
+
+### What changed
+- **`negative_stock_override.py`**:
+  - `_collect_outgoing(doc)` now calls `_get_stock_item_set(doc)` which batch-loads all `is_stock_item=1` item codes from the document in a single query.
+  - Every branch (Stock Entry, DN, SI, PR, PI, Stock Reconciliation) now checks `row.item_code in stock_items` before adding the row to the outgoing dict.
+  - New helper `_get_stock_item_set(doc)`: returns a `set` of item codes that are stock items, using `frappe.get_all("Item", ...)` with an `IN` filter — single query regardless of row count.
+
+### Why it changed
+- Non-stock items (services, expenses) can appear on stock documents (e.g. SI with `update_stock`, SE for subcontracting) but don't maintain bin balances. The validation was checking them against `Bin.actual_qty` which returns 0 (no bin exists), causing false "insufficient stock" errors after the cutoff date.
+
+### Impacted modules
+- `negative_stock_override.py` only. All before_submit hooks that call `validate_negative_stock` benefit from the fix.
+
+### Migration implications
+- None. Clear cache after deployment.
+
+---
+
+## 2026-04-09 – Internal Transfer Receive Mismatch: SI-PI amount tolerance
+
+### What changed
+- **`internal_transfer_receive_mismatch.py`**:
+  - Added `_amounts_within_tolerance(a, b, tolerance)` helper alongside existing `_amounts_equal`.
+  - Added `_get_si_pi_amount_tolerance()` to load `si_pi_amount_tolerance` from BNS Branch Accounting Settings.
+  - `get_sales_invoice_mismatches` now loads the tolerance once and passes it to `check_si_pi_mismatch`.
+  - `check_si_pi_mismatch` accepts `amount_tolerance` parameter; all amount comparisons (per-item taxable value, grand total, total taxes) now use `_amounts_within_tolerance` instead of strict `_amounts_equal`.
+  - Aggregate fallback comparison also uses `_amounts_within_tolerance`.
+  - Qty comparisons remain strict (`_qtys_equal`, no tolerance) — matching the submit-time validation behaviour.
+
+### Why it changed
+- The `si_pi_amount_tolerance` setting in BNS Branch Accounting Settings was already used during PI submit validation (`utils.py validate_si_pi_items_match`), but the mismatch report ignored it. This caused SI-PI pairs that passed submit validation to appear as mismatches on the report, creating false positives.
+
+### Impacted modules
+- Internal Transfer Receive Mismatch report only.
+- DN-PR comparisons in the same report are unchanged (still use hardcoded ₹5 / 0.01 tolerances).
+
+### Migration implications
+- None. No schema changes. Clear cache after deployment.
+
+---
+
+## 2026-04-09 – PI expense account bulk fix: async batch processing
+
+### What changed
+- **`bns_dashboard.py`**:
+  - `bulk_fix_pi_expense_accounts` is now a lightweight dispatcher. It validates items, groups by PI, then enqueues a background job via `frappe.enqueue(queue="long", timeout=1500)` and returns immediately with `{status: "queued", total_invoices: N}`.
+  - New internal function `_process_pi_expense_fix(pi_updates, user)`: processes PIs one by one, commits to DB every `PI_FIX_BATCH_SIZE` (10) PIs, publishes `bns_pi_fix_progress` realtime events after each PI, and `bns_pi_fix_complete` when done.
+  - New helper `_publish_progress(...)`: emits user-scoped realtime progress.
+- **`bns_dashboard.js`**:
+  - `bulk_fix_selected()` now receives the "queued" ack and calls `show_fix_progress(total)`.
+  - `show_fix_progress(total)`: inserts an animated progress bar, subscribes to `bns_pi_fix_progress` and `bns_pi_fix_complete` realtime events for live updates.
+  - `hide_fix_progress()`: tears down the progress bar and unsubscribes from realtime events; auto-refreshes the dashboard on completion.
+
+### Why it changed
+- With many PIs (50+), `repost_accounting_entries()` per document caused the synchronous request to exceed Gunicorn/gateway timeout (504). Async processing eliminates the timeout risk entirely.
+
+### Impacted modules
+- BNS Dashboard page only (`bns_dashboard.py`, `bns_dashboard.js`).
+
+### Migration implications
+- None. No schema changes, no new DocTypes. Clear cache after deployment.
+
+---
+
 ## 1. App Overview
 
 BNS extends ERPNext with:
