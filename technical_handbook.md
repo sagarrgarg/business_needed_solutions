@@ -245,6 +245,8 @@ BNS extends ERPNext with:
 ### 3.4 Stock Update Validation (`overrides/stock_update_validation.py`)
 
 - **What:** When `update_stock` is off on SI/PI, all stock items must reference DN/PR. Includes batch/serial reference continuity: invoice item batch_no must match the referenced source DN/PR item batch_no to prevent silent batch mismatches.
+- **Sales Invoice exception (Apr 2026):** If `is_debit_note = 1` (label: "Is Rate Adjustment Entry (Debit Note)"), reference enforcement is skipped even when `update_stock = 0`. This allows value-only debit notes without mandatory DN linkage.
+- **Sales Invoice guard (Apr 2026):** `is_debit_note = 1` and DN linkage are mutually exclusive. If any SI item has `delivery_note` or `dn_detail`, validation throws. This prevents mixed "rate adjustment + delivery flow" documents.
 - **Why:** Enforce traceability when stock is not updated from the invoice.
 - **Impacted:** SI, PI (validate).
 - **Settings:** BNS Settings → `enforce_stock_update_or_reference`.
@@ -390,6 +392,7 @@ BNS extends ERPNext with:
   - **PR:** `bns_supplier_invoice_attachment` required (except BNS internal supplier). `bns_ewaybill_attachment` required when threshold met. `bns_builty_attachment` always optional.
   - **PI created from PR:** Exempt — all 3 fields are hidden, dashboard headline links to the PR.
   - **PI created directly (no PR items):** Same rules as PR.
+- **Runtime fix (Apr 2026):** Internal-supplier checks now cast DB values using `cint(...)` instead of `bool(...)`. This prevents `"0"` (string) from being treated as truthy, which previously skipped supplier-invoice/e-Waybill enforcement on external suppliers.
 - **Settings:** BNS Settings > Stock & Inventory > `enforce_purchase_document_attachments` (Check, default off).
 - **Files:** `attachment_validation.py` (server), `purchase_attachment_fields.js` (client), `purchase_invoice_form.js` (headline), `custom_field.json` (field definitions), `hooks.py` (doctype_js + before_submit).
 

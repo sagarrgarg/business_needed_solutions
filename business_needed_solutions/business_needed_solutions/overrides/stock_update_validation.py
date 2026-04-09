@@ -14,6 +14,7 @@ import frappe
 from frappe import _
 from typing import Optional, List
 import logging
+from frappe.utils import cint
 from business_needed_solutions.bns_branch_accounting.utils import (
     is_after_internal_validation_cutoff,
     validate_internal_purchase_invoice_linkage,
@@ -54,12 +55,23 @@ def validate_stock_update_or_reference(doc, method: Optional[str] = None) -> Non
         if doc.doctype not in ["Sales Invoice", "Purchase Invoice"]:
             logger.debug(f"Validation skipped for non-invoice doctype: {doc.doctype}")
             return
-        
+
+        # ERPNext "Is Rate Adjustment Entry (Debit Note)" invoices are value-only
+        # adjustments and must not carry Delivery Note links; no stock reference
+        # check applies.
+        if _is_sales_invoice_rate_adjustment_debit_note(doc):
+            _validate_sales_invoice_rate_adjustment_without_dn_links(doc)
+            logger.debug(
+                "Sales Invoice %s is a rate-adjustment debit note, skipping reference validation",
+                doc.name,
+            )
+            return
+
         # If update_stock is enabled, no need to check references
         if doc.update_stock:
             logger.debug(f"Stock update enabled for {doc.doctype} {doc.name}, skipping reference validation")
             return
-        
+
         # Validate item references based on document type
         _validate_item_references(doc)
         
@@ -70,6 +82,45 @@ def validate_stock_update_or_reference(doc, method: Optional[str] = None) -> Non
         raise
 
 
+def _is_sales_invoice_rate_adjustment_debit_note(doc) -> bool:
+    """
+    Return True when the document is a Sales Invoice marked as Debit Note.
+
+    In ERPNext, the `is_debit_note` checkbox is labeled
+    "Is Rate Adjustment Entry (Debit Note)" and represents value-only
+    adjustments that can be submitted without stock movement.
+    """
+    return doc.doctype == "Sales Invoice" and cint(doc.get("is_debit_note"))
+
+
+def _validate_sales_invoice_rate_adjustment_without_dn_links(doc) -> None:
+    """
+    Enforce that rate-adjustment debit notes are not linked to Delivery Notes.
+
+    Sales Invoice rate-adjustment entries (`is_debit_note=1`) are value-only
+    adjustments and must not carry DN row links.
+    """
+    if not _has_sales_invoice_dn_links(doc):
+        return
+
+    frappe.throw(
+        _(
+            "Sales Invoice marked as 'Is Rate Adjustment Entry (Debit Note)' "
+            "cannot have Delivery Note references. Remove Delivery Note linkage "
+            "from item rows or disable Debit Note."
+        ),
+        title=_("Invalid Debit Note Linkage"),
+    )
+
+
+def _has_sales_invoice_dn_links(doc) -> bool:
+    """Return True when any SI item references Delivery Note or DN Item."""
+    for item in doc.items or []:
+        if item.get("delivery_note") or item.get("dn_detail"):
+            return True
+    return False
+
+
 def _is_stock_update_validation_enabled() -> bool:
     """
     Check if stock update validation is enabled in BNS Settings.
@@ -78,7 +129,7 @@ def _is_stock_update_validation_enabled() -> bool:
         bool: True if validation is enabled, False otherwise
     """
     try:
-        return bool(frappe.db.get_single_value("BNS Settings", "enforce_stock_update_or_reference"))
+        return bool(cint(frappe.db.get_single_value("BNS Settings", "enforce_stock_update_or_reference")))
     except Exception as e:
         logger.error(f"Error checking stock update validation setting: {str(e)}")
         return False
@@ -183,7 +234,7 @@ def _is_stock_item(item_code: str) -> bool:
         bool: True if the item is a stock item, False otherwise
     """
     try:
-        return bool(frappe.db.get_value("Item", item_code, "is_stock_item"))
+        return bool(cint(frappe.db.get_value("Item", item_code, "is_stock_item")))
     except Exception as e:
         logger.error(f"Error checking stock item status for {item_code}: {str(e)}")
         return False

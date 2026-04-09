@@ -64,9 +64,9 @@ def validate_purchase_attachments(doc, method: Optional[str] = None) -> None:
 def _is_attachment_validation_enabled() -> bool:
     """Check if the toggle is on in BNS Settings."""
     try:
-        return bool(
+        return bool(cint(
             frappe.db.get_single_value("BNS Settings", "enforce_purchase_document_attachments")
-        )
+        ))
     except Exception:
         return False
 
@@ -85,7 +85,7 @@ def _is_bns_internal_supplier_scope(doc) -> bool:
     supplier = doc.get("supplier")
     if not supplier:
         return False
-    return bool(frappe.db.get_value("Supplier", supplier, "is_bns_internal_supplier"))
+    return bool(cint(frappe.db.get_value("Supplier", supplier, "is_bns_internal_supplier")))
 
 
 def _require_supplier_invoice(doc) -> None:
@@ -112,12 +112,9 @@ def _is_ewaybill_required(doc) -> bool:
     """
     try:
         enable_ewaybill = frappe.db.get_single_value("GST Settings", "enable_e_waybill")
-        if not enable_ewaybill:
+        if not cint(enable_ewaybill):
             return False
     except Exception:
-        return False
-
-    if doc.doctype in ("Purchase Invoice", "Purchase Receipt") and not _has_stock_items(doc):
         return False
 
     threshold = _get_ewaybill_threshold()
@@ -192,14 +189,12 @@ def check_ewaybill_applicability(
 
     if cint(is_bns_internal_supplier):
         return {"required": False, "threshold": _get_ewaybill_threshold()}
-    if supplier and bool(
-        frappe.db.get_value("Supplier", supplier, "is_bns_internal_supplier")
-    ):
+    if supplier and cint(frappe.db.get_value("Supplier", supplier, "is_bns_internal_supplier")):
         return {"required": False, "threshold": _get_ewaybill_threshold()}
 
     try:
         enable_ewaybill = frappe.db.get_single_value("GST Settings", "enable_e_waybill")
-        if not enable_ewaybill:
+        if not cint(enable_ewaybill):
             return {"required": False, "threshold": 0}
     except Exception:
         return {"required": False, "threshold": 0}

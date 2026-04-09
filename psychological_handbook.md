@@ -167,7 +167,8 @@ The app is designed to be **configurable via settings** – most features can be
 
 - **Do not create GST entries manually** – use standard tax logic. BNS only validates and triggers e-Waybill.
 - **Do not bypass submission restriction** – even for system scripts; use override roles if needed.
-- **Do not bypass stock update validation** – all stock items must reference source when `update_stock` is off.
+- **Do not bypass stock update validation** – all stock items must reference source when `update_stock` is off, except Sales Invoice rate-adjustment debit notes (`is_debit_note=1`) which are intentionally value-only and non-stock.
+- **Do not mix SI debit-note mode with DN linkage** – `is_debit_note=1` means value-only rate adjustment; the same Sales Invoice must not carry `delivery_note`/`dn_detail` links. Keep delivery-backed invoicing and rate-adjustment entries separate.
 - **Do not introduce new "internal" flags** – use `is_bns_internal_customer` / `is_bns_internal_supplier` only.
 - **Do not move BNS Branch Accounting logic back** into `business_needed_solutions` – keep it in `bns_branch_accounting/utils.py`.
 
@@ -196,6 +197,7 @@ The app is designed to be **configurable via settings** – most features can be
 18. **Blanket top-level guard on mixed functions** – The PR and PI `on_submit` hooks contain both Phase 1 (status updates) and Phase 2 (transfer rate sync, GL repost) operations. A blanket Phase 1 early-return would skip Phase 2 even when it should run independently. Use split gating: top-level Phase 1 guard, then Phase 2 operations individually wrapped in their own cutoff check.
 19. **Checking target doc date instead of source doc date** – When evaluating cutoff for PR/PI, always use the source DN/SI's posting date, not the PR/PI's own posting date. A DN created before cutoff means the entire chain is pre-cutoff. Use `_resolve_source_posting_date(doc)` consistently.
 20. **Raw date cutoffs** – Cutoff dates must align with fiscal year boundaries. Never allow arbitrary dates as cutoffs; users select a Fiscal Year and the system resolves it to `year_start_date`. This prevents partial-FY cutoffs that could leave accounting in an inconsistent state.
+21. **Using `bool()` on DB checkbox values** – Never use raw `bool(value)` for checkbox values fetched from DB (`"0"` / `"1"` strings). `"0"` is truthy in Python and can silently bypass validations. Always cast with `cint(...)` (or equivalent numeric/strict boolean conversion) before branching.
 
 ---
 
