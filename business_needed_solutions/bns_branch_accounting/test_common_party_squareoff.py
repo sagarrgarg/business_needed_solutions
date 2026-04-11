@@ -291,6 +291,7 @@ class TestCommonPartySquareOff(FrappeTestCase):
 		pairs = compute_linked_party_net_positions(self.company)
 		p = self._my_pair(pairs)
 		self.assertIsNotNone(p)
+		self.assertEqual(p.get("kind"), "net")
 		self.assertAlmostEqual(p["square_off_amount"], 60, places=2)
 		square_off_linked_party(p)
 		# Supplier should still have 40 Cr.
@@ -300,6 +301,41 @@ class TestCommonPartySquareOff(FrappeTestCase):
 
 		residual = _get_party_signed_balance("Supplier", self.supplier, self.supplier_account, self.company)
 		self.assertAlmostEqual(residual, -40, places=2)
+
+	def test_consolidate_same_sign_cr_balances(self):
+		# Both parties carry Cr balances (customer advance + supplier payable).
+		# Classic detector skipped this. New detector classifies it as
+		# "consolidate" and moves the secondary's 174 onto the primary side.
+		# Party Link fixture: primary=Customer, secondary=Supplier.
+		# Customer (primary) = Cr 569 via two JVs that net to Cr 569
+		# Supplier (secondary) = Cr 174 via one JV
+		_post_journal(self.company, self.customer_account, "Customer", self.customer, 0, 569)
+		_post_journal(self.company, self.supplier_account, "Supplier", self.supplier, 0, 174)
+
+		from business_needed_solutions.bns_branch_accounting.common_party_squareoff import (
+			_get_party_signed_balance,
+		)
+
+		pair = self._my_pair(compute_linked_party_net_positions(self.company))
+		self.assertIsNotNone(pair, "consolidate pair should be detected")
+		self.assertEqual(pair.get("kind"), "consolidate")
+		self.assertAlmostEqual(pair["square_off_amount"], 174, places=2)
+
+		jv = square_off_linked_party(pair)
+		self.assertEqual(jv.docstatus, 1)
+
+		# Secondary (supplier) must be zero after the consolidation.
+		sec_after = _get_party_signed_balance(
+			"Supplier", self.supplier, self.supplier_account, self.company
+		)
+		self.assertAlmostEqual(sec_after, 0, places=2)
+		# Primary (customer) must be Cr (569 + 174) = -743 after absorbing.
+		pri_after = _get_party_signed_balance(
+			"Customer", self.customer, self.customer_account, self.company
+		)
+		self.assertAlmostEqual(pri_after, -743, places=2)
+		# The pair should no longer be a candidate (secondary = 0).
+		self.assertIsNone(self._my_pair(compute_linked_party_net_positions(self.company)))
 
 	def test_batch_runner_returns_summary(self):
 		self._setup_matched_100()

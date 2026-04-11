@@ -55,12 +55,52 @@ def _pair_key(primary_type, primary, secondary_type, secondary):
 	return f"{primary_type}:{primary}|{secondary_type}:{secondary}"
 
 
+def _classify_pair(primary_balance, secondary_balance):
+	"""Decide what kind of square-off this pair needs.
+
+	Returns (kind, amount) where kind is one of:
+	  - "net"          -> classic crossed pair (opposite signs). Post a balanced
+	                      JV that cancels min(|p|, |s|) from both sides. Residual
+	                      remains on the larger side.
+	  - "consolidate"  -> same-sign or one-sided. Move the ENTIRE secondary
+	                      balance onto the primary side so the combined entity
+	                      position lives on the Party Link primary ledger only.
+	                      Amount = |secondary|.
+	  - None           -> nothing to do (both sides zero, or secondary zero).
+
+	Why "consolidate" exists:
+	  Party Link pairs can have same-direction balances (e.g. customer has a
+	  Cr advance AND supplier has Cr payable). The classic crossed detector
+	  skipped these even though the customer's advance should be applied to
+	  the supplier side since both belong to the same real-world entity.
+	  Consolidation zeros the customer ledger and folds the advance into the
+	  supplier side so the accountant sees one combined position to settle.
+	"""
+	if abs(secondary_balance) < 0.009:
+		# Secondary already clean — nothing to move.
+		return None, 0.0
+	if abs(primary_balance) < 0.009:
+		# Primary is zero; moving secondary to primary is a pure consolidation.
+		return "consolidate", abs(secondary_balance)
+	# Both non-zero.
+	if primary_balance * secondary_balance < 0:
+		# Opposite signs → classic net.
+		return "net", min(abs(primary_balance), abs(secondary_balance))
+	# Same signs → consolidate the secondary into the primary.
+	return "consolidate", abs(secondary_balance)
+
+
 def compute_linked_party_net_positions(company, as_of_date=None):
 	"""Return the list of linked pairs that need a contra JV.
 
-	Each entry is a dict ready to feed into square_off_linked_party(). Only
-	pairs whose party accounts carry opposite-signed balances are returned;
-	the square_off_amount is min(|primary_balance|, |secondary_balance|).
+	Two kinds of pairs are returned:
+	  1. "net"         — classic crossed pair (primary Dr ↔ secondary Cr or
+	                     vice versa). Amount = min(|p|, |s|).
+	  2. "consolidate" — same-sign (or primary-zero) pair where the secondary
+	                     side holds a balance that should be folded onto the
+	                     primary side. Amount = |secondary|.
+
+	Each entry is a dict ready to feed into square_off_linked_party().
 	"""
 	if not company:
 		frappe.throw(_("Company is required"))
@@ -87,14 +127,8 @@ def compute_linked_party_net_positions(company, as_of_date=None):
 			pl.secondary_role, pl.secondary_party, secondary_account, company, as_of_date
 		)
 
-		# Only crossed: one side positive (Dr), the other negative (Cr).
-		if primary_balance == 0 or secondary_balance == 0:
-			continue
-		if primary_balance * secondary_balance >= 0:
-			continue
-
-		square_amount = min(abs(primary_balance), abs(secondary_balance))
-		if square_amount <= 0:
+		kind, square_amount = _classify_pair(primary_balance, secondary_balance)
+		if not kind or square_amount < 0.009:
 			continue
 
 		key = _pair_key(pl.primary_role, pl.primary_party, pl.secondary_role, pl.secondary_party)
@@ -115,6 +149,7 @@ def compute_linked_party_net_positions(company, as_of_date=None):
 				"secondary_account": secondary_account,
 				"secondary_balance": secondary_balance,
 				"square_off_amount": square_amount,
+				"kind": kind,
 				"company": company,
 			}
 		)
@@ -145,7 +180,14 @@ def _build_leg(account, party_type, party, debit, credit, cost_center):
 
 
 def square_off_linked_party(pair, posting_date=None, cost_center=None, remark=None, submit=True):
-	"""Post one balanced contra JV between the primary and secondary party."""
+	"""Post one balanced contra JV between the primary and secondary party.
+
+	Handles both kinds of pairs returned by compute_linked_party_net_positions:
+	  - "net"         -> primary and secondary both reduced by `amount`, each
+	                     leg on the opposite side of its current balance.
+	  - "consolidate" -> secondary is zeroed and its entire balance is moved
+	                     onto the primary side. Primary_balance may be zero.
+	"""
 	company = pair["company"]
 	amount = flt(pair["square_off_amount"])
 	if amount <= 0:
@@ -154,10 +196,30 @@ def square_off_linked_party(pair, posting_date=None, cost_center=None, remark=No
 	posting_date = getdate(posting_date or nowdate())
 	cost_center = cost_center or _default_cost_center(company)
 
-	primary_debit = amount if pair["primary_balance"] < 0 else 0.0
-	primary_credit = amount if pair["primary_balance"] > 0 else 0.0
-	secondary_debit = amount if pair["secondary_balance"] < 0 else 0.0
-	secondary_credit = amount if pair["secondary_balance"] > 0 else 0.0
+	kind = pair.get("kind") or "net"
+	primary_balance = flt(pair.get("primary_balance") or 0.0)
+	secondary_balance = flt(pair.get("secondary_balance") or 0.0)
+
+	if kind == "consolidate":
+		# Move secondary's full balance to the primary side.
+		#   - Secondary leg posts on the OPPOSITE side of its current balance
+		#     (so the net becomes zero).
+		#   - Primary leg posts on the SAME side as secondary's current balance
+		#     (so the primary absorbs the amount in the same direction).
+		if secondary_balance < 0:
+			# Secondary is net Cr -> zero it with a Dr, add Cr to primary.
+			secondary_debit, secondary_credit = amount, 0.0
+			primary_debit, primary_credit = 0.0, amount
+		else:
+			# Secondary is net Dr -> zero it with a Cr, add Dr to primary.
+			secondary_debit, secondary_credit = 0.0, amount
+			primary_debit, primary_credit = amount, 0.0
+	else:
+		# Classic "net": each leg reduces its own side by `amount`.
+		primary_debit = amount if primary_balance < 0 else 0.0
+		primary_credit = amount if primary_balance > 0 else 0.0
+		secondary_debit = amount if secondary_balance < 0 else 0.0
+		secondary_credit = amount if secondary_balance > 0 else 0.0
 
 	jv = frappe.new_doc("Journal Entry")
 	jv.voucher_type = "Journal Entry"
@@ -165,7 +227,7 @@ def square_off_linked_party(pair, posting_date=None, cost_center=None, remark=No
 	jv.company = company
 	jv.is_system_generated = 1
 	jv.user_remark = remark or (
-		f"BNS Common Party square-off: "
+		f"BNS Common Party square-off ({kind}): "
 		f"{pair['primary_party_type']} {pair['primary_party']} \u2194 "
 		f"{pair['secondary_party_type']} {pair['secondary_party']} "
 		f"for {frappe.utils.fmt_money(amount, currency=erpnext.get_company_currency(company))}"
@@ -245,25 +307,24 @@ def square_off_all_common_parties(
 
 
 def _refresh_pair_balances(pair):
-	"""Re-read live GL balances for a pair and recompute square_off_amount.
-	Returns a fresh pair dict, or None if the pair is no longer crossed."""
+	"""Re-read live GL balances for a pair and re-classify.
+
+	Returns a fresh pair dict (with the latest amounts and possibly a changed
+	kind), or None if a concurrent request has already cleared the pair."""
 	primary_balance = _get_party_signed_balance(
 		pair["primary_party_type"], pair["primary_party"], pair["primary_account"], pair["company"]
 	)
 	secondary_balance = _get_party_signed_balance(
 		pair["secondary_party_type"], pair["secondary_party"], pair["secondary_account"], pair["company"]
 	)
-	if primary_balance == 0 or secondary_balance == 0:
-		return None
-	if primary_balance * secondary_balance >= 0:
-		return None
-	amount = min(abs(primary_balance), abs(secondary_balance))
-	if amount <= 0:
+	kind, amount = _classify_pair(primary_balance, secondary_balance)
+	if not kind or amount < 0.009:
 		return None
 	refreshed = dict(pair)
 	refreshed["primary_balance"] = primary_balance
 	refreshed["secondary_balance"] = secondary_balance
 	refreshed["square_off_amount"] = amount
+	refreshed["kind"] = kind
 	return refreshed
 
 
@@ -468,13 +529,8 @@ def _find_crossed_pair_for_party(party_type, party, company):
 	secondary_balance = _get_party_signed_balance(
 		link.secondary_role, link.secondary_party, secondary_account, company
 	)
-	if primary_balance == 0 or secondary_balance == 0:
-		return None
-	if primary_balance * secondary_balance >= 0:
-		return None
-
-	amount = min(abs(primary_balance), abs(secondary_balance))
-	if amount <= 0:
+	kind, amount = _classify_pair(primary_balance, secondary_balance)
+	if not kind or amount < 0.009:
 		return None
 
 	return {
@@ -488,6 +544,7 @@ def _find_crossed_pair_for_party(party_type, party, company):
 		"secondary_account": secondary_account,
 		"secondary_balance": secondary_balance,
 		"square_off_amount": amount,
+		"kind": kind,
 		"company": company,
 	}
 

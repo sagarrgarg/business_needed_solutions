@@ -1902,11 +1902,12 @@ class BNSDashboard {
 	_render_squareoff_table(containerId, pairs, checkboxClass) {
 		const container = this.wrapper.find("#" + containerId);
 		if (!pairs || pairs.length === 0) {
-			container.html('<p class="text-success small"><i class="fa fa-check"></i> ' + __("No linked parties with crossed balances found.") + '</p>');
+			container.html('<p class="text-success small"><i class="fa fa-check"></i> ' + __("No linked parties with crossed or consolidatable balances found.") + '</p>');
 			return 0;
 		}
 		let html = '<table class="table table-sm table-bordered"><thead><tr>';
 		html += '<th style="width:30px;"><input type="checkbox" class="' + checkboxClass + '-all"></th>';
+		html += '<th><small>' + __("Kind") + '</small></th>';
 		html += '<th><small>' + __("Primary Party") + '</small></th>';
 		html += '<th><small>' + __("Secondary Party") + '</small></th>';
 		html += '<th class="text-right"><small>' + __("Primary Balance") + '</small></th>';
@@ -1914,8 +1915,15 @@ class BNSDashboard {
 		html += '<th class="text-right"><small>' + __("Square-Off") + '</small></th>';
 		html += '</tr></thead><tbody>';
 		pairs.forEach(function (p) {
+			const isConsolidate = p.kind === "consolidate";
+			const kindLabel = isConsolidate ? __("Consolidate") : __("Net");
+			const kindBadge = isConsolidate ? "badge-info" : "badge-warning";
+			const kindTitle = isConsolidate
+				? __("Same-sign pair: the secondary's balance is moved to the primary side (no netting, just consolidation).")
+				: __("Crossed pair: the matching amount is cancelled from both sides.");
 			html += '<tr>';
 			html += '<td><input type="checkbox" class="' + checkboxClass + '" data-pair-key="' + frappe.utils.escape_html(p.pair_key) + '" checked></td>';
+			html += '<td><span class="badge ' + kindBadge + '" title="' + frappe.utils.escape_html(kindTitle) + '">' + kindLabel + '</span></td>';
 			html += '<td><small>' + frappe.utils.escape_html(p.primary_party_type) + ' <b>' + frappe.utils.escape_html(p.primary_party) + '</b><br>' + frappe.utils.escape_html(p.primary_account || '') + '</small></td>';
 			html += '<td><small>' + frappe.utils.escape_html(p.secondary_party_type) + ' <b>' + frappe.utils.escape_html(p.secondary_party) + '</b><br>' + frappe.utils.escape_html(p.secondary_account || '') + '</small></td>';
 			html += '<td class="text-right"><small>' + format_currency(p.primary_balance) + '</small></td>';
