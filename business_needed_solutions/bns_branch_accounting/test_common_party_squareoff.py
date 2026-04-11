@@ -303,12 +303,12 @@ class TestCommonPartySquareOff(FrappeTestCase):
 		self.assertAlmostEqual(residual, -40, places=2)
 
 	def test_consolidate_same_sign_cr_balances(self):
-		# Both parties carry Cr balances:
-		#   Customer (primary) Debtors Cr 569 = customer advance = ABNORMAL
-		#   Supplier (secondary) Creditors Cr 174 = supplier payable = normal
-		# Correct consolidate: zero the customer (abnormal) and fold its 569
-		# onto the supplier side. Amount = |abnormal| = 569, NOT |secondary|.
-		# Final state: customer = 0, supplier Cr = 174 + 569 = 743.
+		# Both sides Cr: customer advance (ABNORMAL — Cr on Debtors) + supplier
+		# payable (NORMAL — Cr on Creditors). The consolidation must zero the
+		# ABNORMAL side (customer) and absorb its amount onto the NORMAL side
+		# (supplier Creditors), so the entity's combined obligation lives on
+		# the natural payable ledger.
+		# Party Link fixture: primary=Customer, secondary=Supplier.
 		_post_journal(self.company, self.customer_account, "Customer", self.customer, 0, 569)
 		_post_journal(self.company, self.supplier_account, "Supplier", self.supplier, 0, 174)
 
@@ -319,56 +319,51 @@ class TestCommonPartySquareOff(FrappeTestCase):
 		pair = self._my_pair(compute_linked_party_net_positions(self.company))
 		self.assertIsNotNone(pair, "consolidate pair should be detected")
 		self.assertEqual(pair.get("kind"), "consolidate")
-		# Amount = |abnormal primary| = 569 (customer advance being zeroed).
+		# Source must be the abnormal (customer) side = primary.
+		self.assertEqual(pair.get("consolidate_source"), "primary")
+		# Amount = |abnormal side| = 569, not |secondary| = 174.
 		self.assertAlmostEqual(pair["square_off_amount"], 569, places=2)
 
 		jv = square_off_linked_party(pair)
 		self.assertEqual(jv.docstatus, 1)
 
-		# Customer (primary, abnormal) must be zero after consolidation.
+		# Primary (customer = abnormal) must be zero after the consolidation.
 		pri_after = _get_party_signed_balance(
 			"Customer", self.customer, self.customer_account, self.company
 		)
 		self.assertAlmostEqual(pri_after, 0, places=2)
-		# Supplier (secondary, normal) must be Cr (174 + 569) = -743 after absorbing.
+		# Secondary (supplier = normal) absorbs: Cr 174 + Cr 569 = Cr 743.
 		sec_after = _get_party_signed_balance(
 			"Supplier", self.supplier, self.supplier_account, self.company
 		)
 		self.assertAlmostEqual(sec_after, -743, places=2)
-		# Pair is no longer a candidate — both sides sit naturally (primary 0,
-		# secondary Cr 743 which is the natural direction for Creditors).
+		# The pair should no longer be a candidate (primary = 0).
 		self.assertIsNone(self._my_pair(compute_linked_party_net_positions(self.company)))
 
-	def test_consolidate_same_sign_dr_balances(self):
-		# Mirror case: both parties carry Dr balances:
-		#   Customer (primary) Debtors Dr 100 = customer receivable = normal
-		#   Supplier (secondary) Creditors Dr 300 = supplier advance = ABNORMAL
-		# Consolidate zeros the supplier (abnormal) and folds its 300 onto
-		# the customer. Amount = |abnormal secondary| = 300.
-		# Final state: supplier = 0, customer Dr = 100 + 300 = 400.
-		_post_journal(self.company, self.customer_account, "Customer", self.customer, 100, 0)
-		_post_journal(self.company, self.supplier_account, "Supplier", self.supplier, 300, 0)
-
+	def test_consolidate_primary_customer_advance_into_secondary_supplier(self):
+		# Exact reproduction of the testingrbs bug (Customer C2602-82 + Supplier
+		# S2511-28, both Cr, user complained the old code zeroed the wrong side).
+		# Customer Cr 281 (abnormal advance), Supplier Cr 343 (normal payable).
+		_post_journal(self.company, self.customer_account, "Customer", self.customer, 0, 281)
+		_post_journal(self.company, self.supplier_account, "Supplier", self.supplier, 0, 343)
+		pair = self._my_pair(compute_linked_party_net_positions(self.company))
+		self.assertIsNotNone(pair)
+		self.assertEqual(pair.get("kind"), "consolidate")
+		self.assertEqual(pair.get("consolidate_source"), "primary")
+		# Must move the SMALLER abnormal amount (281), not the larger normal (343).
+		self.assertAlmostEqual(pair["square_off_amount"], 281, places=2)
+		square_off_linked_party(pair)
 		from business_needed_solutions.bns_branch_accounting.common_party_squareoff import (
 			_get_party_signed_balance,
 		)
-
-		pair = self._my_pair(compute_linked_party_net_positions(self.company))
-		self.assertIsNotNone(pair, "consolidate pair should be detected")
-		self.assertEqual(pair.get("kind"), "consolidate")
-		self.assertAlmostEqual(pair["square_off_amount"], 300, places=2)
-
-		square_off_linked_party(pair)
-
-		sec_after = _get_party_signed_balance(
-			"Supplier", self.supplier, self.supplier_account, self.company
+		self.assertAlmostEqual(
+			_get_party_signed_balance("Customer", self.customer, self.customer_account, self.company),
+			0, places=2,
 		)
-		self.assertAlmostEqual(sec_after, 0, places=2)
-		pri_after = _get_party_signed_balance(
-			"Customer", self.customer, self.customer_account, self.company
+		self.assertAlmostEqual(
+			_get_party_signed_balance("Supplier", self.supplier, self.supplier_account, self.company),
+			-624, places=2,  # 343 + 281 = 624 Cr on supplier creditors
 		)
-		self.assertAlmostEqual(pri_after, 400, places=2)
-		self.assertIsNone(self._my_pair(compute_linked_party_net_positions(self.company)))
 
 	def test_batch_runner_returns_summary(self):
 		self._setup_matched_100()

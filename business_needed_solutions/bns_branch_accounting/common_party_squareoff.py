@@ -55,68 +55,84 @@ def _pair_key(primary_type, primary, secondary_type, secondary):
 	return f"{primary_type}:{primary}|{secondary_type}:{secondary}"
 
 
-def _is_abnormal_balance(party_type, balance):
-	"""True if `balance` is on the non-natural side for this party account type.
+def _is_normal_balance(party_type, signed_balance):
+	"""Is this balance on the "natural" side for its account type?
 
-	- Customer on Debtors (Receivable): natural = Dr (>0). Cr (<0) = customer
-	  advance / overpayment → abnormal.
-	- Supplier on Creditors (Payable): natural = Cr (<0). Dr (>0) = advance
-	  given to supplier → abnormal.
+	  - Customer (Debtors, Receivable): normal = Dr balance (signed >= 0)
+	    Abnormal Cr balance means the customer has a pending advance on our books.
+	  - Supplier (Creditors, Payable): normal = Cr balance (signed <= 0)
+	    Abnormal Dr balance means we gave the supplier an advance.
 	"""
 	if party_type == "Customer":
-		return balance < -0.009
+		return signed_balance >= 0
 	if party_type == "Supplier":
-		return balance > 0.009
-	return False
+		return signed_balance <= 0
+	# Unknown party type — treat as normal so we don't mis-classify.
+	return True
 
 
-def _classify_pair(primary_party_type, primary_balance, secondary_party_type, secondary_balance):
+def _classify_pair(primary_type, primary_balance, secondary_type, secondary_balance):
 	"""Decide what kind of square-off this pair needs.
 
-	Returns (kind, amount) where kind is one of:
-	  - "net"         -> classic crossed pair (opposite signs). Post a balanced
-	                     JV that cancels min(|p|, |s|) from both sides.
-	                     Residual remains on the larger side.
-	  - "consolidate" -> one side holds an abnormal balance for its account
-	                     type (customer advance on Debtors, or supplier
-	                     advance on Creditors). Zero the abnormal side and
-	                     fold its amount onto the party whose balance is
-	                     natural. Amount = |abnormal balance|.
-	  - None          -> nothing to do.
+	Returns (kind, amount, source) where:
+	  - kind = "net"         -> classic crossed pair. Post a balanced JV that
+	                            cancels min(|p|, |s|) from both sides. Residual
+	                            stays on the larger side.
+	  - kind = "consolidate" -> one side holds an abnormal balance (customer Cr
+	                            advance on Debtors, or supplier Dr advance on
+	                            Creditors). Move that abnormal side's ENTIRE
+	                            balance onto the other (normal) side so the
+	                            combined entity position lives on the natural
+	                            ledger only. Amount = |abnormal side|.
+	  - kind = None          -> nothing to do.
+	  - source = "primary" | "secondary" | None — which side gets zeroed
+	                            in the consolidate JV. None for "net".
 
-	Why "consolidate" fires on the ABNORMAL side, not the Party Link secondary:
-	  The Party Link primary/secondary assignment is arbitrary. Consolidation
-	  must always move the abnormal-direction balance (customer Cr advance
-	  or supplier Dr advance) ONTO the natural-direction side, so the entity's
-	  final combined position lives on its "natural" ledger — Creditors if
-	  the entity is net payable, Debtors if net receivable. Moving the wrong
-	  way produces an accounting-nonsensical state (e.g. representing a
-	  supplier payable as a giant customer advance).
+	Why direction matters for consolidate:
+	  If Customer has Cr 281 (advance on Debtors — abnormal) and linked Supplier
+	  has Cr 343 (payable on Creditors — normal), the correct move is to zero
+	  the customer side (abnormal = 281) and add it to the supplier side, so
+	  the combined 624 we owe the entity lives entirely on Creditors (the
+	  natural payable ledger). The wrong move is to zero the supplier
+	  (moving 343 onto the customer's Cr and ending up with 624 on Debtors —
+	  an inflated "customer advance" that doesn't exist economically).
 	"""
-	p_nonzero = abs(primary_balance) >= 0.009
-	s_nonzero = abs(secondary_balance) >= 0.009
-	if not p_nonzero and not s_nonzero:
-		return None, 0.0
+	p_zero = abs(primary_balance) < 0.009
+	s_zero = abs(secondary_balance) < 0.009
+	if p_zero and s_zero:
+		return None, 0.0, None
 
-	# Classic crossed case: both sides non-zero with opposite signs.
-	if p_nonzero and s_nonzero and primary_balance * secondary_balance < 0:
-		return "net", min(abs(primary_balance), abs(secondary_balance))
+	# Both non-zero with opposite signs → classic crossed net.
+	if not p_zero and not s_zero and primary_balance * secondary_balance < 0:
+		return "net", min(abs(primary_balance), abs(secondary_balance)), None
 
-	# Consolidate: find the side that holds an abnormal balance for its type.
-	primary_abnormal = _is_abnormal_balance(primary_party_type, primary_balance)
-	secondary_abnormal = _is_abnormal_balance(secondary_party_type, secondary_balance)
+	# From here it's consolidation territory. Consolidation only makes sense
+	# when there is an ABNORMAL balance somewhere that should be folded onto
+	# a natural ledger. A lone normal balance (e.g. supplier Cr with no
+	# linked customer balance) needs no action — it already lives on the
+	# right ledger.
+	primary_normal = _is_normal_balance(primary_type, primary_balance) if not p_zero else None
+	secondary_normal = _is_normal_balance(secondary_type, secondary_balance) if not s_zero else None
 
-	if primary_abnormal and not secondary_abnormal:
-		return "consolidate", abs(primary_balance)
-	if secondary_abnormal and not primary_abnormal:
-		return "consolidate", abs(secondary_balance)
+	# Lone balance: only consolidate if it's on the abnormal side.
+	if s_zero:
+		if primary_normal:
+			return None, 0.0, None
+		return "consolidate", abs(primary_balance), "primary"
+	if p_zero:
+		if secondary_normal:
+			return None, 0.0, None
+		return "consolidate", abs(secondary_balance), "secondary"
 
-	# Both abnormal should not happen (opposite signs → would hit "net" above).
-	# Neither abnormal with same-sign balances means both sides sit naturally
-	# and there is nothing to consolidate (e.g. customer Dr + supplier Cr is a
-	# "net" crossed pair already handled above; other same-sign cases where
-	# neither is abnormal cannot arise with Customer/Supplier roles).
-	return None, 0.0
+	# Both non-zero, same signs. Zero out the abnormal side.
+	if not primary_normal and secondary_normal:
+		return "consolidate", abs(primary_balance), "primary"
+	if primary_normal and not secondary_normal:
+		return "consolidate", abs(secondary_balance), "secondary"
+
+	# Same sign AND both on the same normal/abnormal disposition — e.g. two
+	# customers both Dr, or two Cr advances. Degenerate; skip.
+	return None, 0.0, None
 
 
 def compute_linked_party_net_positions(company, as_of_date=None):
@@ -156,7 +172,7 @@ def compute_linked_party_net_positions(company, as_of_date=None):
 			pl.secondary_role, pl.secondary_party, secondary_account, company, as_of_date
 		)
 
-		kind, square_amount = _classify_pair(
+		kind, square_amount, consolidate_source = _classify_pair(
 			pl.primary_role, primary_balance, pl.secondary_role, secondary_balance
 		)
 		if not kind or square_amount < 0.009:
@@ -181,6 +197,7 @@ def compute_linked_party_net_positions(company, as_of_date=None):
 				"secondary_balance": secondary_balance,
 				"square_off_amount": square_amount,
 				"kind": kind,
+				"consolidate_source": consolidate_source,
 				"company": company,
 			}
 		)
@@ -230,42 +247,38 @@ def square_off_linked_party(pair, posting_date=None, cost_center=None, remark=No
 	kind = pair.get("kind") or "net"
 	primary_balance = flt(pair.get("primary_balance") or 0.0)
 	secondary_balance = flt(pair.get("secondary_balance") or 0.0)
+	# Default source if missing (older in-flight pair dicts): secondary.
+	source = pair.get("consolidate_source") or "secondary"
 
 	if kind == "consolidate":
-		# Zero the ABNORMAL side; add its amount onto the other party in the
-		# direction that keeps the other party's balance natural for its
-		# account type. Never zero the "normal" side — that would move a
-		# natural payable onto an abnormal advance ledger and produce an
-		# accounting-nonsensical state.
-		primary_abnormal = _is_abnormal_balance(pair["primary_party_type"], primary_balance)
-		secondary_abnormal = _is_abnormal_balance(pair["secondary_party_type"], secondary_balance)
-
-		if primary_abnormal and not secondary_abnormal:
-			# Primary is abnormal → zero primary, absorb into secondary.
-			if primary_balance < 0:
-				# Primary is Cr (customer advance) — Dr to zero it.
-				primary_debit, primary_credit = amount, 0.0
-				# Secondary is Cr (supplier payable) — add Cr to preserve its side.
-				secondary_debit, secondary_credit = 0.0, amount
-			else:
-				# Primary is Dr (supplier advance) — Cr to zero it.
-				primary_debit, primary_credit = 0.0, amount
-				# Secondary is Dr (customer receivable) — add Dr to preserve its side.
-				secondary_debit, secondary_credit = amount, 0.0
-		elif secondary_abnormal and not primary_abnormal:
-			# Secondary is abnormal → zero secondary, absorb into primary.
-			if secondary_balance < 0:
-				secondary_debit, secondary_credit = amount, 0.0
-				primary_debit, primary_credit = 0.0, amount
-			else:
-				secondary_debit, secondary_credit = 0.0, amount
-				primary_debit, primary_credit = amount, 0.0
+		# Zero the `source` side entirely and absorb its balance onto the
+		# other side. `source` is picked by _classify_pair so the abnormal
+		# side (customer Cr on Debtors, supplier Dr on Creditors) is the one
+		# that gets cleaned up — the natural-side ledger absorbs the full
+		# amount so the entity's position lives on one account.
+		if source == "primary":
+			source_balance = primary_balance
 		else:
-			frappe.throw(
-				_("Invalid consolidate pair: no abnormal side found. "
-				  "This pair should not have reached square_off_linked_party — "
-				  "_classify_pair contract broken.")
-			)
+			source_balance = secondary_balance
+
+		# Source leg posts on the OPPOSITE side of its current balance so
+		# the net goes to zero. Destination leg posts on the SAME side as
+		# the source's current balance so the destination absorbs it.
+		if source_balance < 0:
+			# Source is net Cr -> zero with Dr on source, add Cr on destination.
+			src_dr, src_cr = amount, 0.0
+			dest_dr, dest_cr = 0.0, amount
+		else:
+			# Source is net Dr -> zero with Cr on source, add Dr on destination.
+			src_dr, src_cr = 0.0, amount
+			dest_dr, dest_cr = amount, 0.0
+
+		if source == "primary":
+			primary_debit, primary_credit = src_dr, src_cr
+			secondary_debit, secondary_credit = dest_dr, dest_cr
+		else:
+			secondary_debit, secondary_credit = src_dr, src_cr
+			primary_debit, primary_credit = dest_dr, dest_cr
 	else:
 		# Classic "net": each leg reduces its own side by `amount`.
 		primary_debit = amount if primary_balance < 0 else 0.0
@@ -361,15 +374,15 @@ def square_off_all_common_parties(
 def _refresh_pair_balances(pair):
 	"""Re-read live GL balances for a pair and re-classify.
 
-	Returns a fresh pair dict (with the latest amounts and possibly a changed
-	kind), or None if a concurrent request has already cleared the pair."""
+	Returns a fresh pair dict (with the latest amounts, kind, and source),
+	or None if a concurrent request has already cleared the pair."""
 	primary_balance = _get_party_signed_balance(
 		pair["primary_party_type"], pair["primary_party"], pair["primary_account"], pair["company"]
 	)
 	secondary_balance = _get_party_signed_balance(
 		pair["secondary_party_type"], pair["secondary_party"], pair["secondary_account"], pair["company"]
 	)
-	kind, amount = _classify_pair(
+	kind, amount, source = _classify_pair(
 		pair["primary_party_type"], primary_balance,
 		pair["secondary_party_type"], secondary_balance,
 	)
@@ -380,6 +393,7 @@ def _refresh_pair_balances(pair):
 	refreshed["secondary_balance"] = secondary_balance
 	refreshed["square_off_amount"] = amount
 	refreshed["kind"] = kind
+	refreshed["consolidate_source"] = source
 	return refreshed
 
 
@@ -584,8 +598,9 @@ def _find_crossed_pair_for_party(party_type, party, company):
 	secondary_balance = _get_party_signed_balance(
 		link.secondary_role, link.secondary_party, secondary_account, company
 	)
-	kind, amount = _classify_pair(
-		link.primary_role, primary_balance, link.secondary_role, secondary_balance
+	kind, amount, source = _classify_pair(
+		link.primary_role, primary_balance,
+		link.secondary_role, secondary_balance,
 	)
 	if not kind or amount < 0.009:
 		return None
@@ -602,6 +617,7 @@ def _find_crossed_pair_for_party(party_type, party, company):
 		"secondary_balance": secondary_balance,
 		"square_off_amount": amount,
 		"kind": kind,
+		"consolidate_source": source,
 		"company": company,
 	}
 
