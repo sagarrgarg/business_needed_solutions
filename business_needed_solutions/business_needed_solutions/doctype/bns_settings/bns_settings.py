@@ -46,10 +46,14 @@ class BNSSettings(Document):
     def apply_settings(self) -> None:
         """
         Apply BNS settings to all relevant doctypes.
-        
+
         This method updates field properties for sales and purchase doctypes
         based on the configured discount type (Single or Triple).
         """
+        frappe.only_for(
+            ["System Manager", "Accounts Manager"],
+            message=_("Only System Manager or Accounts Manager can apply BNS Settings."),
+        )
         try:
             # Update sales doctypes
             self._update_sales_doctypes()

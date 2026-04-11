@@ -873,6 +873,10 @@ def get_statement_meta(filters):
     - Future payments
     - Closing balance
     """
+    frappe.only_for(
+        ["Accounts User", "Accounts Manager", "System Manager", "Auditor"],
+        message="Party statement metadata requires an Accounts role.",
+    )
     from frappe.utils import flt, nowdate, today
     
     if isinstance(filters, str):

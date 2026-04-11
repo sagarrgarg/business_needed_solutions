@@ -184,6 +184,12 @@ def check_ewaybill_applicability(
 
     Returns dict: {"required": bool, "threshold": float}
     """
+    # Frontend-only helper — still require the caller to be an authenticated
+    # desk user with at least read on the doctype they're asking about.
+    if frappe.session.user == "Guest":
+        frappe.throw(_("Not permitted"), frappe.PermissionError)
+    if doctype and not frappe.has_permission(doctype, "read"):
+        frappe.throw(_("Not permitted"), frappe.PermissionError)
     if not _is_attachment_validation_enabled():
         return {"required": False, "threshold": 0}
 

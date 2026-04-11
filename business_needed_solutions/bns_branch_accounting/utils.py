@@ -28,6 +28,34 @@ import time
 logger = logging.getLogger(__name__)
 
 
+# -------------------------------------------------------------------
+# Permission gates for whitelisted endpoints in this module.
+# Why: every @frappe.whitelist() in utils.py is reachable by any
+# authenticated user. Several of them create / modify / submit
+# documents (make_bns_internal_*, convert_*_to_bns_internal,
+# link_*/unlink_*, bulk_convert_*, bns_force_*_gl_*). Without a role
+# check, any "Desk User" could call them via /api/method and corrupt
+# accounting data. These helpers centralise the gate so future edits
+# only need to call one function.
+# -------------------------------------------------------------------
+
+
+def _bns_require_accounts_read():
+	"""Any read / lookup endpoint — Accounts User or higher."""
+	frappe.only_for(
+		["Accounts User", "Accounts Manager", "System Manager", "Auditor"],
+		message=_("This BNS endpoint requires an Accounts role."),
+	)
+
+
+def _bns_require_accounts_write():
+	"""Any write / mutate endpoint — Accounts Manager or System Manager."""
+	frappe.only_for(
+		["Accounts Manager", "System Manager"],
+		message=_("This BNS endpoint requires Accounts Manager or System Manager."),
+	)
+
+
 def _bns_debug_log(hypothesis_id: str, location: str, message: str, data: Optional[Dict[str, Any]] = None) -> None:
     """Append one NDJSON debug line for runtime investigation."""
     try:
@@ -1755,6 +1783,7 @@ def validate_internal_sales_invoice_linkage(doc, method: Optional[str] = None) -
 @frappe.whitelist()
 def check_existing_internal_si_for_dn(delivery_notes: List[str], current_si: Optional[str] = None) -> Dict[str, Any]:
     """UI helper to check duplicate internal SI existence for DN context."""
+    _bns_require_accounts_read()
     dn_names = sorted({(d or "").strip() for d in (delivery_notes or []) if (d or "").strip()})
     if not dn_names:
         return {"exists": False}
@@ -3266,6 +3295,7 @@ def bns_force_rewrite_gl_for_repost_accounting_ledger(repost_doc_name: str) -> D
     Force-correct GL for DN/PR vouchers included in a Repost Accounting Ledger doc.
     This bypasses setting-based force flag and executes hard rebuild path.
     """
+    _bns_require_accounts_write()
     if not repost_doc_name:
         return {"ok": False, "message": "Missing repost_doc_name"}
     if not frappe.db.exists("Repost Accounting Ledger", repost_doc_name):
@@ -3293,6 +3323,7 @@ def bns_force_rewrite_gl_for_repost_item_valuation(repost_doc_name: str) -> Dict
     Force-correct GL for DN/PR vouchers affected by a Repost Item Valuation doc.
     This bypasses setting-based force flag and executes hard rebuild path.
     """
+    _bns_require_accounts_write()
     if not repost_doc_name:
         return {"ok": False, "message": "Missing repost_doc_name"}
     if not frappe.db.exists("Repost Item Valuation", repost_doc_name):
@@ -3306,6 +3337,7 @@ def bns_force_rewrite_gl_for_repost_item_valuation(repost_doc_name: str) -> Dict
 @frappe.whitelist()
 def bns_debug_internal_gl_scope(voucher_type: str, voucher_no: str) -> Dict[str, Any]:
     """Debug helper to inspect BNS GL rewrite scope and amount resolution."""
+    _bns_require_accounts_read()
     if voucher_type not in ("Delivery Note", "Purchase Receipt") or not voucher_no:
         return {"ok": False, "message": "Invalid voucher_type/voucher_no"}
     if not frappe.db.exists(voucher_type, voucher_no):
@@ -3404,6 +3436,7 @@ def bns_debug_internal_gl_scope(voucher_type: str, voucher_no: str) -> Dict[str,
 @frappe.whitelist()
 def bns_force_rebuild_gl_for_voucher(voucher_type: str, voucher_no: str) -> Dict[str, Any]:
     """Force rebuild GL for one DN/PR voucher and return result."""
+    _bns_require_accounts_write()
     try:
         result = _force_rebuild_bns_gl_for_voucher(voucher_type, voucher_no)
         return {"ok": bool(result), "voucher_type": voucher_type, "voucher_no": voucher_no}
@@ -4122,6 +4155,7 @@ def make_bns_internal_purchase_receipt(source_name: str, target_doc: Optional[Di
         BNSValidationError: If validation fails
         BNSInternalTransferError: If internal transfer setup fails
     """
+    _bns_require_accounts_write()
     try:
         dn = frappe.get_doc("Delivery Note", source_name, for_update=True)
 
@@ -5827,6 +5861,7 @@ def make_bns_internal_purchase_invoice(source_name: str, target_doc: Optional[Di
         BNSValidationError: If validation fails
         BNSInternalTransferError: If internal transfer setup fails
     """
+    _bns_require_accounts_write()
     try:
         si = frappe.get_doc("Sales Invoice", source_name, for_update=True)
 
@@ -6147,6 +6182,7 @@ def make_bns_internal_purchase_receipt_from_si(source_name: str, target_doc: Opt
         BNSValidationError: If validation fails
         BNSInternalTransferError: If internal transfer setup fails
     """
+    _bns_require_accounts_write()
     try:
         si = frappe.get_doc("Sales Invoice", source_name)
 
@@ -6543,6 +6579,7 @@ def get_sales_invoice_by_bill_no(purchase_invoice: str) -> Dict:
     Returns:
         Dict: Sales Invoice details if found, None otherwise
     """
+    _bns_require_accounts_read()
     try:
         # Get Purchase Invoice to check bill_no
         pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
@@ -6584,6 +6621,7 @@ def get_purchase_invoice_by_supplier_invoice(sales_invoice: str) -> Dict:
     Returns:
         Dict: Purchase Invoice details if found, None otherwise
     """
+    _bns_require_accounts_read()
     try:
         # Find PI where bill_no matches SI name
         pi_name = frappe.db.get_value("Purchase Invoice", {"bill_no": sales_invoice, "docstatus": 1}, "name")
@@ -6628,6 +6666,7 @@ def validate_si_pi_items_match(
     Returns:
         Validation result with match status and details.
     """
+    _bns_require_accounts_read()
     amount_tolerance = flt(amount_tolerance or 0)
     try:
         si = frappe.get_doc("Sales Invoice", sales_invoice)
@@ -6864,6 +6903,7 @@ def convert_sales_invoice_to_bns_internal(sales_invoice: str, purchase_invoice: 
     Raises:
         BNSValidationError: If validation fails
     """
+    _bns_require_accounts_write()
     try:
         # Get Sales Invoice
         si = frappe.get_doc("Sales Invoice", sales_invoice)
@@ -7023,6 +7063,7 @@ def convert_purchase_invoice_to_bns_internal(purchase_invoice: str, sales_invoic
     Raises:
         BNSValidationError: If validation fails
     """
+    _bns_require_accounts_write()
     try:
         pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
 
@@ -7181,6 +7222,7 @@ def get_purchase_receipt_by_supplier_delivery_note(delivery_note: str) -> Dict:
     Returns:
         Dict: Purchase Receipt details if found, None otherwise
     """
+    _bns_require_accounts_read()
     try:
         # Find PR where supplier_delivery_note matches DN name
         pr_name = frappe.db.get_value("Purchase Receipt", {"supplier_delivery_note": delivery_note, "docstatus": 1}, "name")
@@ -7217,6 +7259,7 @@ def get_delivery_note_by_supplier_delivery_note(purchase_receipt: str) -> Dict:
     Returns:
         Dict: Delivery Note details if found, None otherwise
     """
+    _bns_require_accounts_read()
     try:
         # Get Purchase Receipt to check supplier_delivery_note
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
@@ -7270,6 +7313,7 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
     Raises:
         BNSValidationError: If validation fails
     """
+    _bns_require_accounts_write()
     try:
         # Get Delivery Note
         dn = frappe.get_doc("Delivery Note", delivery_note)
@@ -7445,6 +7489,7 @@ def convert_purchase_receipt_to_bns_internal(purchase_receipt: str, delivery_not
     Raises:
         BNSValidationError: If validation fails
     """
+    _bns_require_accounts_write()
     try:
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
 
@@ -7814,6 +7859,7 @@ def validate_dn_pr_items_match(delivery_note: str, purchase_receipt: str) -> Dic
     Returns:
         Dict: Validation result with match status and details
     """
+    _bns_require_accounts_read()
     try:
         dn = frappe.get_doc("Delivery Note", delivery_note)
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
@@ -7924,6 +7970,7 @@ def validate_si_pr_items_match(sales_invoice: str, purchase_receipt: str) -> Dic
     Returns:
         Dict: Validation result with match status and details
     """
+    _bns_require_accounts_read()
     try:
         si = frappe.get_doc("Sales Invoice", sales_invoice)
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
@@ -7998,6 +8045,7 @@ def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
     Returns:
         Dict: Result with success message
     """
+    _bns_require_accounts_write()
     try:
         dn = frappe.get_doc("Delivery Note", delivery_note, for_update=True)
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt, for_update=True)
@@ -8158,6 +8206,7 @@ def unlink_dn_pr(delivery_note: str = None, purchase_receipt: str = None) -> Dic
     Returns:
         Dict: Result with success message
     """
+    _bns_require_accounts_write()
     try:
         _enforce_unlink_recovery_permission("unlink_dn_pr")
         _audit_unlink_action(
@@ -8262,6 +8311,7 @@ def link_si_pr(sales_invoice: str, purchase_receipt: str) -> Dict:
     Returns:
         Dict: Result with success message
     """
+    _bns_require_accounts_write()
     try:
         si = frappe.get_doc("Sales Invoice", sales_invoice)
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
@@ -8336,6 +8386,7 @@ def unlink_si_pr(sales_invoice: str = None, purchase_receipt: str = None) -> Dic
     Returns:
         Dict: Result with success message
     """
+    _bns_require_accounts_write()
     try:
         _enforce_unlink_recovery_permission("unlink_si_pr")
         _audit_unlink_action(
@@ -8404,6 +8455,7 @@ def link_si_pi(sales_invoice: str, purchase_invoice: str) -> Dict:
     Returns:
         Dict: Result with success message
     """
+    _bns_require_accounts_write()
     try:
         si = frappe.get_doc("Sales Invoice", sales_invoice, for_update=True)
         pi = frappe.get_doc("Purchase Invoice", purchase_invoice, for_update=True)
@@ -8540,6 +8592,7 @@ def unlink_si_pi(sales_invoice: str = None, purchase_invoice: str = None) -> Dic
     Returns:
         Dict: Result with success message
     """
+    _bns_require_accounts_write()
     try:
         _enforce_unlink_recovery_permission("unlink_si_pi")
         _audit_unlink_action(
@@ -8645,6 +8698,7 @@ def get_bulk_conversion_preview(from_date: str, to_date: str = None, force: int 
     Returns:
         Dict: Counts of documents that can be converted
     """
+    _bns_require_accounts_read()
     try:
         from_date_obj = frappe.utils.getdate(from_date)
         if to_date:
@@ -8785,6 +8839,7 @@ def bulk_convert_to_bns_internal(from_date: str, to_date: str = None, force: int
     Returns:
         Dict: Results with counts of converted documents
     """
+    _bns_require_accounts_write()
     try:
         from_date_obj = frappe.utils.getdate(from_date)
         if to_date:
@@ -9002,6 +9057,7 @@ def backfill_item_references(from_date: str) -> Dict:
     Callable via bench console or one-time from BNS Settings.
     Returns a summary with counts of documents and items fixed.
     """
+    _bns_require_accounts_write()
     from_date = frappe.utils.getdate(from_date)
     pi_docs_fixed = 0
     pi_items_fixed = 0
@@ -10034,6 +10090,7 @@ def verify_and_repost_internal_transfers(
     Returns:
         Dict with summary counts, chain details, repost results, and fix results.
     """
+    _bns_require_accounts_write()
     if isinstance(repost, str):
         repost = repost.lower() in ("true", "1", "yes")
     if isinstance(fix_partial_dn_pr, str):
@@ -10249,6 +10306,7 @@ def enqueue_verify_and_repost_internal_transfers(
     Returns:
         Dict with job enqueue confirmation.
     """
+    _bns_require_accounts_write()
     if isinstance(repost, str):
         repost = repost.lower() in ("true", "1", "yes")
     if isinstance(fix_partial_dn_pr, str):

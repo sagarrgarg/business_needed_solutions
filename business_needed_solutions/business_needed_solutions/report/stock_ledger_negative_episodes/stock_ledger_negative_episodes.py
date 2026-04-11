@@ -265,6 +265,10 @@ def prepare_report_data(episodes):
 @frappe.whitelist()
 def export_fix_plan(filters):
 	"""Export fix plan as CSV for bulk processing."""
+	frappe.only_for(
+		["Stock Manager", "System Manager", "Accounts Manager"],
+		message="Export fix plan requires Stock Manager / Accounts Manager / System Manager.",
+	)
 	import csv
 	from io import StringIO
 

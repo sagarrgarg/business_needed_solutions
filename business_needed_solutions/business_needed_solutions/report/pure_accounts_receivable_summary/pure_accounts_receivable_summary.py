@@ -637,27 +637,28 @@ class AccountsReceivablePayableSummary(ReceivablePayableReport):
 					continue
 
 				# Use different formula based on account type
-				if self.account_type == "Payable":
-					# For Payable: credit - debit (positive means we owe)
-					balance_formula = "SUM(credit) - SUM(debit)"
-				else:
-					# For Receivable: debit - credit (positive means customer owes)
-					balance_formula = "SUM(debit) - SUM(credit)"
-
-				opening_entries = frappe.db.sql(f"""
-					SELECT party, {balance_formula} as balance
+				# Compute net = debit - credit in SQL, then flip sign in Python
+				# when the account is Payable. Avoids an f-string formula in the
+				# query body (SQL injection hygiene).
+				opening_entries = frappe.db.sql(
+					"""
+					SELECT party, SUM(debit) - SUM(credit) AS balance
 					FROM `tabGL Entry`
 					WHERE posting_date < %s
-					AND party_type = %s
-					AND account in %s
-					AND company = %s
-					AND is_cancelled = 0
+					  AND party_type = %s
+					  AND account in %s
+					  AND company = %s
+					  AND is_cancelled = 0
 					GROUP BY party
-				""", (self.filters.from_date, party_type, tuple(accounts), self.filters.company), as_dict=1)
+					""",
+					(self.filters.from_date, party_type, tuple(accounts), self.filters.company),
+					as_dict=1,
+				)
 
+				sign = -1 if self.account_type == "Payable" else 1
 				for entry in opening_entries:
 					if entry.party:
-						opening_balances[entry.party] = entry.balance
+						opening_balances[entry.party] = sign * flt(entry.balance)
 
 		exclude_groups = self.filters.get(
 			"exclude_customer_group" if self.account_type == "Receivable" else "exclude_supplier_group"
@@ -897,22 +898,21 @@ def get_gl_balance(report_date, company, account_type):
 	if not accounts:
 		return frappe._dict()
 	
-	# Use different formula based on account type
-	if account_type == "Payable":
-		# For Payable: credit - debit (positive means we owe)
-		balance_formula = "SUM(credit) - SUM(debit)"
-	else:
-		# For Receivable: debit - credit (positive means customer owes)
-		balance_formula = "SUM(debit) - SUM(credit)"
-	
-	balance_data = frappe.db.sql(f"""
-		SELECT party, {balance_formula} as balance
+	# Compute net via a single (debit - credit) formula, flip sign in Python
+	# for Payable accounts. Keeps the SQL free of f-string interpolation.
+	balance_data = frappe.db.sql(
+		"""
+		SELECT party, SUM(debit) - SUM(credit) AS balance
 		FROM `tabGL Entry`
 		WHERE posting_date <= %s
-		AND account IN %s
-		AND company = %s
-		AND is_cancelled = 0
+		  AND account IN %s
+		  AND company = %s
+		  AND is_cancelled = 0
 		GROUP BY party
-	""", (report_date, tuple(accounts), company), as_dict=1)
-	
-	return frappe._dict([(d.party, d.balance) for d in balance_data if d.party])
+		""",
+		(report_date, tuple(accounts), company),
+		as_dict=1,
+	)
+
+	sign = -1 if account_type == "Payable" else 1
+	return frappe._dict([(d.party, sign * flt(d.balance)) for d in balance_data if d.party])

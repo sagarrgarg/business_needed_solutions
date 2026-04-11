@@ -37,6 +37,12 @@ def get_submitted_linked_docs(doctype: str, name: str, ignore_doctypes_on_cancel
     - Cancelling Purchase Receipt should not ask to cancel Delivery Note/Sales Invoice.
     - Cancelling Purchase Invoice should not ask to cancel Sales Invoice.
     """
+    # This overrides a standard Frappe desk helper. The caller must at least
+    # be authenticated AND have cancel permission on the source doctype.
+    if frappe.session.user == "Guest":
+        frappe.throw("Not permitted", frappe.PermissionError)
+    if doctype and not frappe.has_permission(doctype, "read", doc=name):
+        frappe.throw("Not permitted", frappe.PermissionError)
     ignore_list = _as_list(ignore_doctypes_on_cancel_all)
 
     if doctype == "Purchase Receipt":

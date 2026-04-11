@@ -22,6 +22,10 @@ def get_value(doctype, fieldname, filters=None, as_dict=True, debug=False, paren
 
 	Unwraps {"name": <dict>} → <dict> before forwarding to the original.
 	"""
+	# The downstream frappe.client.get_value enforces per-doctype read
+	# permission, but still reject unauthenticated callers at the edge.
+	if frappe.session.user == "Guest":
+		frappe.throw("Not permitted", frappe.PermissionError)
 	filters = get_safe_filters(filters)
 	if isinstance(filters, dict) and list(filters.keys()) == ["name"]:
 		name_val = filters["name"]

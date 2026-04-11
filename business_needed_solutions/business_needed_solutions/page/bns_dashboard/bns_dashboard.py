@@ -12,17 +12,56 @@ from frappe import _
 from frappe.utils import flt, cstr
 
 
+# -------------------------------------------------------------------
+# Permission gates for the BNS Dashboard whitelisted endpoints.
+# Why: every entry point here either reads sensitive accounting data
+# (expense accounts, PI/SI totals, party balances) or writes to Item /
+# Purchase Invoice / GL. Without these gates any authenticated user
+# could reach them and escalate privileges because several callers
+# use ignore_permissions=True internally.
+# -------------------------------------------------------------------
+
+
+def _require_dashboard_read():
+	"""Any read endpoint: user must be an accounting role or System Manager."""
+	allowed = {"Accounts Manager", "Accounts User", "System Manager", "Auditor"}
+	if not (allowed & set(frappe.get_roles(frappe.session.user))):
+		frappe.throw(
+			_("You need Accounts User / Accounts Manager / System Manager role to use the BNS Dashboard."),
+			frappe.PermissionError,
+		)
+
+
+def _require_dashboard_write(*doctypes):
+	"""Write endpoint: require an accounting role AND write permission on
+	every doctype the endpoint is about to save/submit."""
+	_require_dashboard_read()
+	allowed = {"Accounts Manager", "System Manager"}
+	if not (allowed & set(frappe.get_roles(frappe.session.user))):
+		frappe.throw(
+			_("You need Accounts Manager or System Manager role for this action."),
+			frappe.PermissionError,
+		)
+	for dt in doctypes:
+		if not frappe.has_permission(dt, "write"):
+			frappe.throw(
+				_("You do not have write permission on {0}.").format(dt),
+				frappe.PermissionError,
+			)
+
+
 @frappe.whitelist()
 def get_items_missing_expense_account(company=None):
 	"""
 	Get non-stock items that don't have a default expense account set.
-	
+
 	Args:
 		company: Optional company filter for Item Default
-		
+
 	Returns:
 		dict with count and items list
 	"""
+	_require_dashboard_read()
 	# Get default company if not provided
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
@@ -61,15 +100,16 @@ def get_items_missing_expense_account(company=None):
 def set_item_expense_account(item_code, expense_account, company=None):
 	"""
 	Set the default expense account for an item.
-	
+
 	Args:
 		item_code: The item code
 		expense_account: The expense account to set
 		company: The company for the item default
-		
+
 	Returns:
 		dict with success status
 	"""
+	_require_dashboard_write("Item")
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
 	
@@ -110,23 +150,24 @@ def set_item_expense_account(item_code, expense_account, company=None):
 def get_purchase_invoices_with_wrong_expense_account(company=None, from_date=None, to_date=None):
 	"""
 	Get Purchase Invoices where non-stock items have wrong or missing expense accounts.
-	
+
 	Returns items where:
 	1. Item is non-stock (is_stock_item = 0)
 	2. Either:
 	   - Item doesn't have a default expense account set, OR
 	   - Item has default expense account but PI item has different expense account
-	
+
 	Args:
 		company: Optional company filter
 		from_date: Optional start date filter
 		to_date: Optional end date filter
-		
+
 	Returns:
 		dict with:
 		- items_without_default: List of PI items where item has no default expense account
 		- items_with_wrong_account: List of PI items where expense account differs from default
 	"""
+	_require_dashboard_read()
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
 	
@@ -219,6 +260,8 @@ def bulk_fix_pi_expense_accounts(items):
 	Returns:
 		dict with status and total_invoices (or validation_errors if any fail upfront)
 	"""
+	# Repost of accounting entries = GL-level write. Gate strictly.
+	_require_dashboard_write("Purchase Invoice", "GL Entry")
 	import json
 	if isinstance(items, str):
 		items = json.loads(items)
@@ -363,13 +406,14 @@ def _publish_progress(done, total, current_pi, success_count, errors, user):
 def get_expense_accounts(company=None):
 	"""
 	Get list of expense accounts for the company.
-	
+
 	Args:
 		company: The company to get accounts for
-		
+
 	Returns:
 		list of expense accounts
 	"""
+	_require_dashboard_read()
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
 	
@@ -393,13 +437,14 @@ def get_expense_accounts(company=None):
 def get_all_expense_items(company=None):
 	"""
 	Get all non-stock, non-fixed-asset items with their current expense accounts.
-	
+
 	Args:
 		company: Optional company filter for Item Default
-		
+
 	Returns:
 		dict with count and items list
 	"""
+	_require_dashboard_read()
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
 	
@@ -434,13 +479,14 @@ def get_all_expense_items(company=None):
 def get_dashboard_summary(company=None):
 	"""
 	Get overall dashboard summary statistics.
-	
+
 	Args:
 		company: Optional company filter
-		
+
 	Returns:
 		dict with various counts
 	"""
+	_require_dashboard_read()
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
 	
@@ -507,10 +553,11 @@ def get_unlinked_customer_supplier_by_pan():
 	"""
 	Get customers and suppliers with matching PAN but no Party Link.
 	Uses batch Party Link lookup to avoid N+1 queries.
-	
+
 	Returns:
 		dict with count and records list
 	"""
+	_require_dashboard_read()
 	# Fetch Active Customers with PAN
 	customers = frappe.db.get_list(
 		"Customer",
@@ -575,16 +622,17 @@ def get_unlinked_customer_supplier_by_pan():
 def create_party_link(primary_party, secondary_party, primary_role, secondary_role):
 	"""
 	Create a Party Link between customer and supplier.
-	
+
 	Args:
 		primary_party: Primary party name
 		secondary_party: Secondary party name
 		primary_role: Primary party type (Customer/Supplier)
 		secondary_role: Secondary party type (Customer/Supplier)
-		
+
 	Returns:
 		dict with success status and party link name
 	"""
+	_require_dashboard_write("Party Link")
 	# Validate inputs
 	if not primary_party or not secondary_party:
 		frappe.throw(_("Both parties are required"))
@@ -717,6 +765,7 @@ def get_internal_transfer_mismatches(company=None):
 	Returns:
 		dict with count, records, prepared_at, and status
 	"""
+	_require_dashboard_read()
 	import gzip
 	import json as _json
 
@@ -832,6 +881,7 @@ def trigger_mismatch_report_preparation(company=None, from_date=None, to_date=No
 	Returns:
 		dict with prepared_report name and status
 	"""
+	_require_dashboard_read()
 	import json as _json
 	from frappe.core.doctype.prepared_report.prepared_report import get_reports_in_queued_state
 
@@ -877,6 +927,7 @@ def get_food_company_addresses(company=None):
 	Returns:
 		dict with is_food_company, addresses list
 	"""
+	_require_dashboard_read()
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
 
@@ -932,6 +983,7 @@ def set_address_fssai(address_name, fssai_license_no):
 	Returns:
 		dict with success status
 	"""
+	_require_dashboard_write("Address")
 	if not address_name:
 		frappe.throw(_("Address is required"))
 
@@ -960,6 +1012,7 @@ def get_prepared_report_status(prepared_report_name):
 	Returns:
 		dict with status and error_message if any
 	"""
+	_require_dashboard_read()
 	if not prepared_report_name:
 		return {"status": "Not Found"}
 
@@ -1007,6 +1060,7 @@ def get_health_check_overview(company=None):
 	Returns:
 		dict with keys: accounting, branch_accounting, stock, compliance, company
 	"""
+	_require_dashboard_read()
 	company = _default_company(company)
 	return {
 		"branch_accounting": _get_branch_accounting_metrics(company),

@@ -51,25 +51,42 @@ def _get_si_pi_amount_tolerance():
 	)
 
 
+_ALLOWED_ADDRESS_SEARCHFIELDS = {"name", "address_title"}
+
+
 @frappe.whitelist()
 def company_address_query(doctype, txt, searchfield, start, page_len, filters):
 	"""
 	Query to fetch only company addresses for the report filter.
+
+	Why the searchfield whitelist: Frappe passes this arg through from the
+	client and the old code interpolated it straight into an f-string SQL
+	clause, which would let a caller send `searchfield="1=1; DROP TABLE..."`
+	and execute arbitrary SQL. Lock it to known-safe columns.
 	"""
+	# Require caller to be authenticated AND have read on Address.
+	if frappe.session.user == "Guest":
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+	if not frappe.has_permission("Address", "read"):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+
+	if searchfield not in _ALLOWED_ADDRESS_SEARCHFIELDS:
+		searchfield = "name"
+
 	conditions = ["is_company_address = 1"]
-	values = []
+	values = {}
 
 	if txt:
-		conditions.append(f"{searchfield} like %s")
-		values.append(f"%{txt}%")
+		# Parameterised LIKE with a named placeholder.
+		conditions.append(f"{searchfield} like %(txt)s")
+		values["txt"] = f"%{txt}%"
 
-	# If company filter is provided, try to match via address title
-	company = None
-	if filters:
-		company = filters.get("company")
-		if company:
-			conditions.append("address_title = %s")
-			values.append(company)
+	if filters and filters.get("company"):
+		conditions.append("address_title = %(company)s")
+		values["company"] = filters.get("company")
+
+	values["page_len"] = int(page_len or 20)
+	values["start"] = int(start or 0)
 
 	where_clause = " AND ".join(conditions)
 	query = f"""
@@ -79,11 +96,10 @@ def company_address_query(doctype, txt, searchfield, start, page_len, filters):
 		FROM `tabAddress`
 		WHERE {where_clause}
 		ORDER BY modified DESC
-		LIMIT %s
-		OFFSET %s
+		LIMIT %(page_len)s
+		OFFSET %(start)s
 	"""
-	values.extend([page_len, start])
-	return frappe.db.sql(query, tuple(values))
+	return frappe.db.sql(query, values)
 
 
 def execute(filters=None):

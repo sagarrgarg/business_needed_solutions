@@ -38,6 +38,10 @@ def get_item_details_for_update_items_dialog(args, doc=None):
 	When UOM differs from stock UOM and no separate Item Price exists for that UOM,
 	ERPNext's get_item_details factors the price by conversion_factor automatically.
 	"""
+	if frappe.session.user == "Guest":
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+	if not frappe.has_permission("Item", "read"):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
 	if isinstance(args, str):
 		args = json.loads(args)
 	args = frappe._dict(args)
@@ -137,6 +141,11 @@ def update_child_items(
 		parent_doctype_name: Document name
 		child_docname: child table fieldname (default: "items")
 	"""
+	# Writes to a submitted SO/PO; require write permission on the parent.
+	if parent_doctype not in ("Sales Order", "Purchase Order"):
+		frappe.throw(_("Unsupported parent doctype"))
+	if not frappe.has_permission(parent_doctype, "write", doc=parent_doctype_name):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
 
 	def check_doc_permissions(doc, perm_type: str = "create") -> None:
 		try:

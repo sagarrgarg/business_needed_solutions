@@ -22,29 +22,32 @@ class VehicleUpdateError(Exception):
 
 @frappe.whitelist()
 def update_vehicle_or_transporter(
-    doctype: str, 
-    docname: str, 
-    vehicle_no: Optional[str] = None, 
-    transporter: Optional[str] = None, 
+    doctype: str,
+    docname: str,
+    vehicle_no: Optional[str] = None,
+    transporter: Optional[str] = None,
     gst_transporter_id: Optional[str] = None
 ) -> None:
     """
     Update vehicle number and transporter details for a document.
-    
+
     This function allows updating vehicle and transporter information for documents
     that support e-Waybill functionality, but only when the e-Waybill status is
     'Pending' or 'Not Applicable'.
-    
+
     Args:
         doctype (str): The document type to update
         docname (str): The name of the document to update
         vehicle_no (Optional[str]): The vehicle number to set
         transporter (Optional[str]): The transporter to set
         gst_transporter_id (Optional[str]): The GST transporter ID to set
-        
+
     Raises:
         VehicleUpdateError: If update fails or is not allowed
     """
+    # Require write permission on the target doctype before touching it.
+    if not frappe.has_permission(doctype, "write", doc=docname):
+        frappe.throw(_("Not permitted to update {0} {1}").format(doctype, docname), frappe.PermissionError)
     try:
         # Load the document
         doc = _load_document(doctype, docname)
