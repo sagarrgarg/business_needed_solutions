@@ -1338,10 +1338,20 @@ def preview_payment_reconciliation(company):
 	)
 
 	cfg = _get_reconcile_settings()
-	candidates = get_reconciliation_candidates(company, scope=cfg["scope"], limit=500)
+	candidates = get_reconciliation_candidates(company, scope=cfg["scope"], limit=5000)
+	totals = {
+		"reconcilable_amount": sum(c.get("reconcilable_amount", 0) for c in candidates),
+		"open_invoice_outstanding": sum(c.get("open_invoice_outstanding", 0) for c in candidates),
+		"open_payment_unallocated": sum(c.get("open_payment_unallocated", 0) for c in candidates),
+		"residual_invoice_side": sum(c.get("residual_invoice_side", 0) for c in candidates),
+		"residual_payment_side": sum(c.get("residual_payment_side", 0) for c in candidates),
+		"open_invoice_count": sum(c.get("open_invoice_count", 0) for c in candidates),
+		"open_payment_count": sum(c.get("open_payment_count", 0) for c in candidates),
+	}
 	return {
 		"candidates": candidates,
 		"count": len(candidates),
+		"totals": totals,
 		"window": cfg["window"],
 		"scope": cfg["scope"],
 		"include_advances": cfg["include_advances"],

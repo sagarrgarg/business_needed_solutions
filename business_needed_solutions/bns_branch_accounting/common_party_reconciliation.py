@@ -337,134 +337,186 @@ def reconcile_all_parties(
 	return summary
 
 
-def get_reconciliation_candidates(company: str, scope=None, limit: int = 500) -> list[dict]:
-	"""Diagnostic preview for the BNS Dashboard.
-
-	A party is a real reconciliation candidate only if BOTH conditions hold:
-	  1. At least one Sales/Purchase Invoice has `outstanding_amount > 0`.
-	  2. At least one Payment Entry / Journal Entry has an unallocated portion
-	     (`unallocated_amount > 0` for Payment Entry) on the same side.
-
-	Important: we do NOT use Payment Ledger Entry directly. ERPNext tracks
-	the true "is this reconciled" state via the invoice's `outstanding_amount`
-	and the PE's `unallocated_amount` — those reflect PE reference child-table
-	allocations, whereas PLE keeps the original posting rows until a fresh
-	Payment Reconciliation tool run adds linkage rows. An invoice paid via a
-	PE with references (the common case) shows outstanding=0 but still has
-	the original PLE row, so PLE-based detection misfires.
-
-	We compute per-party outstanding via aggregation over the invoice and PE
-	tables and only list parties where both sides have open amounts.
-	"""
-	# Invoices with outstanding > 0, grouped by (party_type, party).
-	# Sales Invoice: customer side. is_return rows get excluded for clarity.
-	customer_invoices = frappe.db.sql(
+def _fetch_open_invoice_map(company: str) -> dict:
+	"""Return {(party_type, party): {count, outstanding}} from SI + PI tables.
+	outstanding is the sum of tabSales/Purchase Invoice.outstanding_amount for
+	submitted, non-return rows of that party."""
+	out: dict = {}
+	rows = frappe.db.sql(
 		"""
 		SELECT customer AS party,
 			COUNT(*) AS cnt,
 			SUM(outstanding_amount) AS total_outstanding
 		FROM `tabSales Invoice`
 		WHERE docstatus = 1
-		  AND company = %(company)s
+		  AND company = %(c)s
 		  AND outstanding_amount > 0.009
 		  AND IFNULL(is_return, 0) = 0
 		GROUP BY customer
 		""",
-		{"company": company},
+		{"c": company},
 		as_dict=True,
 	)
-	supplier_invoices = frappe.db.sql(
+	for r in rows:
+		if r["party"]:
+			out[("Customer", r["party"])] = {
+				"count": int(r["cnt"] or 0),
+				"outstanding": flt(r["total_outstanding"]),
+			}
+	rows = frappe.db.sql(
 		"""
 		SELECT supplier AS party,
 			COUNT(*) AS cnt,
 			SUM(outstanding_amount) AS total_outstanding
 		FROM `tabPurchase Invoice`
 		WHERE docstatus = 1
-		  AND company = %(company)s
+		  AND company = %(c)s
 		  AND outstanding_amount > 0.009
 		  AND IFNULL(is_return, 0) = 0
 		GROUP BY supplier
 		""",
-		{"company": company},
+		{"c": company},
 		as_dict=True,
 	)
+	for r in rows:
+		if r["party"]:
+			out[("Supplier", r["party"])] = {
+				"count": int(r["cnt"] or 0),
+				"outstanding": flt(r["total_outstanding"]),
+			}
+	return out
 
-	# Payment Entries with unallocated_amount > 0 — these are payments that
-	# haven't been tied to any invoice via their references child table.
-	unalloc_payments = frappe.db.sql(
+
+def _fetch_unallocated_payment_map(company: str) -> dict:
+	"""Return {(party_type, party): {count, unallocated}} from Payment Entry."""
+	out: dict = {}
+	rows = frappe.db.sql(
 		"""
 		SELECT party_type, party,
 			COUNT(*) AS cnt,
 			SUM(unallocated_amount) AS total_unallocated
 		FROM `tabPayment Entry`
 		WHERE docstatus = 1
-		  AND company = %(company)s
+		  AND company = %(c)s
 		  AND party_type IN ('Customer', 'Supplier')
 		  AND unallocated_amount > 0.009
 		GROUP BY party_type, party
 		""",
-		{"company": company},
+		{"c": company},
 		as_dict=True,
 	)
-
-	inv_map: dict[tuple, dict] = {}
-	for r in customer_invoices:
-		if r["party"]:
-			inv_map[("Customer", r["party"])] = {
-				"open_invoice_rows": int(r["cnt"] or 0),
-				"gross_outstanding": flt(r["total_outstanding"]),
-			}
-	for r in supplier_invoices:
-		if r["party"]:
-			inv_map[("Supplier", r["party"])] = {
-				"open_invoice_rows": int(r["cnt"] or 0),
-				"gross_outstanding": flt(r["total_outstanding"]),
-			}
-
-	pay_map: dict[tuple, dict] = {}
-	for r in unalloc_payments:
+	for r in rows:
 		if r["party"] and r["party_type"] in _PARTY_TYPES:
-			pay_map[(r["party_type"], r["party"])] = {
-				"open_payment_rows": int(r["cnt"] or 0),
-				"gross_unallocated": flt(r["total_unallocated"]),
+			out[(r["party_type"], r["party"])] = {
+				"count": int(r["cnt"] or 0),
+				"unallocated": flt(r["total_unallocated"]),
 			}
+	return out
 
-	# Intersection: party must have both open invoices AND open payments.
+
+def _fetch_linked_primary_map() -> dict:
+	"""Return {(party_type, party): (primary_role, primary_party)} — the
+	'where does residual go after reconciliation' pointer from Party Link."""
+	out: dict = {}
+	links = frappe.get_all(
+		"Party Link",
+		fields=["primary_role", "primary_party", "secondary_role", "secondary_party"],
+	)
+	for link in links:
+		# Secondary -> primary: residual after per-side reco flows to primary.
+		if link.get("secondary_role") in _PARTY_TYPES and link.get("secondary_party"):
+			out[(link["secondary_role"], link["secondary_party"])] = (
+				link["primary_role"],
+				link["primary_party"],
+			)
+		# Primary also maps to itself for symmetry (it IS the primary).
+		if link.get("primary_role") in _PARTY_TYPES and link.get("primary_party"):
+			key = (link["primary_role"], link["primary_party"])
+			out.setdefault(key, (link["primary_role"], link["primary_party"]))
+	return out
+
+
+def get_reconciliation_candidates(
+	company: str, scope=None, limit: int = 5000
+) -> list[dict]:
+	"""Per-party reconciliation status report for the BNS Dashboard.
+
+	For every party (Customer or Supplier) with real, reconcilable open items
+	on their party account, return a row with:
+	  - open_invoice_count / open_invoice_outstanding (SI or PI)
+	  - open_payment_count / open_payment_unallocated  (Payment Entry)
+	  - reconcilable_amount  = min(outstanding, unallocated)  — what a FIFO
+	                           run can actually match in this pass
+	  - residual_invoice_side = outstanding - reconcilable  — invoices that
+	                           will STILL be open after reconciliation
+	  - residual_payment_side = unallocated - reconcilable  — payments that
+	                           will STILL be unallocated after reconciliation
+	  - primary_link_party_type / primary_link_party: where the residual
+	                           should flow via Common Party Square-Off
+
+	Only parties with reconcilable_amount > 0.009 are included — parties
+	whose SI.outstanding and PE.unallocated columns both exist but cannot be
+	meaningfully matched (rounding dust, different accounts, etc.) are dropped
+	so re-previewing after a full run reports zero.
+
+	NOT using Payment Ledger Entry: PLE keeps original posting rows alongside
+	linkage rows after a PR run, so row-count detection gives false positives
+	for already-matched vouchers. Source of truth is tabSales/Purchase Invoice
+	.outstanding_amount + tabPayment Entry.unallocated_amount, which reflect
+	the authoritative reconciliation state.
+	"""
+	inv_map = _fetch_open_invoice_map(company)
+	pay_map = _fetch_unallocated_payment_map(company)
+	primary_map = _fetch_linked_primary_map()
+
 	candidates: list[dict] = []
 	for key in inv_map.keys() & pay_map.keys():
 		party_type, party = key
+		inv = inv_map[key]
+		pay = pay_map[key]
+		outstanding = inv["outstanding"]
+		unallocated = pay["unallocated"]
+		reconcilable = min(outstanding, unallocated)
+		# Filter: tiny residuals aren't worth showing — under one rupee of
+		# matchable amount means PR would produce a no-op row.
+		if reconcilable < 0.009:
+			continue
 		try:
 			account = get_party_account(party_type, party, company)
 		except Exception:
 			continue
 		if not account:
 			continue
-		inv = inv_map[key]
-		pay = pay_map[key]
-		# Reconcilable amount = min(outstanding, unallocated) — how much can
-		# actually be FIFO-matched in one pass.
-		reconcilable = min(inv["gross_outstanding"], pay["gross_unallocated"])
-		candidates.append(
-			{
-				"party_type": party_type,
-				"party": party,
-				"account": account,
-				"open_invoice_rows": inv["open_invoice_rows"],
-				"open_payment_rows": pay["open_payment_rows"],
-				"gross_pos": inv["gross_outstanding"],
-				"gross_neg": pay["gross_unallocated"],
-				"reconcilable_amount": reconcilable,
-				# Keep signed_balance for JS template compatibility.
-				"signed_balance": inv["gross_outstanding"] - pay["gross_unallocated"],
-			}
-		)
+
+		primary = primary_map.get(key)
+		row = {
+			"party_type": party_type,
+			"party": party,
+			"account": account,
+			"open_invoice_count": inv["count"],
+			"open_invoice_outstanding": outstanding,
+			"open_payment_count": pay["count"],
+			"open_payment_unallocated": unallocated,
+			"reconcilable_amount": reconcilable,
+			"residual_invoice_side": max(outstanding - reconcilable, 0.0),
+			"residual_payment_side": max(unallocated - reconcilable, 0.0),
+			"primary_link_party_type": primary[0] if primary else None,
+			"primary_link_party": primary[1] if primary else None,
+			# Legacy fields kept for JS template backwards-compat:
+			"open_invoice_rows": inv["count"],
+			"open_payment_rows": pay["count"],
+			"gross_pos": outstanding,
+			"gross_neg": unallocated,
+			"signed_balance": outstanding - unallocated,
+		}
+		candidates.append(row)
 
 	# Scope filter (Party Link / Crossed Balances / All).
 	if scope and scope != "All Customers + All Suppliers":
 		allowed = {(pt, p) for pt, p in _iter_parties_for_scope(company, scope, _PARTY_TYPES)}
 		candidates = [c for c in candidates if (c["party_type"], c["party"]) in allowed]
 
-	# Order: most to reconcile first.
+	# Order by reconcilable amount (most impactful first).
 	candidates.sort(key=lambda c: -c["reconcilable_amount"])
 	return candidates[: int(limit)]
 

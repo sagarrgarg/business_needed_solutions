@@ -2069,35 +2069,59 @@ class BNSDashboard {
 	// Payment Reconciliation (FIFO) — preview/run/full-pipeline
 	// =====================================================================
 
-	_render_reconcile_table(candidates) {
+	_render_reconcile_table(candidates, totals) {
 		const container = this.wrapper.find("#table-payment-reconciliation");
 		if (!candidates || candidates.length === 0) {
-			container.html('<p class="text-success small"><i class="fa fa-check"></i> ' + __("No parties with both open invoices and open payments \u2014 nothing to reconcile.") + '</p>');
+			container.html('<p class="text-success small"><i class="fa fa-check"></i> ' + __("No parties with reconcilable open items \u2014 everything is clean.") + '</p>');
 			return 0;
 		}
 		const chkClass = "bns-reconcile-chk";
-		let html = '<table class="table table-sm table-bordered"><thead><tr>';
-		html += '<th style="width:30px;"><input type="checkbox" class="' + chkClass + '-all" checked></th>';
-		html += '<th><small>' + __("Party Type") + '</small></th>';
+		let html = '<div class="table-responsive"><table class="table table-sm table-bordered" style="font-size:11px;"><thead><tr>';
+		html += '<th style="width:26px;"><input type="checkbox" class="' + chkClass + '-all" checked></th>';
 		html += '<th><small>' + __("Party") + '</small></th>';
-		html += '<th><small>' + __("Account") + '</small></th>';
 		html += '<th class="text-center"><small>' + __("Open Inv") + '</small></th>';
-		html += '<th class="text-center"><small>' + __("Open Pay") + '</small></th>';
-		html += '<th class="text-right"><small>' + __("Signed Balance") + '</small></th>';
+		html += '<th class="text-right"><small>' + __("Inv Outstanding") + '</small></th>';
+		html += '<th class="text-center"><small>' + __("Open PE") + '</small></th>';
+		html += '<th class="text-right"><small>' + __("PE Unallocated") + '</small></th>';
+		html += '<th class="text-right"><small><b>' + __("Reconcilable") + '</b></small></th>';
+		html += '<th class="text-right"><small>' + __("Residual \u2192 Link") + '</small></th>';
+		html += '<th><small>' + __("Primary Link") + '</small></th>';
 		html += '</tr></thead><tbody>';
 		candidates.forEach(function (c) {
 			const key = (c.party_type || '') + '|' + (c.party || '');
+			const residualInv = c.residual_invoice_side || 0;
+			const residualPay = c.residual_payment_side || 0;
+			const residual = residualInv + residualPay;
+			const primary = c.primary_link_party
+				? frappe.utils.escape_html(c.primary_link_party_type + ' ' + c.primary_link_party)
+				: '<span class="text-muted">&mdash;</span>';
 			html += '<tr>';
 			html += '<td><input type="checkbox" class="' + chkClass + '" data-party-key="' + frappe.utils.escape_html(key) + '" checked></td>';
-			html += '<td><small>' + frappe.utils.escape_html(c.party_type) + '</small></td>';
-			html += '<td><small><b>' + frappe.utils.escape_html(c.party) + '</b></small></td>';
-			html += '<td><small>' + frappe.utils.escape_html(c.account || '') + '</small></td>';
-			html += '<td class="text-center"><small>' + (c.open_invoice_rows || 0) + '</small></td>';
-			html += '<td class="text-center"><small>' + (c.open_payment_rows || 0) + '</small></td>';
-			html += '<td class="text-right"><small>' + format_currency(c.signed_balance) + '</small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(c.party_type) + ' <b>' + frappe.utils.escape_html(c.party) + '</b>';
+			if (c.account) html += '<br><span class="text-muted">' + frappe.utils.escape_html(c.account) + '</span>';
+			html += '</small></td>';
+			html += '<td class="text-center"><small>' + (c.open_invoice_count || 0) + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(c.open_invoice_outstanding || 0) + '</small></td>';
+			html += '<td class="text-center"><small>' + (c.open_payment_count || 0) + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(c.open_payment_unallocated || 0) + '</small></td>';
+			html += '<td class="text-right"><small><b>' + format_currency(c.reconcilable_amount || 0) + '</b></small></td>';
+			html += '<td class="text-right"><small>' + format_currency(residual) + '</small></td>';
+			html += '<td><small>' + primary + '</small></td>';
 			html += '</tr>';
 		});
-		html += '</tbody></table>';
+		if (totals) {
+			html += '<tr style="background:var(--subtle-bg); font-weight:bold;">';
+			html += '<td></td><td><small>' + __("TOTAL") + '</small></td>';
+			html += '<td class="text-center"><small>' + (totals.open_invoice_count || 0) + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(totals.open_invoice_outstanding || 0) + '</small></td>';
+			html += '<td class="text-center"><small>' + (totals.open_payment_count || 0) + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(totals.open_payment_unallocated || 0) + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(totals.reconcilable_amount || 0) + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency((totals.residual_invoice_side || 0) + (totals.residual_payment_side || 0)) + '</small></td>';
+			html += '<td></td>';
+			html += '</tr>';
+		}
+		html += '</tbody></table></div>';
 		container.html(html);
 		container.find("." + chkClass + "-all").on("change", function () {
 			container.find("." + chkClass).prop("checked", $(this).is(":checked"));
@@ -2126,14 +2150,17 @@ class BNSDashboard {
 				freeze: true,
 				freeze_message: __("Scanning unreconciled parties..."),
 			});
-			const data = r.message || { candidates: [], count: 0 };
+			const data = r.message || { candidates: [], count: 0, totals: {} };
 			this.wrapper.find("#badge-payment-reconciliation").text(data.count || 0);
 			const meta = [];
 			if (data.scope) meta.push(__("Scope: {0}", [data.scope]));
 			if (data.window) meta.push(__("Window: {0}", [data.window]));
+			if (data.totals && data.totals.reconcilable_amount) {
+				meta.push(__("Reconcilable: {0}", [format_currency(data.totals.reconcilable_amount)]));
+			}
 			if (data.last_run_on) meta.push(__("Last run: {0}", [data.last_run_on]));
 			this.wrapper.find("#reconcile-meta").text(meta.join(" · "));
-			const n = this._render_reconcile_table(data.candidates || []);
+			const n = this._render_reconcile_table(data.candidates || [], data.totals || {});
 			this.wrapper.find("#btn-reconcile-run").prop("disabled", n === 0);
 		} catch (e) {
 			frappe.msgprint(__("Failed: {0}", [e.message || e]));
