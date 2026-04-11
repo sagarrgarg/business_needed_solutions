@@ -909,6 +909,7 @@ def get_statement_meta(filters):
         
         meta.company = frappe._dict({
             "name": company_doc.company_name,
+            "abbr": company_doc.get("abbr") or "",
             "logo": company_doc.get("logo_for_printing") or company_doc.get("company_logo") or "",
             "pan": pan,
             "gstin": gstin,

@@ -503,6 +503,15 @@ async function downloadStatementPDF(report) {
  */
 async function runStatementPDFReport(report, print_settings) {
 	var qr = frappe.query_report;
+	var filters = report.get_filter_values();
+
+	var metaCo = (window._party_gl_statement_meta && window._party_gl_statement_meta.company) || {};
+	var party = (filters.party && filters.party[0]) || "party";
+	var fromDate = (filters.from_date || "").replace(/-/g, "");
+	var toDate = (filters.to_date || "").replace(/-/g, "");
+	var abbr = metaCo.abbr || "";
+	var customFilename = party + "-" + fromDate + "-" + toDate + (abbr ? " " + abbr : "") + ".pdf";
+
 	var originalGetFilterValues = qr.get_filter_values;
 	qr.get_filter_values = function () {
 		var vals = originalGetFilterValues.call(qr);
@@ -515,19 +524,24 @@ async function runStatementPDFReport(report, print_settings) {
 	};
 
 	var _origRenderPdf = frappe.render_pdf;
-	frappe.render_pdf = async function (html, opts) {
-		try {
-			var linkMatch = html.match(/<link[^>]+href="([^"]*print\.bundle[^"]*)"[^>]*>/);
-			if (linkMatch) {
-				var cssText = "";
-				try {
-					var resp = await fetch(linkMatch[1]);
-					if (resp.ok) cssText = await resp.text();
-				} catch (_e) { /* ignore */ }
-				html = html.replace(linkMatch[0], "<style>" + cssText + "</style>");
-			}
-		} catch (_e) { /* fall through with original html */ }
-		_origRenderPdf.call(frappe, html, opts);
+	frappe.render_pdf = function (html, opts) {
+		opts = opts || {};
+		opts.report_name = customFilename;
+
+		(async function () {
+			try {
+				var linkMatch = html.match(/<link[^>]+href="([^"]*print\.bundle[^"]*)"[^>]*>/);
+				if (linkMatch) {
+					var cssText = "";
+					try {
+						var resp = await fetch(linkMatch[1]);
+						if (resp.ok) cssText = await resp.text();
+					} catch (_e) { /* ignore */ }
+					html = html.replace(linkMatch[0], "<style>" + cssText + "</style>");
+				}
+			} catch (_e) { /* fall through with original html */ }
+			_origRenderPdf.call(frappe, html, opts);
+		})();
 	};
 
 	try {
@@ -537,7 +551,9 @@ async function runStatementPDFReport(report, print_settings) {
 		frappe.msgprint(__("Error generating PDF: ") + e.message);
 	} finally {
 		qr.get_filter_values = originalGetFilterValues;
-		frappe.render_pdf = _origRenderPdf;
+		setTimeout(function () {
+			frappe.render_pdf = _origRenderPdf;
+		}, 2000);
 	}
 }
 
