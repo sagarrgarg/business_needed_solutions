@@ -14,32 +14,42 @@ from frappe.utils import flt, cstr
 
 # -------------------------------------------------------------------
 # Permission gates for the BNS Dashboard whitelisted endpoints.
+#
 # Why: every entry point here either reads sensitive accounting data
 # (expense accounts, PI/SI totals, party balances) or writes to Item /
-# Purchase Invoice / GL. Without these gates any authenticated user
-# could reach them and escalate privileges because several callers
-# use ignore_permissions=True internally.
+# Purchase Invoice / GL. Several callers also use ignore_permissions=True
+# internally, so the outer gate is the last line of defence.
+#
+# IMPORTANT: these helpers do NOT hardcode role names. They consult the
+# Frappe Role Permission Manager via frappe.has_permission(doctype, action).
+# Admins configure who can read/write the BNS Dashboard by editing BNS
+# Settings role permissions in the Desk — no code change required. Each
+# write endpoint additionally verifies write permission on the specific
+# target doctype (Item, Purchase Invoice, Party Link, Address, ...).
 # -------------------------------------------------------------------
 
 
 def _require_dashboard_read():
-	"""Any read endpoint: user must be an accounting role or System Manager."""
-	allowed = {"Accounts Manager", "Accounts User", "System Manager", "Auditor"}
-	if not (allowed & set(frappe.get_roles(frappe.session.user))):
+	"""Any read endpoint: caller must have read permission on BNS Settings
+	(the Single doctype that holds the app's config). Configure via the
+	Role Permission Manager on the BNS Settings doctype."""
+	if not frappe.has_permission("BNS Settings", "read"):
 		frappe.throw(
-			_("You need Accounts User / Accounts Manager / System Manager role to use the BNS Dashboard."),
+			_("You need read permission on BNS Settings to use the BNS Dashboard. "
+			  "Ask an administrator to grant your role read access via the Role Permission Manager."),
 			frappe.PermissionError,
 		)
 
 
 def _require_dashboard_write(*doctypes):
-	"""Write endpoint: require an accounting role AND write permission on
-	every doctype the endpoint is about to save/submit."""
-	_require_dashboard_read()
-	allowed = {"Accounts Manager", "System Manager"}
-	if not (allowed & set(frappe.get_roles(frappe.session.user))):
+	"""Write endpoint: caller must have write permission on BNS Settings
+	AND write permission on every doctype this endpoint is about to
+	save/submit. Both checks go through frappe.has_permission so the
+	Role Permission Manager is the single source of truth."""
+	if not frappe.has_permission("BNS Settings", "write"):
 		frappe.throw(
-			_("You need Accounts Manager or System Manager role for this action."),
+			_("You need write permission on BNS Settings for this action. "
+			  "Ask an administrator to grant your role write access via the Role Permission Manager."),
 			frappe.PermissionError,
 		)
 	for dt in doctypes:
@@ -1240,11 +1250,32 @@ def _get_compliance_metrics(company):
 
 
 def _require_accounts_manager():
-	allowed = {"Accounts Manager", "System Manager"}
-	if not (allowed & set(frappe.get_roles(frappe.session.user))):
-		frappe.throw(_("You need Accounts Manager or System Manager role to run Common Party square-off."))
+	"""Common Party Square-Off + Payment Reconciliation gate.
+
+	No hardcoded role lists — checks permission on the three doctypes the
+	square-off / reconcile pipeline actually mutates:
+	  - Journal Entry (create the contra JV)
+	  - Payment Entry (Payment Reconciliation may rewrite PE references)
+	  - BNS Settings  (outer dashboard gate, editable via Role Permission Manager)
+	Admins grant these permissions via the Role Permission Manager; any role
+	that has Journal Entry create + Payment Entry write + BNS Settings write
+	can run the tool.
+	"""
+	if not frappe.has_permission("BNS Settings", "write"):
+		frappe.throw(
+			_("BNS Settings write permission is required to run Common Party square-off."),
+			frappe.PermissionError,
+		)
 	if not frappe.has_permission("Journal Entry", "create"):
-		frappe.throw(_("You do not have permission to create Journal Entry."))
+		frappe.throw(
+			_("Journal Entry create permission is required."),
+			frappe.PermissionError,
+		)
+	if not frappe.has_permission("Payment Entry", "write"):
+		frappe.throw(
+			_("Payment Entry write permission is required (Payment Reconciliation rewrites PE references)."),
+			frappe.PermissionError,
+		)
 
 
 SQUAREOFF_SYNC_BATCH_CAP = 20  # larger batches run in the background job queue

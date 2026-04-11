@@ -39,7 +39,19 @@ def clear_existing_address_flags():
     Use this as a backdate fix when enabling Suppress Preferred Billing & Shipping Address
     in BNS Settings, so existing addresses are cleared of their preferred flags.
     """
-    frappe.only_for("System Manager")
+    # Gate via Role Permission Manager — any role with write permission on
+    # Address AND write on BNS Settings can run this bulk clear. Admins
+    # configure the permission in the Desk, not in code.
+    if not frappe.has_permission("BNS Settings", "write"):
+        frappe.throw(
+            "BNS Settings write permission is required to run this bulk fix.",
+            frappe.PermissionError,
+        )
+    if not frappe.has_permission("Address", "write"):
+        frappe.throw(
+            "Address write permission is required for bulk flag clearing.",
+            frappe.PermissionError,
+        )
     count_result = frappe.db.sql(
         """
         SELECT COUNT(*) FROM tabAddress

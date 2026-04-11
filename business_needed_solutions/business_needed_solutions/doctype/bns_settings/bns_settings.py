@@ -50,10 +50,15 @@ class BNSSettings(Document):
         This method updates field properties for sales and purchase doctypes
         based on the configured discount type (Single or Triple).
         """
-        frappe.only_for(
-            ["System Manager", "Accounts Manager"],
-            message=_("Only System Manager or Accounts Manager can apply BNS Settings."),
-        )
+        # Gate via Role Permission Manager — any role that has write
+        # permission on BNS Settings (configured in the Desk) can apply
+        # the settings. No hardcoded role names.
+        if not frappe.has_permission("BNS Settings", "write"):
+            frappe.throw(
+                _("You need write permission on BNS Settings to apply it. "
+                  "Configure access via the Role Permission Manager."),
+                frappe.PermissionError,
+            )
         try:
             # Update sales doctypes
             self._update_sales_doctypes()

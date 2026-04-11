@@ -30,30 +30,49 @@ logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
 # Permission gates for whitelisted endpoints in this module.
+#
 # Why: every @frappe.whitelist() in utils.py is reachable by any
 # authenticated user. Several of them create / modify / submit
 # documents (make_bns_internal_*, convert_*_to_bns_internal,
-# link_*/unlink_*, bulk_convert_*, bns_force_*_gl_*). Without a role
-# check, any "Desk User" could call them via /api/method and corrupt
-# accounting data. These helpers centralise the gate so future edits
-# only need to call one function.
+# link_*/unlink_*, bulk_convert_*, bns_force_*_gl_*).
+#
+# These helpers do NOT hardcode role names. They consult the Frappe
+# Role Permission Manager via frappe.has_permission(), so admins grant
+# access through the Desk UI (Setup → Role Permission Manager) without
+# editing code.
+#
+# Gate doctype: `BNS Branch Accounting Settings` — the Single doctype
+# that owns the internal-transfer behaviour. Admins configure who can
+# read/write branch-accounting operations by editing its role
+# permissions in the Role Permission Manager.
 # -------------------------------------------------------------------
 
 
+_BNS_BA_SETTINGS = "BNS Branch Accounting Settings"
+
+
 def _bns_require_accounts_read():
-	"""Any read / lookup endpoint — Accounts User or higher."""
-	frappe.only_for(
-		["Accounts User", "Accounts Manager", "System Manager", "Auditor"],
-		message=_("This BNS endpoint requires an Accounts role."),
-	)
+    """Read / lookup endpoint gate — checks BNS Branch Accounting Settings
+    read permission via the Role Permission Manager."""
+    if not frappe.has_permission(_BNS_BA_SETTINGS, "read"):
+        frappe.throw(
+            _("You need read permission on {0} for this BNS endpoint. "
+              "Ask an administrator to grant your role access via the "
+              "Role Permission Manager.").format(_BNS_BA_SETTINGS),
+            frappe.PermissionError,
+        )
 
 
 def _bns_require_accounts_write():
-	"""Any write / mutate endpoint — Accounts Manager or System Manager."""
-	frappe.only_for(
-		["Accounts Manager", "System Manager"],
-		message=_("This BNS endpoint requires Accounts Manager or System Manager."),
-	)
+    """Write / mutate endpoint gate — checks BNS Branch Accounting Settings
+    write permission via the Role Permission Manager."""
+    if not frappe.has_permission(_BNS_BA_SETTINGS, "write"):
+        frappe.throw(
+            _("You need write permission on {0} for this BNS endpoint. "
+              "Ask an administrator to grant your role access via the "
+              "Role Permission Manager.").format(_BNS_BA_SETTINGS),
+            frappe.PermissionError,
+        )
 
 
 def _bns_debug_log(hypothesis_id: str, location: str, message: str, data: Optional[Dict[str, Any]] = None) -> None:
@@ -8161,14 +8180,21 @@ def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
 
 
 def _enforce_unlink_recovery_permission(action: str) -> None:
-    """Allow unlink recovery operations only to Administrator/System Manager."""
-    user = frappe.session.user
-    roles = set(frappe.get_roles(user))
-    if user == "Administrator" or "System Manager" in roles:
+    """Gate unlink recovery operations via the Role Permission Manager.
+
+    Admin access is implicit (Administrator bypasses all perm checks),
+    everyone else needs write permission on BNS Branch Accounting Settings
+    — configured through the Desk UI, not hardcoded roles.
+    """
+    if frappe.session.user == "Administrator":
+        return
+    if frappe.has_permission(_BNS_BA_SETTINGS, "write"):
         return
 
     frappe.throw(
-        _("Only Administrator/System Manager can run {0}.").format(action),
+        _("You need write permission on {0} to run {1}. "
+          "Ask an administrator to grant your role access via the "
+          "Role Permission Manager.").format(_BNS_BA_SETTINGS, action),
         frappe.PermissionError,
         title=_("Not Permitted"),
     )

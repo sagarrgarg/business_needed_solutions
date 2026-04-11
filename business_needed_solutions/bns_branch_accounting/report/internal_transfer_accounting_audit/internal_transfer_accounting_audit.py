@@ -1268,7 +1268,19 @@ def repost_sle_for_audit_documents(documents):
 	Returns:
 		dict with success count, error count, and per-document results.
 	"""
-	frappe.only_for(["Accounts Manager", "System Manager"])
+	# Gate via Role Permission Manager — admins configure who can repost
+	# SLE by editing BNS Branch Accounting Settings role perms + Stock
+	# Ledger Entry write permission. No hardcoded role names.
+	if not frappe.has_permission("BNS Branch Accounting Settings", "write"):
+		frappe.throw(
+			_("BNS Branch Accounting Settings write permission required."),
+			frappe.PermissionError,
+		)
+	if not frappe.has_permission("Stock Ledger Entry", "write"):
+		frappe.throw(
+			_("Stock Ledger Entry write permission required to repost SLE."),
+			frappe.PermissionError,
+		)
 
 	if isinstance(documents, str):
 		documents = json.loads(documents)
@@ -1360,7 +1372,19 @@ def repost_gl_for_audit_documents(documents):
 	Returns:
 		dict with enqueue confirmation.
 	"""
-	frappe.only_for(["Accounts Manager", "System Manager"])
+	# Gate via Role Permission Manager — admins configure who can rebuild
+	# GL for vouchers by granting write on BNS Branch Accounting Settings
+	# and create on Journal Entry. No hardcoded role names.
+	if not frappe.has_permission("BNS Branch Accounting Settings", "write"):
+		frappe.throw(
+			_("BNS Branch Accounting Settings write permission required."),
+			frappe.PermissionError,
+		)
+	if not frappe.has_permission("GL Entry", "write"):
+		frappe.throw(
+			_("GL Entry write permission required to rebuild GL."),
+			frappe.PermissionError,
+		)
 
 	if isinstance(documents, str):
 		documents = json.loads(documents)

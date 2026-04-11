@@ -873,10 +873,13 @@ def get_statement_meta(filters):
     - Future payments
     - Closing balance
     """
-    frappe.only_for(
-        ["Accounts User", "Accounts Manager", "System Manager", "Auditor"],
-        message="Party statement metadata requires an Accounts role.",
-    )
+    # Gate via Role Permission Manager — any role with read permission on
+    # GL Entry can fetch the statement metadata. No hardcoded role names.
+    if not frappe.has_permission("GL Entry", "read"):
+        frappe.throw(
+            _("GL Entry read permission is required to fetch party statement metadata."),
+            frappe.PermissionError,
+        )
     from frappe.utils import flt, nowdate, today
     
     if isinstance(filters, str):

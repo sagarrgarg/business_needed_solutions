@@ -265,10 +265,13 @@ def prepare_report_data(episodes):
 @frappe.whitelist()
 def export_fix_plan(filters):
 	"""Export fix plan as CSV for bulk processing."""
-	frappe.only_for(
-		["Stock Manager", "System Manager", "Accounts Manager"],
-		message="Export fix plan requires Stock Manager / Accounts Manager / System Manager.",
-	)
+	# Gate via Role Permission Manager — any role with read permission on
+	# Stock Ledger Entry can export the fix plan. No hardcoded role names.
+	if not frappe.has_permission("Stock Ledger Entry", "read"):
+		frappe.throw(
+			"Stock Ledger Entry read permission is required to export the fix plan.",
+			frappe.PermissionError,
+		)
 	import csv
 	from io import StringIO
 

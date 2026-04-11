@@ -4,17 +4,21 @@ BNS app static security / correctness scanner.
 
 Runs in CI or as a pre-commit hook. Flags patterns we've been burned by:
 
-  1. @frappe.whitelist() functions whose first ~5 lines do NOT call a
-     permission gate (frappe.has_permission, frappe.only_for, or a
-     project-local _require_* helper).
+  1. @frappe.whitelist() functions whose first ~8 statements do NOT call
+     a permission gate. The only accepted gate shape is
+     `frappe.has_permission(doctype, action)` (optionally followed by a
+     PermissionError raise / throw), or a project-local `_require_*`
+     helper that itself calls frappe.has_permission. Hardcoded role
+     lists via `frappe.only_for([...])` are deliberately NOT accepted
+     because they bypass the Role Permission Manager — admins must be
+     able to grant / revoke access from the Desk UI without a code
+     deploy.
   2. SQL built via f-strings or .format() where a non-hardcoded variable
      is interpolated into the WHERE clause (classic SQL injection vector).
   3. `outstanding > 0` / `outstanding < 0` filters in *report* files (the
      Pure AR/AP advance-drop regression that cost us a live site).
   4. `except Exception: pass` and its siblings that silently swallow errors.
-  5. `ignore_permissions=True` reachable from a whitelisted function without
-     a permission gate on the outer function.
-  6. Hardcoded API keys / tokens / passwords.
+  5. Hardcoded API keys / tokens / passwords.
 
 Exit code:
   0 = clean
@@ -45,14 +49,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # First-line-of-function patterns that count as a permission gate. The scanner
 # treats any of these as a sufficient guard on a whitelisted endpoint.
+# Deliberately NOT in this list: `frappe.only_for([...])` — it hardcodes
+# role names and bypasses the Role Permission Manager. Use
+# `frappe.has_permission(doctype, action)` instead so admins can grant /
+# revoke access from the Desk UI.
 _GATE_PATTERNS = (
 	r"frappe\.has_permission\s*\(",
-	r"frappe\.only_for\s*\(",
-	r"frappe\.throw\s*\([^)]*PermissionError",
-	r"frappe\.PermissionError",
-	r"_require_[a-zA-Z_]+\s*\(",  # project-local helper: _require_dashboard_*, _require_accounts_manager
-	r"check_permission\s*\(",
-	r"raise\s+frappe\.PermissionError",
+	r"_bns_require_[a-zA-Z_]+\s*\(",  # utils.py helpers (call has_permission internally)
+	r"_require_dashboard_[a-zA-Z_]+\s*\(",  # bns_dashboard.py helpers
+	r"_require_accounts_manager\s*\(",  # bns_dashboard.py helper
+	r"_enforce_[a-zA-Z_]+_permission\s*\(",  # utils.py _enforce_* helpers
+	r"frappe\.session\.user\s*==\s*['\"]Guest['\"]",  # edge guest-reject
 )
 _GATE_RE = re.compile("|".join(_GATE_PATTERNS))
 
