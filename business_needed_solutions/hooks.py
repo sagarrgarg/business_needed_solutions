@@ -73,6 +73,11 @@ doctype_js = {
               # Warehouse
               "Warehouse" : "public/js/warehouse.js",
 
+              # Warn when posting against wrong side of linked Customer/Supplier
+              # (Payment Entry = header party; Journal Entry = accounts child rows).
+              "Payment Entry": "public/js/linked_party_warning.js",
+              "Journal Entry": "public/js/linked_party_warning.js",
+
               # BNS Branch Accounting Settings
               "BNS Branch Accounting Settings": "bns_branch_accounting/doctype/bns_branch_accounting_settings/bns_branch_accounting_settings.js"
 }
@@ -330,23 +335,15 @@ fixtures = [
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"business_needed_solutions.tasks.all"
-# 	],
-# 	"daily": [
-# 		"business_needed_solutions.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"business_needed_solutions.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"business_needed_solutions.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"business_needed_solutions.tasks.monthly"
-# 	],
-# }
+# Daily tick for the Common Party auto square-off. The function itself checks
+# the BNS Settings schedule (Disabled/Weekly/Monthly/Quarterly/Yearly) and the
+# last_run_on stamp, so ticking daily is cheap and lets operators change the
+# cadence without restarting anything.
+scheduler_events = {
+    "daily": [
+        "business_needed_solutions.bns_branch_accounting.common_party_squareoff.scheduled_squareoff_run"
+    ]
+}
 
 # Testing
 # -------

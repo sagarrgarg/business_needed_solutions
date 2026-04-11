@@ -66,7 +66,21 @@
   "know_your_vendor_form",
   "kyv_description_html",
 
-  "tab_break_accounts"
+  "tab_break_accounts",
+  "common_party_squareoff_section",
+  "common_party_squareoff_schedule",
+  "common_party_warning_on_wrong_side",
+  "column_break_common_party",
+  "common_party_squareoff_cost_center",
+  "common_party_squareoff_last_run_on",
+  "common_party_reconcile_section",
+  "common_party_reconcile_before_squareoff",
+  "common_party_reconcile_after_squareoff",
+  "common_party_reconcile_include_advances",
+  "column_break_reconcile",
+  "common_party_reconcile_window",
+  "common_party_reconcile_scope",
+  "common_party_reconcile_last_run_on"
  ],
  "fields": [
   {
@@ -388,6 +402,98 @@
    "fieldname": "tab_break_accounts",
    "fieldtype": "Tab Break",
    "label": "Accounts"
+  },
+  {
+   "fieldname": "common_party_squareoff_section",
+   "fieldtype": "Section Break",
+   "label": "Common Party Square-Off"
+  },
+  {
+   "default": "Disabled",
+   "description": "How often the scheduler should post contra Journal Entries for linked Customer/Supplier pairs whose party accounts carry opposite-signed balances. Runs via the daily scheduler tick; Weekly fires every 7 days, Monthly on the 1st, Quarterly on Apr 1 / Jul 1 / Oct 1 / Jan 1, Yearly on Apr 1. Leave Disabled to only run from the BNS Dashboard manual action.",
+   "fieldname": "common_party_squareoff_schedule",
+   "fieldtype": "Select",
+   "label": "Auto Square-Off Schedule",
+   "options": "Disabled\nWeekly\nMonthly\nQuarterly\nYearly"
+  },
+  {
+   "default": "1",
+   "description": "Show a warning dialog when an accountant selects a party on a Payment Entry and the linked counter-party has an open outstanding on the opposite side. Helps catch bank receipts posted against the wrong side of a linked Customer/Supplier pair.",
+   "fieldname": "common_party_warning_on_wrong_side",
+   "fieldtype": "Check",
+   "label": "Warn When Posting Against Linked Party's Wrong Side"
+  },
+  {
+   "fieldname": "column_break_common_party",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Cost Center used on system-generated Common Party square-off Journal Entries. If blank, the Company default Cost Center is used.",
+   "fieldname": "common_party_squareoff_cost_center",
+   "fieldtype": "Link",
+   "label": "Square-Off Cost Center",
+   "options": "Cost Center"
+  },
+  {
+   "description": "Timestamp of the last scheduled auto square-off run. Read-only; updated by the scheduler.",
+   "fieldname": "common_party_squareoff_last_run_on",
+   "fieldtype": "Datetime",
+   "label": "Last Auto Square-Off Run",
+   "read_only": 1
+  },
+  {
+   "fieldname": "common_party_reconcile_section",
+   "fieldtype": "Section Break",
+   "label": "Auto Payment Reconciliation (FIFO)",
+   "description": "Wraps ERPNext's Payment Reconciliation tool around the Common Party square-off. When enabled, open Sales/Purchase Invoices get FIFO-allocated against their Payment Entries and the square-off contra JV, so Balance Sheet, Trial Balance, Accounts Receivable, and Accounts Payable all agree after the run."
+  },
+  {
+   "default": "1",
+   "description": "Before the scheduler / manual action posts any contra JV, run Payment Reconciliation across all customers and suppliers. Clears pre-existing unlinked invoice/payment pairs so the crossed-balance calculation sees the true net.",
+   "fieldname": "common_party_reconcile_before_squareoff",
+   "fieldtype": "Check",
+   "label": "Run Payment Reconciliation Before Square-Off"
+  },
+  {
+   "default": "1",
+   "description": "After the contra JV posts, run Payment Reconciliation again so the JV's Debtors/Creditors legs get FIFO-allocated against the open Sales/Purchase Invoices on each side. This is what actually closes the underlying invoices \u2014 without it, the JV just shifts balances and invoices stay 'outstanding'.",
+   "fieldname": "common_party_reconcile_after_squareoff",
+   "fieldtype": "Check",
+   "label": "Run Payment Reconciliation After Square-Off"
+  },
+  {
+   "default": "1",
+   "description": "Include Payment Entries marked is_advance in the FIFO allocation pool. Matches the running-account workflow where advances should be tied to invoices as they are received.",
+   "fieldname": "common_party_reconcile_include_advances",
+   "fieldtype": "Check",
+   "label": "Include Advance Payment Entries in FIFO Allocation"
+  },
+  {
+   "fieldname": "column_break_reconcile",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "All time",
+   "description": "Historical window the reconciliation considers when fetching unreconciled invoices and payments. 'All time' catches every legacy open item. 'Last 2 Fiscal Years' skips older ledger data. 'Since Accounting Rewrite Cutoff' pins to the existing BNS Branch Accounting cutoff so legacy periods stay untouched.",
+   "fieldname": "common_party_reconcile_window",
+   "fieldtype": "Select",
+   "label": "Reconciliation Window",
+   "options": "All time\nLast 2 Fiscal Years\nSince Accounting Rewrite Cutoff"
+  },
+  {
+   "default": "All Customers + All Suppliers",
+   "description": "Which parties to reconcile each run. 'All Customers + All Suppliers' is comprehensive; 'Only Parties With Crossed Balances' narrows to just the pairs the square-off touches; 'Only Party-Linked Parties' restricts to parties that appear in a Party Link record.",
+   "fieldname": "common_party_reconcile_scope",
+   "fieldtype": "Select",
+   "label": "Reconciliation Scope",
+   "options": "All Customers + All Suppliers\nOnly Parties With Crossed Balances\nOnly Party-Linked Parties"
+  },
+  {
+   "description": "Timestamp of the last scheduled auto payment reconciliation run. Read-only; updated by the scheduler.",
+   "fieldname": "common_party_reconcile_last_run_on",
+   "fieldtype": "Datetime",
+   "label": "Last Auto Reconciliation Run",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 1,

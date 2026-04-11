@@ -405,6 +405,86 @@ class BNSDashboard {
 										</div>
 									</div>
 								</div>
+								<div class="sub-section mb-3" id="subsection-party-squareoff">
+									<div class="sub-section-header d-flex justify-content-between align-items-center"
+										 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
+										 data-subsection="party-squareoff">
+										<strong>
+											<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-party-squareoff"></i>
+											${__("Linked Party Square-Off")}
+											<span class="badge badge-warning ml-2" id="badge-party-squareoff">0</span>
+										</strong>
+									</div>
+									<div class="sub-section-content" id="subcontent-party-squareoff" style="display: none; padding-top: 10px;">
+										<p class="text-muted small mb-2">
+											${__("Linked Customer/Supplier pairs whose party accounts carry opposite-signed balances. Post a balanced contra Journal Entry to net them on the GL — fixes Balance Sheet, Trial Balance, and General Ledger.")}
+										</p>
+										<div class="d-flex flex-wrap align-items-center mb-2" style="gap: 8px;">
+											<label class="small mb-0">${__("As of")}</label>
+											<input type="date" class="form-control form-control-sm" id="bns-squareoff-asof" style="max-width: 160px;">
+											<button class="btn btn-primary btn-xs" id="btn-squareoff-preview">
+												<i class="fa fa-search"></i> ${__("Preview Crossed Pairs")}
+											</button>
+											<button class="btn btn-success btn-xs" id="btn-squareoff-post" disabled>
+												<i class="fa fa-check"></i> ${__("Post Contra Entries")}
+											</button>
+										</div>
+										<div id="table-party-squareoff">
+											<p class="text-muted">${__("Click Preview to load.")}</p>
+										</div>
+										<hr>
+										<div class="mt-3">
+											<strong class="text-danger small">${__("Historical Backfill")}</strong>
+											<p class="text-muted small mb-2">
+												${__("One-time pass for existing imbalances. JVs are posted dated the cutoff, so existing period reports reconcile retroactively.")}
+											</p>
+											<div class="d-flex flex-wrap align-items-center mb-2" style="gap: 8px;">
+												<label class="small mb-0">${__("Cutoff date")}</label>
+												<input type="date" class="form-control form-control-sm" id="bns-squareoff-cutoff" style="max-width: 160px;">
+												<button class="btn btn-warning btn-xs" id="btn-backfill-preview">
+													<i class="fa fa-history"></i> ${__("Preview Backfill")}
+												</button>
+												<button class="btn btn-danger btn-xs" id="btn-backfill-post" disabled>
+													<i class="fa fa-bolt"></i> ${__("Post Backfill JVs")}
+												</button>
+											</div>
+											<div id="table-party-backfill">
+												<p class="text-muted">${__("Click Preview Backfill to load.")}</p>
+											</div>
+										</div>
+									</div>
+								</div>
+								<div class="sub-section mb-3" id="subsection-payment-reconciliation">
+									<div class="sub-section-header d-flex justify-content-between align-items-center"
+										 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
+										 data-subsection="payment-reconciliation">
+										<strong>
+											<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-payment-reconciliation"></i>
+											${__("Payment Reconciliation (FIFO)")}
+											<span class="badge badge-info ml-2" id="badge-payment-reconciliation">0</span>
+										</strong>
+									</div>
+									<div class="sub-section-content" id="subcontent-payment-reconciliation" style="display: none; padding-top: 10px;">
+										<p class="text-muted small mb-2">
+											${__("Auto-match open Sales/Purchase Invoices against their Payment Entries and the square-off contra JV using ERPNext's Payment Reconciliation tool (FIFO). Wrapped by BNS Settings \u2192 Auto Payment Reconciliation.")}
+										</p>
+										<div class="d-flex flex-wrap align-items-center mb-2" style="gap: 8px;">
+											<button class="btn btn-primary btn-xs" id="btn-reconcile-preview">
+												<i class="fa fa-search"></i> ${__("Preview Unreconciled Parties")}
+											</button>
+											<button class="btn btn-success btn-xs" id="btn-reconcile-run" disabled>
+												<i class="fa fa-refresh"></i> ${__("Run Reconciliation Now")}
+											</button>
+											<button class="btn btn-warning btn-xs" id="btn-full-pipeline-run">
+												<i class="fa fa-bolt"></i> ${__("Run Pre \u2192 Square-Off \u2192 Post")}
+											</button>
+											<span class="text-muted small" id="reconcile-meta"></span>
+										</div>
+										<div id="table-payment-reconciliation">
+											<p class="text-muted">${__("Click Preview to load.")}</p>
+										</div>
+									</div>
+								</div>
 								<div class="sub-section" id="subsection-transfer-mismatch">
 									<div class="sub-section-header d-flex justify-content-between align-items-center"
 										 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
@@ -734,6 +814,29 @@ class BNSDashboard {
 
 		this.wrapper.find("#btn-prepare-mismatch-report").on("click", function () {
 			self.prepare_mismatch_report();
+		});
+
+		this.wrapper.find("#btn-squareoff-preview").on("click", function () {
+			self.preview_common_party_squareoff();
+		});
+		this.wrapper.find("#btn-squareoff-post").on("click", function () {
+			self.post_common_party_squareoff();
+		});
+		this.wrapper.find("#btn-backfill-preview").on("click", function () {
+			self.preview_historical_backfill();
+		});
+		this.wrapper.find("#btn-backfill-post").on("click", function () {
+			self.post_historical_backfill();
+		});
+
+		this.wrapper.find("#btn-reconcile-preview").on("click", function () {
+			self.preview_payment_reconciliation();
+		});
+		this.wrapper.find("#btn-reconcile-run").on("click", function () {
+			self.run_payment_reconciliation();
+		});
+		this.wrapper.find("#btn-full-pipeline-run").on("click", function () {
+			self.run_full_squareoff_pipeline();
 		});
 	}
 
@@ -1790,5 +1893,323 @@ class BNSDashboard {
 
 		html += '</tbody></table>';
 		container.html(html);
+	}
+
+	// =====================================================================
+	// Linked Party Square-Off (Common Party GL reconciliation)
+	// =====================================================================
+
+	_render_squareoff_table(containerId, pairs, checkboxClass) {
+		const container = this.wrapper.find("#" + containerId);
+		if (!pairs || pairs.length === 0) {
+			container.html('<p class="text-success small"><i class="fa fa-check"></i> ' + __("No linked parties with crossed balances found.") + '</p>');
+			return 0;
+		}
+		let html = '<table class="table table-sm table-bordered"><thead><tr>';
+		html += '<th style="width:30px;"><input type="checkbox" class="' + checkboxClass + '-all"></th>';
+		html += '<th><small>' + __("Primary Party") + '</small></th>';
+		html += '<th><small>' + __("Secondary Party") + '</small></th>';
+		html += '<th class="text-right"><small>' + __("Primary Balance") + '</small></th>';
+		html += '<th class="text-right"><small>' + __("Secondary Balance") + '</small></th>';
+		html += '<th class="text-right"><small>' + __("Square-Off") + '</small></th>';
+		html += '</tr></thead><tbody>';
+		pairs.forEach(function (p) {
+			html += '<tr>';
+			html += '<td><input type="checkbox" class="' + checkboxClass + '" data-pair-key="' + frappe.utils.escape_html(p.pair_key) + '" checked></td>';
+			html += '<td><small>' + frappe.utils.escape_html(p.primary_party_type) + ' <b>' + frappe.utils.escape_html(p.primary_party) + '</b><br>' + frappe.utils.escape_html(p.primary_account || '') + '</small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(p.secondary_party_type) + ' <b>' + frappe.utils.escape_html(p.secondary_party) + '</b><br>' + frappe.utils.escape_html(p.secondary_account || '') + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(p.primary_balance) + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(p.secondary_balance) + '</small></td>';
+			html += '<td class="text-right"><small><b>' + format_currency(p.square_off_amount) + '</b></small></td>';
+			html += '</tr>';
+		});
+		html += '</tbody></table>';
+		container.html(html);
+
+		const self = this;
+		container.find("." + checkboxClass + "-all").on("change", function () {
+			container.find("." + checkboxClass).prop("checked", $(this).is(":checked"));
+		});
+		return pairs.length;
+	}
+
+	_collect_pair_keys(containerId, checkboxClass) {
+		const keys = [];
+		this.wrapper.find("#" + containerId + " ." + checkboxClass + ":checked").each(function () {
+			keys.push($(this).data("pair-key"));
+		});
+		return keys;
+	}
+
+	async preview_common_party_squareoff() {
+		const company = this.get_company();
+		if (!company) {
+			frappe.msgprint(__("Select a company first."));
+			return;
+		}
+		const as_of_date = this.wrapper.find("#bns-squareoff-asof").val() || frappe.datetime.get_today();
+		try {
+			const r = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.preview_common_party_squareoff",
+				args: { company: company, as_of_date: as_of_date },
+				freeze: true,
+				freeze_message: __("Scanning linked parties..."),
+			});
+			const data = r.message || { pairs: [], count: 0 };
+			this.wrapper.find("#badge-party-squareoff").text(data.count || 0);
+			const n = this._render_squareoff_table("table-party-squareoff", data.pairs, "bns-squareoff-chk");
+			this.wrapper.find("#btn-squareoff-post").prop("disabled", n === 0);
+		} catch (e) {
+			frappe.msgprint(__("Failed: {0}", [e.message || e]));
+		}
+	}
+
+	async post_common_party_squareoff() {
+		const company = this.get_company();
+		if (!company) return;
+		const as_of_date = this.wrapper.find("#bns-squareoff-asof").val() || frappe.datetime.get_today();
+		const pair_keys = this._collect_pair_keys("table-party-squareoff", "bns-squareoff-chk");
+		if (pair_keys.length === 0) {
+			frappe.msgprint(__("Select at least one pair."));
+			return;
+		}
+		frappe.confirm(
+			__("Post {0} contra Journal Entries? This writes to the GL.", [pair_keys.length]),
+			async () => {
+				try {
+					const r = await frappe.call({
+						method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.execute_common_party_squareoff",
+						args: {
+							company: company,
+							as_of_date: as_of_date,
+							pair_keys: pair_keys,
+							posting_date: as_of_date,
+						},
+						freeze: true,
+						freeze_message: __("Posting contra entries..."),
+					});
+					const res = r.message || {};
+					const posted = (res.posted || []).length;
+					const errors = (res.errors || []).length;
+					let msg = __("Posted {0} contra Journal Entries.", [posted]);
+					if (errors > 0) msg += "<br>" + __("{0} error(s) — check Error Log.", [errors]);
+					if (res.posted && res.posted.length) {
+						msg += '<br><ul style="margin-top:8px;">';
+						res.posted.forEach(function (p) {
+							msg += '<li><a href="/app/journal-entry/' + p.journal_entry + '" target="_blank">' + p.journal_entry + '</a> — ' + format_currency(p.amount) + '</li>';
+						});
+						msg += "</ul>";
+					}
+					frappe.msgprint({ title: __("Square-Off Complete"), message: msg, indicator: errors ? "orange" : "green" });
+					this.preview_common_party_squareoff();
+				} catch (e) {
+					frappe.msgprint(__("Failed: {0}", [e.message || e]));
+				}
+			}
+		);
+	}
+
+	async preview_historical_backfill() {
+		const company = this.get_company();
+		if (!company) return;
+		const cutoff = this.wrapper.find("#bns-squareoff-cutoff").val();
+		if (!cutoff) {
+			frappe.msgprint(__("Pick a cutoff date."));
+			return;
+		}
+		try {
+			const r = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.preview_historical_backfill",
+				args: { company: company, cutoff_date: cutoff },
+				freeze: true,
+				freeze_message: __("Scanning historical linked balances..."),
+			});
+			const data = r.message || { pairs: [], count: 0 };
+			const n = this._render_squareoff_table("table-party-backfill", data.pairs, "bns-backfill-chk");
+			this.wrapper.find("#btn-backfill-post").prop("disabled", n === 0);
+		} catch (e) {
+			frappe.msgprint(__("Failed: {0}", [e.message || e]));
+		}
+	}
+
+	async post_historical_backfill() {
+		const company = this.get_company();
+		const cutoff = this.wrapper.find("#bns-squareoff-cutoff").val();
+		if (!company || !cutoff) return;
+		const pair_keys = this._collect_pair_keys("table-party-backfill", "bns-backfill-chk");
+		if (pair_keys.length === 0) {
+			frappe.msgprint(__("Select at least one pair."));
+			return;
+		}
+		frappe.confirm(
+			__("Post {0} backfill Journal Entries dated {1}? This touches past periods.", [pair_keys.length, cutoff]),
+			async () => {
+				try {
+					const r = await frappe.call({
+						method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.execute_historical_backfill",
+						args: { company: company, cutoff_date: cutoff, pair_keys: pair_keys },
+						freeze: true,
+						freeze_message: __("Posting backfill entries..."),
+					});
+					const res = r.message || {};
+					const posted = (res.posted || []).length;
+					const errors = (res.errors || []).length;
+					let msg = __("Posted {0} backfill Journal Entries.", [posted]);
+					if (errors > 0) msg += "<br>" + __("{0} error(s) — check Error Log.", [errors]);
+					frappe.msgprint({ title: __("Backfill Complete"), message: msg, indicator: errors ? "orange" : "green" });
+					this.preview_historical_backfill();
+				} catch (e) {
+					frappe.msgprint(__("Failed: {0}", [e.message || e]));
+				}
+			}
+		);
+	}
+
+	// =====================================================================
+	// Payment Reconciliation (FIFO) — preview/run/full-pipeline
+	// =====================================================================
+
+	_render_reconcile_table(candidates) {
+		const container = this.wrapper.find("#table-payment-reconciliation");
+		if (!candidates || candidates.length === 0) {
+			container.html('<p class="text-success small"><i class="fa fa-check"></i> ' + __("No parties with unreconciled activity found.") + '</p>');
+			return 0;
+		}
+		const chkClass = "bns-reconcile-chk";
+		let html = '<table class="table table-sm table-bordered"><thead><tr>';
+		html += '<th style="width:30px;"><input type="checkbox" class="' + chkClass + '-all" checked></th>';
+		html += '<th><small>' + __("Party Type") + '</small></th>';
+		html += '<th><small>' + __("Party") + '</small></th>';
+		html += '<th><small>' + __("Account") + '</small></th>';
+		html += '<th class="text-right"><small>' + __("Signed Balance") + '</small></th>';
+		html += '</tr></thead><tbody>';
+		candidates.forEach(function (c) {
+			const key = (c.party_type || '') + '|' + (c.party || '');
+			html += '<tr>';
+			html += '<td><input type="checkbox" class="' + chkClass + '" data-party-key="' + frappe.utils.escape_html(key) + '" checked></td>';
+			html += '<td><small>' + frappe.utils.escape_html(c.party_type) + '</small></td>';
+			html += '<td><small><b>' + frappe.utils.escape_html(c.party) + '</b></small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(c.account || '') + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(c.signed_balance) + '</small></td>';
+			html += '</tr>';
+		});
+		html += '</tbody></table>';
+		container.html(html);
+		container.find("." + chkClass + "-all").on("change", function () {
+			container.find("." + chkClass).prop("checked", $(this).is(":checked"));
+		});
+		return candidates.length;
+	}
+
+	_collect_reconcile_keys() {
+		const keys = [];
+		this.wrapper.find("#table-payment-reconciliation .bns-reconcile-chk:checked").each(function () {
+			keys.push($(this).data("party-key"));
+		});
+		return keys;
+	}
+
+	async preview_payment_reconciliation() {
+		const company = this.get_company();
+		if (!company) {
+			frappe.msgprint(__("Select a company first."));
+			return;
+		}
+		try {
+			const r = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.preview_payment_reconciliation",
+				args: { company: company },
+				freeze: true,
+				freeze_message: __("Scanning unreconciled parties..."),
+			});
+			const data = r.message || { candidates: [], count: 0 };
+			this.wrapper.find("#badge-payment-reconciliation").text(data.count || 0);
+			const meta = [];
+			if (data.scope) meta.push(__("Scope: {0}", [data.scope]));
+			if (data.window) meta.push(__("Window: {0}", [data.window]));
+			if (data.last_run_on) meta.push(__("Last run: {0}", [data.last_run_on]));
+			this.wrapper.find("#reconcile-meta").text(meta.join(" · "));
+			const n = this._render_reconcile_table(data.candidates || []);
+			this.wrapper.find("#btn-reconcile-run").prop("disabled", n === 0);
+		} catch (e) {
+			frappe.msgprint(__("Failed: {0}", [e.message || e]));
+		}
+	}
+
+	async run_payment_reconciliation() {
+		const company = this.get_company();
+		if (!company) return;
+		const party_keys = this._collect_reconcile_keys();
+		if (party_keys.length === 0) {
+			frappe.msgprint(__("Select at least one party from the preview table."));
+			return;
+		}
+		frappe.confirm(
+			__("Run FIFO Payment Reconciliation for {0} selected parties? This modifies Payment Entry references, rewrites the Payment Ledger, and may post exchange gain/loss JVs.", [party_keys.length]),
+			async () => {
+				try {
+					const r = await frappe.call({
+						method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.execute_payment_reconciliation",
+						args: { company: company, party_keys: party_keys },
+						freeze: true,
+						freeze_message: __("Reconciling (FIFO)..."),
+					});
+					const res = r.message || {};
+					if (res.enqueued) {
+						frappe.msgprint({
+							title: __("Queued"),
+							message: res.message || __("Background job enqueued."),
+							indicator: "blue",
+						});
+						return;
+					}
+					const parties = (res.reconciled_parties || []).length;
+					const errors = (res.errors || []).length;
+					const allocations = res.total_allocations || 0;
+					let msg = __("Reconciled {0} parties, {1} allocations.", [parties, allocations]);
+					if (errors > 0) msg += "<br>" + __("{0} error(s) — check Error Log.", [errors]);
+					frappe.msgprint({ title: __("Reconciliation Complete"), message: msg, indicator: errors ? "orange" : "green" });
+					this.preview_payment_reconciliation();
+				} catch (e) {
+					frappe.msgprint(__("Failed: {0}", [e.message || e]));
+				}
+			}
+		);
+	}
+
+	async run_full_squareoff_pipeline() {
+		const company = this.get_company();
+		if (!company) return;
+		frappe.confirm(
+			__("Run the full pipeline for <b>{0}</b>?<br><br>1. Pre-reconcile every customer + supplier<br>2. Post contra JVs for crossed linked pairs<br>3. Post-reconcile to FIFO-allocate the JVs against invoices<br><br>This touches the GL. Proceed?", [company]),
+			async () => {
+				try {
+					const r = await frappe.call({
+						method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.execute_full_squareoff_pipeline",
+						args: { company: company },
+						freeze: true,
+						freeze_message: __("Running full pipeline..."),
+					});
+					const res = r.message || {};
+					const pre = res.pre_reconcile || {};
+					const sq = res.squareoff || {};
+					const post = res.post_reconcile || {};
+					const msg = `
+						<b>${__("Pre-reconcile")}:</b> ${pre.reconciled_parties || 0} parties, ${pre.total_allocations || 0} allocations, ${pre.errors || 0} errors<br>
+						<b>${__("Square-off")}:</b> ${sq.posted || 0} posted, ${sq.skipped || 0} skipped, ${sq.errors || 0} errors<br>
+						<b>${__("Post-reconcile")}:</b> ${post.reconciled_parties || 0} parties, ${post.total_allocations || 0} allocations, ${post.errors || 0} errors
+					`;
+					frappe.msgprint({
+						title: __("Full Pipeline Complete"),
+						message: msg,
+						indicator: (pre.errors || sq.errors || post.errors) ? "orange" : "green",
+					});
+					this.preview_payment_reconciliation();
+					this.preview_common_party_squareoff();
+				} catch (e) {
+					frappe.msgprint(__("Failed: {0}", [e.message || e]));
+				}
+			}
+		);
 	}
 }

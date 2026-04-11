@@ -1178,3 +1178,341 @@ def _get_compliance_metrics(company):
 		"pi_without_attachment": pi_without_attachment,
 		"total_pis": total_pis,
 	}
+
+
+# -------------------------------------------------------------------
+# Common Party Square-Off (Linked Customer/Supplier GL reconciliation)
+# -------------------------------------------------------------------
+
+
+def _require_accounts_manager():
+	allowed = {"Accounts Manager", "System Manager"}
+	if not (allowed & set(frappe.get_roles(frappe.session.user))):
+		frappe.throw(_("You need Accounts Manager or System Manager role to run Common Party square-off."))
+	if not frappe.has_permission("Journal Entry", "create"):
+		frappe.throw(_("You do not have permission to create Journal Entry."))
+
+
+SQUAREOFF_SYNC_BATCH_CAP = 20  # larger batches run in the background job queue
+
+
+def _filter_pairs_by_keys(pairs, pair_keys):
+	if not pair_keys:
+		return pairs
+	if isinstance(pair_keys, str):
+		pair_keys = frappe.parse_json(pair_keys) or []
+	wanted = set(pair_keys)
+	return [p for p in pairs if p.get("pair_key") in wanted]
+
+
+def _run_squareoff_batch(company, pairs, posting_date, cost_center, remark=None):
+	from business_needed_solutions.bns_branch_accounting.common_party_squareoff import (
+		square_off_all_common_parties,
+	)
+
+	return square_off_all_common_parties(
+		company,
+		pairs=pairs,
+		posting_date=posting_date,
+		cost_center=cost_center,
+		remark=remark,
+	)
+
+
+def _run_squareoff_or_enqueue(company, pairs, posting_date, cost_center, remark=None):
+	"""Run synchronously for small batches; enqueue as a background job for large ones.
+	Prevents a single request from locking GL for hundreds of JVs."""
+	if len(pairs) <= SQUAREOFF_SYNC_BATCH_CAP:
+		return _run_squareoff_batch(company, pairs, posting_date, cost_center, remark=remark)
+	job = frappe.enqueue(
+		"business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard._run_squareoff_batch",
+		queue="long",
+		timeout=3600,
+		company=company,
+		pairs=pairs,
+		posting_date=posting_date,
+		cost_center=cost_center,
+		remark=remark,
+		job_name=f"bns_squareoff_{frappe.generate_hash(length=8)}",
+	)
+	return {
+		"enqueued": True,
+		"job_id": getattr(job, "id", None),
+		"pairs_count": len(pairs),
+		"posted": [],
+		"errors": [],
+		"message": _(
+			"{0} pairs queued in the background (batch exceeds {1}). Check Error Log / Background Jobs for progress."
+		).format(len(pairs), SQUAREOFF_SYNC_BATCH_CAP),
+	}
+
+
+@frappe.whitelist()
+def preview_common_party_squareoff(company, as_of_date=None):
+	"""Return the list of linked pairs that currently have crossed balances."""
+	_require_accounts_manager()
+	from business_needed_solutions.bns_branch_accounting.common_party_squareoff import (
+		compute_linked_party_net_positions,
+	)
+
+	pairs = compute_linked_party_net_positions(company, as_of_date=as_of_date)
+	return {"pairs": pairs, "count": len(pairs), "as_of_date": as_of_date}
+
+
+@frappe.whitelist()
+def execute_common_party_squareoff(
+	company, as_of_date=None, pair_keys=None, posting_date=None, cost_center=None
+):
+	"""Post contra JVs for the requested linked pairs (or all crossed pairs)."""
+	_require_accounts_manager()
+	from business_needed_solutions.bns_branch_accounting.common_party_squareoff import (
+		compute_linked_party_net_positions,
+	)
+
+	pairs = compute_linked_party_net_positions(company, as_of_date=as_of_date)
+	pairs = _filter_pairs_by_keys(pairs, pair_keys)
+	return _run_squareoff_or_enqueue(
+		company, pairs, posting_date=posting_date, cost_center=cost_center
+	)
+
+
+@frappe.whitelist()
+def preview_historical_backfill(company, cutoff_date):
+	"""Preview pairs that would be squared off as of a historical cutoff date."""
+	_require_accounts_manager()
+	if not cutoff_date:
+		frappe.throw(_("Cutoff date is required for historical backfill"))
+	from business_needed_solutions.bns_branch_accounting.common_party_squareoff import (
+		compute_linked_party_net_positions,
+	)
+
+	pairs = compute_linked_party_net_positions(company, as_of_date=cutoff_date)
+	return {"pairs": pairs, "count": len(pairs), "cutoff_date": cutoff_date}
+
+
+@frappe.whitelist()
+def execute_historical_backfill(company, cutoff_date, pair_keys=None, cost_center=None):
+	"""One-time backfill: post contra JVs dated cutoff_date for crossed pairs."""
+	_require_accounts_manager()
+	if not cutoff_date:
+		frappe.throw(_("Cutoff date is required for historical backfill"))
+	from business_needed_solutions.bns_branch_accounting.common_party_squareoff import (
+		compute_linked_party_net_positions,
+	)
+
+	pairs = compute_linked_party_net_positions(company, as_of_date=cutoff_date)
+	pairs = _filter_pairs_by_keys(pairs, pair_keys)
+	return _run_squareoff_or_enqueue(
+		company,
+		pairs,
+		posting_date=cutoff_date,
+		cost_center=cost_center,
+		remark=f"BNS Common Party historical backfill as of {cutoff_date}",
+	)
+
+
+# -------------------------------------------------------------------
+# Payment Reconciliation (FIFO, all customers + all suppliers)
+# -------------------------------------------------------------------
+
+
+def _get_reconcile_settings():
+	"""Read the BNS Settings knobs that govern Payment Reconciliation runs."""
+	s = frappe.get_single("BNS Settings")
+	return {
+		"window": getattr(s, "common_party_reconcile_window", None) or "All time",
+		"scope": getattr(s, "common_party_reconcile_scope", None) or "All Customers + All Suppliers",
+		"include_advances": bool(getattr(s, "common_party_reconcile_include_advances", 1)),
+		"last_run_on": getattr(s, "common_party_reconcile_last_run_on", None),
+	}
+
+
+@frappe.whitelist()
+def preview_payment_reconciliation(company):
+	"""Return the list of parties with unreconciled activity (non-zero signed
+	balance on their party account). Cheap, read-only — used by the dashboard
+	'Preview Unreconciled Parties' button."""
+	_require_accounts_manager()
+	from business_needed_solutions.bns_branch_accounting.common_party_reconciliation import (
+		get_reconciliation_candidates,
+	)
+
+	cfg = _get_reconcile_settings()
+	candidates = get_reconciliation_candidates(company, scope=cfg["scope"], limit=500)
+	return {
+		"candidates": candidates,
+		"count": len(candidates),
+		"window": cfg["window"],
+		"scope": cfg["scope"],
+		"include_advances": cfg["include_advances"],
+		"last_run_on": str(cfg["last_run_on"]) if cfg["last_run_on"] else None,
+	}
+
+
+def _parse_party_keys(party_keys):
+	"""Parse a list of 'PartyType|Party' strings into a set of tuples.
+	Accepts either a JSON string or a list. Returns None if empty."""
+	if not party_keys:
+		return None
+	if isinstance(party_keys, str):
+		try:
+			party_keys = frappe.parse_json(party_keys) or []
+		except Exception:
+			return None
+	out = set()
+	for raw in party_keys:
+		if not raw:
+			continue
+		if "|" not in raw:
+			continue
+		pt, p = raw.split("|", 1)
+		pt = pt.strip()
+		p = p.strip()
+		if pt and p:
+			out.add((pt, p))
+	return out or None
+
+
+@frappe.whitelist()
+def execute_payment_reconciliation(
+	company, force_window=None, force_scope=None, party_keys=None
+):
+	"""Run ERPNext Payment Reconciliation (FIFO) for the selected parties, or
+	for every party in scope if `party_keys` is not provided.
+	Runs synchronously for small batches; enqueues for larger ones."""
+	_require_accounts_manager()
+	from business_needed_solutions.bns_branch_accounting.common_party_reconciliation import (
+		get_reconciliation_candidates,
+		reconcile_all_parties,
+		stamp_reconcile_last_run,
+	)
+
+	cfg = _get_reconcile_settings()
+	window = force_window or cfg["window"]
+	scope = force_scope or cfg["scope"]
+	party_filter = _parse_party_keys(party_keys)
+
+	if party_filter is not None:
+		batch_size = len(party_filter)
+	else:
+		candidates = get_reconciliation_candidates(company, scope=scope, limit=5000)
+		batch_size = len(candidates)
+
+	if batch_size <= SQUAREOFF_SYNC_BATCH_CAP:
+		result = reconcile_all_parties(
+			company=company,
+			window=window,
+			include_advances=cfg["include_advances"],
+			scope=scope,
+			party_filter=party_filter,
+		)
+		stamp_reconcile_last_run()
+		return result
+
+	job = frappe.enqueue(
+		"business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard._run_reconcile_batch",
+		queue="long",
+		timeout=7200,
+		company=company,
+		window=window,
+		include_advances=cfg["include_advances"],
+		scope=scope,
+		party_filter=list(party_filter) if party_filter else None,
+		job_name=f"bns_reconcile_{frappe.generate_hash(length=8)}",
+	)
+	return {
+		"enqueued": True,
+		"job_id": getattr(job, "id", None),
+		"candidates_count": batch_size,
+		"reconciled_parties": [],
+		"errors": [],
+		"message": _(
+			"{0} parties queued for background Payment Reconciliation. Check Error Log / Background Jobs for progress."
+		).format(batch_size),
+	}
+
+
+def _run_reconcile_batch(company, window, include_advances, scope, party_filter=None):
+	"""RQ job entry point for the enqueued reconciliation path."""
+	from business_needed_solutions.bns_branch_accounting.common_party_reconciliation import (
+		reconcile_all_parties,
+		stamp_reconcile_last_run,
+	)
+
+	result = reconcile_all_parties(
+		company=company,
+		window=window,
+		include_advances=include_advances,
+		scope=scope,
+		party_filter=party_filter,
+	)
+	stamp_reconcile_last_run()
+	return result
+
+
+@frappe.whitelist()
+def execute_full_squareoff_pipeline(company, as_of_date=None, cost_center=None):
+	"""One-button upgrade: pre-reconcile \u2192 post contra JVs \u2192 post-reconcile.
+	All three steps run for the chosen company under the current BNS Settings."""
+	_require_accounts_manager()
+	from business_needed_solutions.bns_branch_accounting.common_party_squareoff import (
+		compute_linked_party_net_positions,
+	)
+	from business_needed_solutions.bns_branch_accounting.common_party_reconciliation import (
+		reconcile_all_parties,
+		stamp_reconcile_last_run,
+	)
+
+	cfg = _get_reconcile_settings()
+	summary = {
+		"company": company,
+		"window": cfg["window"],
+		"scope": cfg["scope"],
+	}
+
+	# Pre-reconcile
+	pre = reconcile_all_parties(
+		company=company,
+		window=cfg["window"],
+		include_advances=cfg["include_advances"],
+		scope=cfg["scope"],
+	)
+	summary["pre_reconcile"] = {
+		"reconciled_parties": len(pre.get("reconciled_parties", [])),
+		"total_allocations": pre.get("total_allocations", 0),
+		"errors": len(pre.get("errors", [])),
+	}
+
+	# Square-off crossed pairs
+	pairs = compute_linked_party_net_positions(company, as_of_date=as_of_date)
+	if pairs:
+		sq = _run_squareoff_or_enqueue(
+			company,
+			pairs,
+			posting_date=as_of_date,
+			cost_center=cost_center,
+			remark="BNS full pipeline square-off",
+		)
+	else:
+		sq = {"posted": [], "errors": [], "skipped": [], "message": "no crossed pairs"}
+	summary["squareoff"] = {
+		"posted": len(sq.get("posted", [])),
+		"errors": len(sq.get("errors", [])),
+		"skipped": len(sq.get("skipped", [])),
+	}
+
+	# Post-reconcile
+	post = reconcile_all_parties(
+		company=company,
+		window=cfg["window"],
+		include_advances=cfg["include_advances"],
+		scope=cfg["scope"],
+	)
+	summary["post_reconcile"] = {
+		"reconciled_parties": len(post.get("reconciled_parties", [])),
+		"total_allocations": post.get("total_allocations", 0),
+		"errors": len(post.get("errors", [])),
+	}
+
+	stamp_reconcile_last_run()
+	return summary
