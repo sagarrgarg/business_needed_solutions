@@ -220,14 +220,15 @@ class TestCommonPartyReconciliation(FrappeTestCase):
 	def test_resolve_window_unknown_label_falls_back(self):
 		self.assertEqual(_resolve_window("Quarterly Widget", self.company), (None, None))
 
-	def test_reconciliation_candidates_picks_up_nonzero_balances(self):
-		# Post a 100 Dr fixture JV against the test customer — creates unreconciled balance.
+	def test_plain_jv_does_not_create_candidate(self):
+		# Why: candidate detection now requires BOTH an open Sales/Purchase
+		# Invoice AND an unallocated Payment Entry. A bare Journal Entry
+		# against the party account (no SI, no PE) should NOT show up — it
+		# has nothing for Payment Reconciliation to match against.
 		_post_party_jv(self.company, self.customer_account, "Customer", self.customer, 100, 0)
 		candidates = get_reconciliation_candidates(self.company, scope="All Customers + All Suppliers")
-		# Should include our customer.
 		hits = [c for c in candidates if c["party_type"] == "Customer" and c["party"] == self.customer]
-		self.assertEqual(len(hits), 1)
-		self.assertAlmostEqual(hits[0]["signed_balance"], 100.0, places=2)
+		self.assertEqual(len(hits), 0)
 
 	def test_reconcile_single_party_noop_when_only_one_side(self):
 		# Customer only has an invoice-shaped Dr balance, no offsetting Cr payment → skip.

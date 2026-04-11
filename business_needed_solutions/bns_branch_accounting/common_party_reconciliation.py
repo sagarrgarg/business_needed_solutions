@@ -139,10 +139,11 @@ def reconcile_single_party(
 		if not account:
 			return {"party": party, "skipped_reason": "no party account"}
 
-		# Cheap pre-filter: if the party account has zero signed balance there
-		# are no matched/unmatched halves to worry about — nothing to do.
-		if _party_account_has_balance(party_type, party, account, company) == 0:
-			return {"party": party, "account": account, "skipped_reason": "zero balance"}
+		# Intentionally NO pre-filter on signed GL balance here. A supplier
+		# can have net GL = 0 while still having an open invoice AND an
+		# unallocated payment that should be FIFO-matched to each other — the
+		# aggregate nets but the individual vouchers remain unlinked. Let PR's
+		# get_unreconciled_entries decide.
 
 		from_date, to_date = (None, None)
 		if window:
@@ -339,32 +340,133 @@ def reconcile_all_parties(
 def get_reconciliation_candidates(company: str, scope=None, limit: int = 500) -> list[dict]:
 	"""Diagnostic preview for the BNS Dashboard.
 
-	Returns parties that currently have a non-zero signed balance on their party
-	account — the cheap signal that they have unreconciled activity. No side
-	effects, no new Payment Reconciliation docs.
+	A party is a real reconciliation candidate only if BOTH conditions hold:
+	  1. At least one Sales/Purchase Invoice has `outstanding_amount > 0`.
+	  2. At least one Payment Entry / Journal Entry has an unallocated portion
+	     (`unallocated_amount > 0` for Payment Entry) on the same side.
+
+	Important: we do NOT use Payment Ledger Entry directly. ERPNext tracks
+	the true "is this reconciled" state via the invoice's `outstanding_amount`
+	and the PE's `unallocated_amount` — those reflect PE reference child-table
+	allocations, whereas PLE keeps the original posting rows until a fresh
+	Payment Reconciliation tool run adds linkage rows. An invoice paid via a
+	PE with references (the common case) shows outstanding=0 but still has
+	the original PLE row, so PLE-based detection misfires.
+
+	We compute per-party outstanding via aggregation over the invoice and PE
+	tables and only list parties where both sides have open amounts.
 	"""
-	out: list[dict] = []
-	for party_type, party in _iter_parties_for_scope(company, scope, _PARTY_TYPES):
-		if len(out) >= limit:
-			break
+	# Invoices with outstanding > 0, grouped by (party_type, party).
+	# Sales Invoice: customer side. is_return rows get excluded for clarity.
+	customer_invoices = frappe.db.sql(
+		"""
+		SELECT customer AS party,
+			COUNT(*) AS cnt,
+			SUM(outstanding_amount) AS total_outstanding
+		FROM `tabSales Invoice`
+		WHERE docstatus = 1
+		  AND company = %(company)s
+		  AND outstanding_amount > 0.009
+		  AND IFNULL(is_return, 0) = 0
+		GROUP BY customer
+		""",
+		{"company": company},
+		as_dict=True,
+	)
+	supplier_invoices = frappe.db.sql(
+		"""
+		SELECT supplier AS party,
+			COUNT(*) AS cnt,
+			SUM(outstanding_amount) AS total_outstanding
+		FROM `tabPurchase Invoice`
+		WHERE docstatus = 1
+		  AND company = %(company)s
+		  AND outstanding_amount > 0.009
+		  AND IFNULL(is_return, 0) = 0
+		GROUP BY supplier
+		""",
+		{"company": company},
+		as_dict=True,
+	)
+
+	# Payment Entries with unallocated_amount > 0 — these are payments that
+	# haven't been tied to any invoice via their references child table.
+	unalloc_payments = frappe.db.sql(
+		"""
+		SELECT party_type, party,
+			COUNT(*) AS cnt,
+			SUM(unallocated_amount) AS total_unallocated
+		FROM `tabPayment Entry`
+		WHERE docstatus = 1
+		  AND company = %(company)s
+		  AND party_type IN ('Customer', 'Supplier')
+		  AND unallocated_amount > 0.009
+		GROUP BY party_type, party
+		""",
+		{"company": company},
+		as_dict=True,
+	)
+
+	inv_map: dict[tuple, dict] = {}
+	for r in customer_invoices:
+		if r["party"]:
+			inv_map[("Customer", r["party"])] = {
+				"open_invoice_rows": int(r["cnt"] or 0),
+				"gross_outstanding": flt(r["total_outstanding"]),
+			}
+	for r in supplier_invoices:
+		if r["party"]:
+			inv_map[("Supplier", r["party"])] = {
+				"open_invoice_rows": int(r["cnt"] or 0),
+				"gross_outstanding": flt(r["total_outstanding"]),
+			}
+
+	pay_map: dict[tuple, dict] = {}
+	for r in unalloc_payments:
+		if r["party"] and r["party_type"] in _PARTY_TYPES:
+			pay_map[(r["party_type"], r["party"])] = {
+				"open_payment_rows": int(r["cnt"] or 0),
+				"gross_unallocated": flt(r["total_unallocated"]),
+			}
+
+	# Intersection: party must have both open invoices AND open payments.
+	candidates: list[dict] = []
+	for key in inv_map.keys() & pay_map.keys():
+		party_type, party = key
 		try:
 			account = get_party_account(party_type, party, company)
 		except Exception:
 			continue
 		if not account:
 			continue
-		bal = _party_account_has_balance(party_type, party, account, company)
-		if bal == 0:
-			continue
-		out.append(
+		inv = inv_map[key]
+		pay = pay_map[key]
+		# Reconcilable amount = min(outstanding, unallocated) — how much can
+		# actually be FIFO-matched in one pass.
+		reconcilable = min(inv["gross_outstanding"], pay["gross_unallocated"])
+		candidates.append(
 			{
 				"party_type": party_type,
 				"party": party,
 				"account": account,
-				"signed_balance": bal,
+				"open_invoice_rows": inv["open_invoice_rows"],
+				"open_payment_rows": pay["open_payment_rows"],
+				"gross_pos": inv["gross_outstanding"],
+				"gross_neg": pay["gross_unallocated"],
+				"reconcilable_amount": reconcilable,
+				# Keep signed_balance for JS template compatibility.
+				"signed_balance": inv["gross_outstanding"] - pay["gross_unallocated"],
 			}
 		)
-	return out
+
+	# Scope filter (Party Link / Crossed Balances / All).
+	if scope and scope != "All Customers + All Suppliers":
+		allowed = {(pt, p) for pt, p in _iter_parties_for_scope(company, scope, _PARTY_TYPES)}
+		candidates = [c for c in candidates if (c["party_type"], c["party"]) in allowed]
+
+	# Order: most to reconcile first.
+	candidates.sort(key=lambda c: -c["reconcilable_amount"])
+	return candidates[: int(limit)]
 
 
 def stamp_reconcile_last_run(run_dt=None):

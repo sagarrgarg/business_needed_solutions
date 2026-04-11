@@ -2072,7 +2072,7 @@ class BNSDashboard {
 	_render_reconcile_table(candidates) {
 		const container = this.wrapper.find("#table-payment-reconciliation");
 		if (!candidates || candidates.length === 0) {
-			container.html('<p class="text-success small"><i class="fa fa-check"></i> ' + __("No parties with unreconciled activity found.") + '</p>');
+			container.html('<p class="text-success small"><i class="fa fa-check"></i> ' + __("No parties with both open invoices and open payments \u2014 nothing to reconcile.") + '</p>');
 			return 0;
 		}
 		const chkClass = "bns-reconcile-chk";
@@ -2081,6 +2081,8 @@ class BNSDashboard {
 		html += '<th><small>' + __("Party Type") + '</small></th>';
 		html += '<th><small>' + __("Party") + '</small></th>';
 		html += '<th><small>' + __("Account") + '</small></th>';
+		html += '<th class="text-center"><small>' + __("Open Inv") + '</small></th>';
+		html += '<th class="text-center"><small>' + __("Open Pay") + '</small></th>';
 		html += '<th class="text-right"><small>' + __("Signed Balance") + '</small></th>';
 		html += '</tr></thead><tbody>';
 		candidates.forEach(function (c) {
@@ -2090,6 +2092,8 @@ class BNSDashboard {
 			html += '<td><small>' + frappe.utils.escape_html(c.party_type) + '</small></td>';
 			html += '<td><small><b>' + frappe.utils.escape_html(c.party) + '</b></small></td>';
 			html += '<td><small>' + frappe.utils.escape_html(c.account || '') + '</small></td>';
+			html += '<td class="text-center"><small>' + (c.open_invoice_rows || 0) + '</small></td>';
+			html += '<td class="text-center"><small>' + (c.open_payment_rows || 0) + '</small></td>';
 			html += '<td class="text-right"><small>' + format_currency(c.signed_balance) + '</small></td>';
 			html += '</tr>';
 		});
