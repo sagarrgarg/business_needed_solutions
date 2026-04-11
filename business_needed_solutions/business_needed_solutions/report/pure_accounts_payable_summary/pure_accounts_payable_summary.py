@@ -324,8 +324,11 @@ def execute(filters=None):
 								- flt(sec_row.get(fieldname, 0.0))
 							)
 		
-		# Only add if outstanding is positive after adjustments
-		if flt(updated_row.get("outstanding", 0.0)) > 0:
+		# Include parties with a non-zero outstanding (positive = payable,
+		# negative = supplier advance / overpayment — matches native AP Summary).
+		# Why: same fix as Pure AR — standalone suppliers with advances would
+		# otherwise disappear from both reports.
+		if abs(flt(updated_row.get("outstanding", 0.0))) > 0.009:
 			if filters.get("adjust_running_accounts"):
 				redistribute_negative_ageing_buckets(updated_row, ageing_bucket_fields)
 

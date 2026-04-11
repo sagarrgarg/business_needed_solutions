@@ -496,8 +496,16 @@ def execute(filters=None):
 								- flt(sec_row.get(fieldname, 0.0))
 							)
 		
-		# Only add if outstanding is positive after adjustments
-		if flt(updated_row.get("outstanding", 0.0)) > 0:
+		# Include parties with a non-zero outstanding (positive = receivable,
+		# negative = customer advance / overpayment — matches native AR Summary).
+		# Why: common parties with net <= 0 are already routed to Payable earlier
+		# via `continue`, so reaching this line with a negative outstanding means
+		# either (a) standalone customer with pure advance (no supplier mirror) or
+		# (b) standalone customer whose credit notes > invoices. Both deserve a
+		# row with the negative amount, just like ERPNext's native AR Summary
+		# shows it. Dropping them made advance-only customers invisible across
+		# both Pure AR and Pure AP reports.
+		if abs(flt(updated_row.get("outstanding", 0.0))) > 0.009:
 			if filters.get("adjust_running_accounts"):
 				redistribute_negative_ageing_buckets(updated_row, ageing_bucket_fields)
 
