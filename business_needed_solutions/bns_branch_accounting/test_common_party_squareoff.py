@@ -303,12 +303,12 @@ class TestCommonPartySquareOff(FrappeTestCase):
 		self.assertAlmostEqual(residual, -40, places=2)
 
 	def test_consolidate_same_sign_cr_balances(self):
-		# Both parties carry Cr balances (customer advance + supplier payable).
-		# Classic detector skipped this. New detector classifies it as
-		# "consolidate" and moves the secondary's 174 onto the primary side.
-		# Party Link fixture: primary=Customer, secondary=Supplier.
-		# Customer (primary) = Cr 569 via two JVs that net to Cr 569
-		# Supplier (secondary) = Cr 174 via one JV
+		# Both parties carry Cr balances:
+		#   Customer (primary) Debtors Cr 569 = customer advance = ABNORMAL
+		#   Supplier (secondary) Creditors Cr 174 = supplier payable = normal
+		# Correct consolidate: zero the customer (abnormal) and fold its 569
+		# onto the supplier side. Amount = |abnormal| = 569, NOT |secondary|.
+		# Final state: customer = 0, supplier Cr = 174 + 569 = 743.
 		_post_journal(self.company, self.customer_account, "Customer", self.customer, 0, 569)
 		_post_journal(self.company, self.supplier_account, "Supplier", self.supplier, 0, 174)
 
@@ -319,22 +319,55 @@ class TestCommonPartySquareOff(FrappeTestCase):
 		pair = self._my_pair(compute_linked_party_net_positions(self.company))
 		self.assertIsNotNone(pair, "consolidate pair should be detected")
 		self.assertEqual(pair.get("kind"), "consolidate")
-		self.assertAlmostEqual(pair["square_off_amount"], 174, places=2)
+		# Amount = |abnormal primary| = 569 (customer advance being zeroed).
+		self.assertAlmostEqual(pair["square_off_amount"], 569, places=2)
 
 		jv = square_off_linked_party(pair)
 		self.assertEqual(jv.docstatus, 1)
 
-		# Secondary (supplier) must be zero after the consolidation.
+		# Customer (primary, abnormal) must be zero after consolidation.
+		pri_after = _get_party_signed_balance(
+			"Customer", self.customer, self.customer_account, self.company
+		)
+		self.assertAlmostEqual(pri_after, 0, places=2)
+		# Supplier (secondary, normal) must be Cr (174 + 569) = -743 after absorbing.
+		sec_after = _get_party_signed_balance(
+			"Supplier", self.supplier, self.supplier_account, self.company
+		)
+		self.assertAlmostEqual(sec_after, -743, places=2)
+		# Pair is no longer a candidate — both sides sit naturally (primary 0,
+		# secondary Cr 743 which is the natural direction for Creditors).
+		self.assertIsNone(self._my_pair(compute_linked_party_net_positions(self.company)))
+
+	def test_consolidate_same_sign_dr_balances(self):
+		# Mirror case: both parties carry Dr balances:
+		#   Customer (primary) Debtors Dr 100 = customer receivable = normal
+		#   Supplier (secondary) Creditors Dr 300 = supplier advance = ABNORMAL
+		# Consolidate zeros the supplier (abnormal) and folds its 300 onto
+		# the customer. Amount = |abnormal secondary| = 300.
+		# Final state: supplier = 0, customer Dr = 100 + 300 = 400.
+		_post_journal(self.company, self.customer_account, "Customer", self.customer, 100, 0)
+		_post_journal(self.company, self.supplier_account, "Supplier", self.supplier, 300, 0)
+
+		from business_needed_solutions.bns_branch_accounting.common_party_squareoff import (
+			_get_party_signed_balance,
+		)
+
+		pair = self._my_pair(compute_linked_party_net_positions(self.company))
+		self.assertIsNotNone(pair, "consolidate pair should be detected")
+		self.assertEqual(pair.get("kind"), "consolidate")
+		self.assertAlmostEqual(pair["square_off_amount"], 300, places=2)
+
+		square_off_linked_party(pair)
+
 		sec_after = _get_party_signed_balance(
 			"Supplier", self.supplier, self.supplier_account, self.company
 		)
 		self.assertAlmostEqual(sec_after, 0, places=2)
-		# Primary (customer) must be Cr (569 + 174) = -743 after absorbing.
 		pri_after = _get_party_signed_balance(
 			"Customer", self.customer, self.customer_account, self.company
 		)
-		self.assertAlmostEqual(pri_after, -743, places=2)
-		# The pair should no longer be a candidate (secondary = 0).
+		self.assertAlmostEqual(pri_after, 400, places=2)
 		self.assertIsNone(self._my_pair(compute_linked_party_net_positions(self.company)))
 
 	def test_batch_runner_returns_summary(self):
