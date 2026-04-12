@@ -250,7 +250,12 @@ def get_data(filters=None):
 	# Include orphan/invalid internal PR/PI rows based on linkage rules.
 	internal_purchase_mismatch_data = get_internal_purchase_doc_linkage_mismatches(filters)
 	data.extend(internal_purchase_mismatch_data)
-	
+
+	# Detect asymmetric references: PR has bns_inter_company_reference → DN,
+	# but DN's bns_inter_company_reference is empty.
+	asymmetric_data = get_asymmetric_reference_mismatches(filters)
+	data.extend(asymmetric_data)
+
 	# Sort by posting date descending (handle None values)
 	if data:
 		data.sort(key=lambda x: x.get("posting_date") or today(), reverse=True)
@@ -434,6 +439,79 @@ def get_internal_purchase_doc_linkage_mismatches(filters=None):
 				"item_mismatch_details": "",
 			}
 		)
+
+	return data
+
+
+def get_asymmetric_reference_mismatches(filters=None):
+	"""Find DNs where a submitted PR references the DN but DN has no back-reference.
+
+	This catches cases where PR.bns_inter_company_reference = DN.name but
+	DN.bns_inter_company_reference is NULL/empty — meaning the bidirectional
+	link was never completed.
+	"""
+	filters = frappe._dict(filters or {})
+	conditions = [
+		"pr.docstatus = 1",
+		"pr.is_bns_internal_supplier = 1",
+		"pr.bns_inter_company_reference IS NOT NULL",
+		"pr.bns_inter_company_reference != ''",
+	]
+	values = []
+
+	if filters.get("company"):
+		conditions.append("dn.company = %s")
+		values.append(filters.get("company"))
+	if filters.get("from_date"):
+		conditions.append("dn.posting_date >= %s")
+		values.append(filters.get("from_date"))
+	if filters.get("to_date"):
+		conditions.append("dn.posting_date <= %s")
+		values.append(filters.get("to_date"))
+
+	rows = frappe.db.sql(
+		f"""
+		SELECT
+			dn.name          AS dn_name,
+			dn.posting_date,
+			dn.grand_total,
+			dn.company_address  AS company_address_name,
+			dn.customer_address AS customer_address_name,
+			pr.name          AS pr_name
+		FROM `tabPurchase Receipt` pr
+		JOIN `tabDelivery Note` dn
+			ON dn.name = pr.bns_inter_company_reference
+			AND dn.docstatus = 1
+		WHERE {" AND ".join(conditions)}
+			AND (dn.bns_inter_company_reference IS NULL
+				OR dn.bns_inter_company_reference = '')
+		""",
+		tuple(values),
+		as_dict=True,
+	) or []
+
+	data = []
+	for row in rows:
+		data.append({
+			"posting_date": row.get("posting_date"),
+			"document_type": "Delivery Note",
+			"document_name": row.get("dn_name"),
+			"grand_total": flt(row.get("grand_total") or 0),
+			"company_address_name": row.get("company_address_name") or "",
+			"customer_address_name": row.get("customer_address_name") or "",
+			"missing_document": "DN ↔ PR Back-Reference",
+			"mismatch_reason": (
+				f"PR {row.get('pr_name')} references this DN, "
+				f"but DN has no bns_inter_company_reference back to the PR"
+			),
+			"purchase_receipt": row.get("pr_name"),
+			"purchase_invoice": None,
+			"transfer_chain": "DN->PR",
+			"source_location": "",
+			"purchase_location": "",
+			"location_mismatch": "",
+			"item_mismatch_details": "",
+		})
 
 	return data
 
