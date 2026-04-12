@@ -545,6 +545,133 @@ class BNSDashboard {
 				</div>
 			</div>
 
+			<!-- SRBNB Reconciliation -->
+				<div class="row mt-3">
+					<div class="col-12">
+						<div class="frappe-card" id="section-srbnb-reconciliation">
+							<div class="card-header d-flex justify-content-between align-items-center section-header"
+								 style="cursor: pointer; padding: 12px 15px; background: var(--subtle-bg);"
+								 data-section="srbnb-reconciliation">
+								<h5 class="mb-0">
+									<i class="fa fa-chevron-down section-toggle collapsed" id="toggle-srbnb-reconciliation"></i>
+									<i class="fa fa-warehouse text-muted mr-2"></i>
+									${__("SRBNB Reconciliation")}
+								</h5>
+							</div>
+							<div class="card-body section-content" id="content-srbnb-reconciliation" style="display: none;">
+								<p class="text-muted small mb-3">
+									${__("Stock Received But Not Billed — categorises every GL entry on the SRBNB account into 4 actionable buckets.")}
+								</p>
+
+								<!-- Summary cards row -->
+								<div class="row mb-3" id="srbnb-summary-cards">
+									<div class="col-lg-3 col-6 mb-2">
+										<div class="card text-center p-2" style="cursor:pointer;" data-bucket="open-prs">
+											<small class="text-muted">${__("Open PRs (Liability)")}</small>
+											<div class="font-weight-bold" id="srbnb-total-open-prs">${__("Loading...")}</div>
+											<small class="text-muted" id="srbnb-count-open-prs"></small>
+										</div>
+									</div>
+									<div class="col-lg-3 col-6 mb-2">
+										<div class="card text-center p-2" style="cursor:pointer;" data-bucket="orphan-pi">
+											<small class="text-muted">${__("Orphan PI Debits")}</small>
+											<div class="font-weight-bold" id="srbnb-total-orphan-pi">${__("Loading...")}</div>
+											<small class="text-muted" id="srbnb-count-orphan-pi"></small>
+										</div>
+									</div>
+									<div class="col-lg-3 col-6 mb-2">
+										<div class="card text-center p-2" style="cursor:pointer;" data-bucket="stock-entries">
+											<small class="text-muted">${__("Stock Entries")}</small>
+											<div class="font-weight-bold" id="srbnb-total-stock-entries">${__("Loading...")}</div>
+											<small class="text-muted" id="srbnb-count-stock-entries"></small>
+										</div>
+									</div>
+									<div class="col-lg-3 col-6 mb-2">
+										<div class="card text-center p-2" style="cursor:pointer;" data-bucket="journal-entries">
+											<small class="text-muted">${__("Journal Entries")}</small>
+											<div class="font-weight-bold" id="srbnb-total-journal-entries">${__("Loading...")}</div>
+											<small class="text-muted" id="srbnb-count-journal-entries"></small>
+										</div>
+									</div>
+								</div>
+
+								<!-- Net balance -->
+								<div class="mb-3 d-flex align-items-center" style="gap: 12px;">
+									<span class="text-muted small">${__("SRBNB Net Balance:")}</span>
+									<span class="font-weight-bold" id="srbnb-net-balance">—</span>
+									<span class="text-muted small" id="srbnb-account-name"></span>
+									<span class="text-muted small" id="srbnb-excluded-info"></span>
+								</div>
+
+								<!-- Open PRs bucket -->
+								<div class="sub-section mb-3" id="subsection-srbnb-open-prs">
+									<div class="sub-section-header d-flex justify-content-between align-items-center"
+										 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
+										 data-subsection="srbnb-open-prs">
+										<strong>
+											<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-srbnb-open-prs"></i>
+											${__("Open Purchase Receipts (Real Liability)")}
+											<span class="badge badge-danger ml-2" id="badge-srbnb-open-prs">0</span>
+										</strong>
+									</div>
+									<div class="sub-section-content" id="subcontent-srbnb-open-prs" style="display: none; padding-top: 10px;">
+										<div id="table-srbnb-open-prs"><p class="text-muted">${__("Loading...")}</p></div>
+									</div>
+								</div>
+
+								<!-- Orphan PI Debits bucket -->
+								<div class="sub-section mb-3" id="subsection-srbnb-orphan-pi">
+									<div class="sub-section-header d-flex justify-content-between align-items-center"
+										 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
+										 data-subsection="srbnb-orphan-pi">
+										<strong>
+											<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-srbnb-orphan-pi"></i>
+											${__("Orphan PI Debits (No PR Link)")}
+											<span class="badge badge-warning ml-2" id="badge-srbnb-orphan-pi">0</span>
+										</strong>
+									</div>
+									<div class="sub-section-content" id="subcontent-srbnb-orphan-pi" style="display: none; padding-top: 10px;">
+										<div id="table-srbnb-orphan-pi"><p class="text-muted">${__("Loading...")}</p></div>
+									</div>
+								</div>
+
+								<!-- Stock Entries bucket -->
+								<div class="sub-section mb-3" id="subsection-srbnb-stock-entries">
+									<div class="sub-section-header d-flex justify-content-between align-items-center"
+										 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
+										 data-subsection="srbnb-stock-entries">
+										<strong>
+											<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-srbnb-stock-entries"></i>
+											${__("Stock Entries (Intra-state Transfers)")}
+											<span class="badge badge-info ml-2" id="badge-srbnb-stock-entries">0</span>
+										</strong>
+									</div>
+									<div class="sub-section-content" id="subcontent-srbnb-stock-entries" style="display: none; padding-top: 10px;">
+										<div id="table-srbnb-stock-entries"><p class="text-muted">${__("Loading...")}</p></div>
+									</div>
+								</div>
+
+								<!-- Journal Entries bucket -->
+								<div class="sub-section mb-3" id="subsection-srbnb-journal-entries">
+									<div class="sub-section-header d-flex justify-content-between align-items-center"
+										 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
+										 data-subsection="srbnb-journal-entries">
+										<strong>
+											<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-srbnb-journal-entries"></i>
+											${__("Journal Entries (Manual Adjustments)")}
+											<span class="badge badge-secondary ml-2" id="badge-srbnb-journal-entries">0</span>
+										</strong>
+									</div>
+									<div class="sub-section-content" id="subcontent-srbnb-journal-entries" style="display: none; padding-top: 10px;">
+										<div id="table-srbnb-journal-entries"><p class="text-muted">${__("Loading...")}</p></div>
+									</div>
+								</div>
+
+							</div>
+						</div>
+					</div>
+				</div>
+
 			${this.get_styles()}
 		`);
 
@@ -829,6 +956,26 @@ class BNSDashboard {
 			self.post_historical_backfill();
 		});
 
+		// SRBNB summary card → expand matching sub-section
+		this.wrapper.find("#srbnb-summary-cards [data-bucket]").on("click", function () {
+			const bucket = $(this).data("bucket");
+			const map = {
+				"open-prs": "srbnb-open-prs",
+				"orphan-pi": "srbnb-orphan-pi",
+				"stock-entries": "srbnb-stock-entries",
+				"journal-entries": "srbnb-journal-entries",
+			};
+			const sub = map[bucket];
+			if (sub) {
+				// Ensure parent section is open
+				const content = self.wrapper.find("#content-srbnb-reconciliation");
+				if (!content.is(":visible")) self.toggle_section("srbnb-reconciliation");
+				// Open the sub-section
+				const subContent = self.wrapper.find("#subcontent-" + sub);
+				if (!subContent.is(":visible")) self.toggle_subsection(sub);
+			}
+		});
+
 		this.wrapper.find("#btn-reconcile-preview").on("click", function () {
 			self.preview_payment_reconciliation();
 		});
@@ -893,6 +1040,7 @@ class BNSDashboard {
 			this.load_food_company_addresses(),
 			this.load_unlinked_pan(),
 			this.load_transfer_mismatches(),
+			this.load_srbnb_reconciliation(),
 		]);
 	}
 
@@ -2250,5 +2398,174 @@ class BNSDashboard {
 				}
 			}
 		);
+	}
+
+	// =====================================================================
+	// SRBNB Reconciliation (Stock Received But Not Billed)
+	// =====================================================================
+
+	async load_srbnb_reconciliation() {
+		try {
+			const r = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_srbnb_reconciliation",
+				args: { company: this.get_company() },
+			});
+			const data = r.message || {};
+			if (data.error) {
+				this.wrapper.find("#srbnb-net-balance").text(data.error);
+				return;
+			}
+			this._render_srbnb_data(data);
+		} catch (e) {
+			console.error("SRBNB load failed:", e);
+			this.wrapper.find("#srbnb-net-balance").text(__("Load failed"));
+		}
+	}
+
+	_render_srbnb_data(data) {
+		const b = data.buckets || {};
+		const openPrs = b.open_prs || {};
+		const orphanPi = b.orphan_pi_debits || {};
+		const stockEnt = b.stock_entries || {};
+		const journalEnt = b.journal_entries || {};
+
+		// Summary cards
+		this.wrapper.find("#srbnb-total-open-prs").html(format_currency(openPrs.total || 0));
+		this.wrapper.find("#srbnb-count-open-prs").text(__("{0} entries", [openPrs.count || 0]));
+		this.wrapper.find("#srbnb-total-orphan-pi").html(format_currency(orphanPi.total || 0));
+		this.wrapper.find("#srbnb-count-orphan-pi").text(__("{0} entries", [orphanPi.count || 0]));
+		this.wrapper.find("#srbnb-total-stock-entries").html(format_currency(stockEnt.total || 0));
+		this.wrapper.find("#srbnb-count-stock-entries").text(__("{0} entries", [stockEnt.count || 0]));
+		this.wrapper.find("#srbnb-total-journal-entries").html(format_currency(journalEnt.total || 0));
+		this.wrapper.find("#srbnb-count-journal-entries").text(__("{0} entries", [journalEnt.count || 0]));
+
+		// Badges
+		this.wrapper.find("#badge-srbnb-open-prs").text(openPrs.count || 0);
+		this.wrapper.find("#badge-srbnb-orphan-pi").text(orphanPi.count || 0);
+		this.wrapper.find("#badge-srbnb-stock-entries").text(stockEnt.count || 0);
+		this.wrapper.find("#badge-srbnb-journal-entries").text(journalEnt.count || 0);
+
+		// Net balance + account info
+		this.wrapper.find("#srbnb-net-balance").text(format_currency(data.net_balance || 0));
+		this.wrapper.find("#srbnb-account-name").text(data.account || "");
+		this.wrapper.find("#srbnb-excluded-info").text(
+			__("{0} GL entries total, {1} paired PRs excluded", [data.total_gl_entries || 0, data.paired_prs_excluded || 0])
+		);
+
+		// Drilldown tables
+		this._render_srbnb_open_prs(openPrs.rows || []);
+		this._render_srbnb_orphan_pi(orphanPi.rows || []);
+		this._render_srbnb_stock_entries(stockEnt.rows || []);
+		this._render_srbnb_journal_entries(journalEnt.rows || []);
+	}
+
+	_render_srbnb_open_prs(rows) {
+		const container = this.wrapper.find("#table-srbnb-open-prs");
+		if (!rows.length) {
+			container.html('<p class="text-success small"><i class="fa fa-check"></i> ' + __("No open Purchase Receipts — all paired with submitted PIs.") + '</p>');
+			return;
+		}
+		let html = '<div class="table-responsive"><table class="table table-sm table-bordered" style="font-size:11px;"><thead><tr>';
+		html += '<th><small>' + __("PR") + '</small></th>';
+		html += '<th><small>' + __("Supplier") + '</small></th>';
+		html += '<th><small>' + __("Date") + '</small></th>';
+		html += '<th class="text-right"><small>' + __("Amount") + '</small></th>';
+		html += '<th class="text-center"><small>' + __("Age") + '</small></th>';
+		html += '<th><small>' + __("Action") + '</small></th>';
+		html += '</tr></thead><tbody>';
+		rows.forEach(function (r) {
+			const ageClass = r.age_color === "red" ? "indicator-pill red" : (r.age_color === "amber" ? "indicator-pill orange" : "");
+			html += '<tr>';
+			html += '<td><small><a href="/app/purchase-receipt/' + frappe.utils.escape_html(r.voucher_no) + '" target="_blank">' + frappe.utils.escape_html(r.voucher_no) + '</a></small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(r.supplier || '') + '</small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(r.posting_date || '') + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(r.amount) + '</small></td>';
+			html += '<td class="text-center"><small><span class="' + ageClass + '">' + (r.age_days || 0) + 'd</span></small></td>';
+			html += '<td><small><a href="/app/purchase-invoice/new?supplier=' + encodeURIComponent(r.supplier || '') + '&items=%5B%7B%22purchase_receipt%22%3A%22' + encodeURIComponent(r.voucher_no) + '%22%7D%5D" target="_blank" class="btn btn-xs btn-primary">' + __("Create PI") + '</a></small></td>';
+			html += '</tr>';
+		});
+		html += '</tbody></table></div>';
+		container.html(html);
+	}
+
+	_render_srbnb_orphan_pi(rows) {
+		const container = this.wrapper.find("#table-srbnb-orphan-pi");
+		if (!rows.length) {
+			container.html('<p class="text-success small"><i class="fa fa-check"></i> ' + __("No orphan PI debits.") + '</p>');
+			return;
+		}
+		let html = '<div class="table-responsive"><table class="table table-sm table-bordered" style="font-size:11px;"><thead><tr>';
+		html += '<th><small>' + __("PI") + '</small></th>';
+		html += '<th><small>' + __("Supplier") + '</small></th>';
+		html += '<th><small>' + __("Date") + '</small></th>';
+		html += '<th class="text-right"><small>' + __("Amount") + '</small></th>';
+		html += '</tr></thead><tbody>';
+		rows.forEach(function (r) {
+			html += '<tr>';
+			html += '<td><small><a href="/app/purchase-invoice/' + frappe.utils.escape_html(r.voucher_no) + '" target="_blank">' + frappe.utils.escape_html(r.voucher_no) + '</a></small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(r.supplier || '') + '</small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(r.posting_date || '') + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(r.amount) + '</small></td>';
+			html += '</tr>';
+		});
+		html += '</tbody></table></div>';
+		container.html(html);
+	}
+
+	_render_srbnb_stock_entries(rows) {
+		const container = this.wrapper.find("#table-srbnb-stock-entries");
+		if (!rows.length) {
+			container.html('<p class="text-success small"><i class="fa fa-check"></i> ' + __("No Stock Entry hits on SRBNB.") + '</p>');
+			return;
+		}
+		let html = '<div class="table-responsive"><table class="table table-sm table-bordered" style="font-size:11px;"><thead><tr>';
+		html += '<th><small>' + __("SE") + '</small></th>';
+		html += '<th><small>' + __("Type") + '</small></th>';
+		html += '<th><small>' + __("Date") + '</small></th>';
+		html += '<th class="text-right"><small>' + __("Amount") + '</small></th>';
+		html += '<th><small>' + __("From WH → To WH") + '</small></th>';
+		html += '<th class="text-center"><small>' + __("Same GSTIN?") + '</small></th>';
+		html += '</tr></thead><tbody>';
+		rows.forEach(function (r) {
+			html += '<tr>';
+			html += '<td><small><a href="/app/stock-entry/' + frappe.utils.escape_html(r.voucher_no) + '" target="_blank">' + frappe.utils.escape_html(r.voucher_no) + '</a></small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(r.stock_entry_type || '') + '</small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(r.posting_date || '') + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(r.amount) + '</small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(r.from_warehouse || '') + ' → ' + frappe.utils.escape_html(r.to_warehouse || '') + '</small></td>';
+			html += '<td class="text-center"><small>' + (r.is_same_gstin ? '<span class="indicator-pill green">' + __("Yes") + '</span>' : '<span class="indicator-pill red">' + __("No") + '</span>') + '</small></td>';
+			html += '</tr>';
+		});
+		html += '</tbody></table></div>';
+		container.html(html);
+	}
+
+	_render_srbnb_journal_entries(rows) {
+		const container = this.wrapper.find("#table-srbnb-journal-entries");
+		if (!rows.length) {
+			container.html('<p class="text-success small"><i class="fa fa-check"></i> ' + __("No Journal Entry hits on SRBNB.") + '</p>');
+			return;
+		}
+		let html = '<div class="table-responsive"><table class="table table-sm table-bordered" style="font-size:11px;"><thead><tr>';
+		html += '<th><small>' + __("JE") + '</small></th>';
+		html += '<th><small>' + __("Date") + '</small></th>';
+		html += '<th class="text-right"><small>' + __("Dr") + '</small></th>';
+		html += '<th class="text-right"><small>' + __("Cr") + '</small></th>';
+		html += '<th><small>' + __("Remark") + '</small></th>';
+		html += '<th class="text-center"><small>' + __("Review?") + '</small></th>';
+		html += '</tr></thead><tbody>';
+		rows.forEach(function (r) {
+			const trClass = r.needs_review ? ' style="background: #fff3cd;"' : '';
+			html += '<tr' + trClass + '>';
+			html += '<td><small><a href="/app/journal-entry/' + frappe.utils.escape_html(r.voucher_no) + '" target="_blank">' + frappe.utils.escape_html(r.voucher_no) + '</a></small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(r.posting_date || '') + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(r.debit || 0) + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(r.credit || 0) + '</small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(r.remark || '') + '</small></td>';
+			html += '<td class="text-center"><small>' + (r.needs_review ? '<span class="indicator-pill red">' + __("Review") + '</span>' : '<span class="indicator-pill green">' + __("OK") + '</span>') + '</small></td>';
+			html += '</tr>';
+		});
+		html += '</tbody></table></div>';
+		container.html(html);
 	}
 }

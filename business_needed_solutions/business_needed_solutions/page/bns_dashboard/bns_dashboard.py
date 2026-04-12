@@ -1611,3 +1611,20 @@ def execute_full_squareoff_pipeline(company, as_of_date=None, cost_center=None):
 
 	stamp_reconcile_last_run()
 	return summary
+
+
+# -------------------------------------------------------------------
+# SRBNB Reconciliation (Stock Received But Not Billed)
+# -------------------------------------------------------------------
+
+
+@frappe.whitelist()
+def get_srbnb_reconciliation(company=None):
+	"""Return the 4-bucket SRBNB reconciliation breakdown for the dashboard."""
+	_require_dashboard_read()
+	from business_needed_solutions.bns_branch_accounting.srbnb_reconciliation import (
+		get_srbnb_reconciliation as _get_srbnb,
+	)
+
+	company = company or _default_company()
+	return _get_srbnb(company)
