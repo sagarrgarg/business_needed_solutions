@@ -80,7 +80,9 @@
   "column_break_reconcile",
   "common_party_reconcile_window",
   "common_party_reconcile_scope",
-  "common_party_reconcile_last_run_on"
+  "common_party_reconcile_last_run_on",
+  "srbnb_section",
+  "srbnb_internal_clearing_account"
  ],
  "fields": [
   {
@@ -494,6 +496,18 @@
    "fieldtype": "Datetime",
    "label": "Last Auto Reconciliation Run",
    "read_only": 1
+  },
+  {
+   "fieldname": "srbnb_section",
+   "fieldtype": "Section Break",
+   "label": "SRBNB Internal Transfer Clearing"
+  },
+  {
+   "description": "Account to credit when clearing SRBNB for BNS internal transfers. Defaults to the company's default Cost of Goods Sold account if blank. Common choices: COGS, Expenses Included In Valuation, or a dedicated Internal Transfer Variance account.",
+   "fieldname": "srbnb_internal_clearing_account",
+   "fieldtype": "Link",
+   "label": "Internal Transfer SRBNB Clearing Account",
+   "options": "Account"
   }
  ],
  "index_web_pages_for_search": 1,

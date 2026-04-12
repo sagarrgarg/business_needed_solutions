@@ -117,8 +117,18 @@ def get_srbnb_reconciliation(company: str) -> dict:
 	# ------------------------------------------------------------------
 	today = getdate(nowdate())
 
-	# Bucket: Open PRs (Cr SRBNB not cleared by PI)
+	# ------------------------------------------------------------------
+	# 5a. Identify which unmatched PRs are BNS internal transfers
+	# ------------------------------------------------------------------
+	unmatched_pr_names = [vn for vn in pr_entries if vn not in paired_prs]
+	internal_pr_set = set()
+	if unmatched_pr_names:
+		internal_pr_set = _get_bns_internal_prs(unmatched_pr_names)
+
+	# Bucket: Open PRs (external — Cr SRBNB not cleared by PI, not internal)
 	open_prs_rows = []
+	# Bucket: BNS Internal PRs (separate — clearable via JE to COGS)
+	internal_prs_rows = []
 	for vn, data in pr_entries.items():
 		if vn in paired_prs:
 			continue
@@ -127,15 +137,21 @@ def get_srbnb_reconciliation(company: str) -> dict:
 			continue
 		age_days = (today - getdate(data["posting_date"])).days if data["posting_date"] else 0
 		supplier = _get_pr_supplier(vn)
-		open_prs_rows.append({
+		row = {
 			"voucher_no": vn,
 			"supplier": supplier,
 			"posting_date": str(data["posting_date"]) if data["posting_date"] else "",
 			"amount": amount,
 			"age_days": age_days,
 			"age_color": "red" if age_days > 60 else ("amber" if age_days > 30 else ""),
-		})
+		}
+		if vn in internal_pr_set:
+			row["linked_dn"] = _get_pr_linked_dn(vn)
+			internal_prs_rows.append(row)
+		else:
+			open_prs_rows.append(row)
 	open_prs_rows.sort(key=lambda r: -r["age_days"])
+	internal_prs_rows.sort(key=lambda r: -r["age_days"])
 
 	# Bucket: Orphan PI Debits (Dr SRBNB without PR link)
 	orphan_pi_rows = []
@@ -193,6 +209,11 @@ def get_srbnb_reconciliation(company: str) -> dict:
 		"total_gl_entries": len(gl_rows),
 		"paired_prs_excluded": len(paired_prs),
 		"buckets": {
+			"internal_prs": {
+				"total": sum(r["amount"] for r in internal_prs_rows),
+				"count": len(internal_prs_rows),
+				"rows": internal_prs_rows,
+			},
 			"open_prs": {
 				"total": sum(r["amount"] for r in open_prs_rows),
 				"count": len(open_prs_rows),
@@ -226,6 +247,7 @@ def _empty_result(account, company):
 		"total_gl_entries": 0,
 		"paired_prs_excluded": 0,
 		"buckets": {
+			"internal_prs": dict(empty_bucket),
 			"open_prs": dict(empty_bucket),
 			"orphan_pi_debits": dict(empty_bucket),
 			"stock_entries": dict(empty_bucket),
@@ -277,6 +299,135 @@ def _get_pr_supplier(pr_name: str) -> str:
 
 def _get_pi_supplier(pi_name: str) -> str:
 	return frappe.db.get_value("Purchase Invoice", pi_name, "supplier") or ""
+
+
+def _get_bns_internal_prs(pr_names: list) -> set:
+	"""Return set of PR names that are BNS internal transfers."""
+	if not pr_names:
+		return set()
+	placeholders = ", ".join(["%s"] * len(pr_names))
+	rows = frappe.db.sql(
+		f"""
+		SELECT name FROM `tabPurchase Receipt`
+		WHERE name IN ({placeholders})
+		  AND is_bns_internal_supplier = 1
+		""",
+		tuple(pr_names),
+		as_dict=False,
+	)
+	return {r[0] for r in rows if r[0]}
+
+
+def _get_pr_linked_dn(pr_name: str) -> str:
+	"""Get the linked Delivery Note for a BNS internal PR."""
+	dn = frappe.db.get_value("Purchase Receipt", pr_name, "bns_inter_company_reference")
+	return dn or ""
+
+
+def build_internal_srbnb_clearing_je(
+	company: str,
+	pr_names: list,
+	posting_date: str | None = None,
+	submit: bool = False,
+) -> dict:
+	"""Build (and optionally submit) a Journal Entry that clears the SRBNB
+	liability for BNS internal Purchase Receipts.
+
+	JE legs:
+	  Dr SRBNB (reduces liability) = sum of internal PR credits on SRBNB
+	  Cr Clearing Account (COGS or configured account)
+
+	Returns: {"journal_entry": JE name, "amount": total, "pr_count": N}
+	         or {"error": reason}
+	"""
+	import erpnext
+
+	if not pr_names:
+		return {"error": "No Purchase Receipt names provided"}
+
+	srbnb_account = frappe.db.get_value("Company", company, "stock_received_but_not_billed")
+	if not srbnb_account:
+		return {"error": f"No SRBNB account configured for {company}"}
+
+	# Clearing account: from BNS Settings, or fall back to default COGS
+	clearing_account = frappe.db.get_single_value("BNS Settings", "srbnb_internal_clearing_account")
+	if not clearing_account:
+		clearing_account = frappe.db.get_value(
+			"Company", company, "default_expense_account"
+		)
+	if not clearing_account:
+		# Last resort: find any COGS-type account for the company
+		clearing_account = frappe.db.get_value(
+			"Account",
+			{"company": company, "account_name": ("like", "%Cost of Goods Sold%"), "is_group": 0},
+			"name",
+		)
+	if not clearing_account:
+		return {"error": "No clearing account found. Set 'Internal Transfer SRBNB Clearing Account' in BNS Settings."}
+
+	# Compute total SRBNB credit for these PRs
+	placeholders = ", ".join(["%s"] * len(pr_names))
+	rows = frappe.db.sql(
+		f"""
+		SELECT SUM(credit) - SUM(debit) AS net_credit
+		FROM `tabGL Entry`
+		WHERE account = %s
+		  AND company = %s
+		  AND is_cancelled = 0
+		  AND voucher_type = 'Purchase Receipt'
+		  AND voucher_no IN ({placeholders})
+		""",
+		[srbnb_account, company] + list(pr_names),
+		as_dict=True,
+	)
+	total = flt(rows[0].net_credit) if rows and rows[0].net_credit else 0
+	if total <= 0.01:
+		return {"error": "No SRBNB credit balance found for the selected PRs"}
+
+	posting_date = getdate(posting_date or nowdate())
+	cost_center = erpnext.get_default_cost_center(company)
+
+	jv = frappe.new_doc("Journal Entry")
+	jv.voucher_type = "Journal Entry"
+	jv.posting_date = posting_date
+	jv.company = company
+	jv.is_system_generated = 1
+	jv.user_remark = (
+		f"BNS Internal Transfer SRBNB clearing: "
+		f"{len(pr_names)} PRs, {frappe.utils.fmt_money(total, currency=erpnext.get_company_currency(company))}"
+	)
+
+	# Leg 1: Dr SRBNB (reduce liability)
+	jv.append("accounts", {
+		"account": srbnb_account,
+		"debit_in_account_currency": total,
+		"debit": total,
+		"credit_in_account_currency": 0,
+		"credit": 0,
+		"cost_center": cost_center,
+	})
+	# Leg 2: Cr Clearing Account (recognize cost)
+	jv.append("accounts", {
+		"account": clearing_account,
+		"debit_in_account_currency": 0,
+		"debit": 0,
+		"credit_in_account_currency": total,
+		"credit": total,
+		"cost_center": cost_center,
+	})
+
+	jv.flags.ignore_permissions = True
+	jv.save()
+	if submit:
+		jv.submit()
+
+	return {
+		"journal_entry": jv.name,
+		"amount": total,
+		"pr_count": len(pr_names),
+		"clearing_account": clearing_account,
+		"submitted": bool(submit),
+	}
 
 
 def _get_stock_entry_info(se_name: str) -> dict:

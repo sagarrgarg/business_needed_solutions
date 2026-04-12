@@ -1628,3 +1628,25 @@ def get_srbnb_reconciliation(company=None):
 
 	company = company or _default_company()
 	return _get_srbnb(company)
+
+
+@frappe.whitelist()
+def clear_internal_srbnb(company, pr_names, posting_date=None):
+	"""Post a JE that clears SRBNB for selected BNS internal Purchase Receipts.
+	Dr SRBNB / Cr Clearing Account (configurable in BNS Settings, default COGS)."""
+	_require_dashboard_write("Journal Entry")
+	from business_needed_solutions.bns_branch_accounting.srbnb_reconciliation import (
+		build_internal_srbnb_clearing_je,
+	)
+
+	if isinstance(pr_names, str):
+		pr_names = frappe.parse_json(pr_names) or []
+	if not pr_names:
+		frappe.throw(_("Select at least one internal Purchase Receipt"))
+	company = company or _default_company()
+	return build_internal_srbnb_clearing_je(
+		company=company,
+		pr_names=pr_names,
+		posting_date=posting_date,
+		submit=False,  # Never auto-submit — user reviews and posts manually
+	)

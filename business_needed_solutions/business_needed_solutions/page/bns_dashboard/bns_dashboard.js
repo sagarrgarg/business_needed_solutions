@@ -565,28 +565,35 @@ class BNSDashboard {
 
 								<!-- Summary cards row -->
 								<div class="row mb-3" id="srbnb-summary-cards">
-									<div class="col-lg-3 col-6 mb-2">
+									<div class="col mb-2">
+										<div class="card text-center p-2" style="cursor:pointer;" data-bucket="internal-prs">
+											<small class="text-muted">${__("BNS Internal PRs")}</small>
+											<div class="font-weight-bold text-info" id="srbnb-total-internal-prs">${__("Loading...")}</div>
+											<small class="text-muted" id="srbnb-count-internal-prs"></small>
+										</div>
+									</div>
+									<div class="col mb-2">
 										<div class="card text-center p-2" style="cursor:pointer;" data-bucket="open-prs">
 											<small class="text-muted">${__("Open PRs (Liability)")}</small>
 											<div class="font-weight-bold" id="srbnb-total-open-prs">${__("Loading...")}</div>
 											<small class="text-muted" id="srbnb-count-open-prs"></small>
 										</div>
 									</div>
-									<div class="col-lg-3 col-6 mb-2">
+									<div class="col mb-2">
 										<div class="card text-center p-2" style="cursor:pointer;" data-bucket="orphan-pi">
 											<small class="text-muted">${__("Orphan PI Debits")}</small>
 											<div class="font-weight-bold" id="srbnb-total-orphan-pi">${__("Loading...")}</div>
 											<small class="text-muted" id="srbnb-count-orphan-pi"></small>
 										</div>
 									</div>
-									<div class="col-lg-3 col-6 mb-2">
+									<div class="col mb-2">
 										<div class="card text-center p-2" style="cursor:pointer;" data-bucket="stock-entries">
 											<small class="text-muted">${__("Stock Entries")}</small>
 											<div class="font-weight-bold" id="srbnb-total-stock-entries">${__("Loading...")}</div>
 											<small class="text-muted" id="srbnb-count-stock-entries"></small>
 										</div>
 									</div>
-									<div class="col-lg-3 col-6 mb-2">
+									<div class="col mb-2">
 										<div class="card text-center p-2" style="cursor:pointer;" data-bucket="journal-entries">
 											<small class="text-muted">${__("Journal Entries")}</small>
 											<div class="font-weight-bold" id="srbnb-total-journal-entries">${__("Loading...")}</div>
@@ -601,6 +608,32 @@ class BNSDashboard {
 									<span class="font-weight-bold" id="srbnb-net-balance">—</span>
 									<span class="text-muted small" id="srbnb-account-name"></span>
 									<span class="text-muted small" id="srbnb-excluded-info"></span>
+								</div>
+
+								<!-- BNS Internal PRs bucket -->
+								<div class="sub-section mb-3" id="subsection-srbnb-internal-prs">
+									<div class="sub-section-header d-flex justify-content-between align-items-center"
+										 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
+										 data-subsection="srbnb-internal-prs">
+										<strong>
+											<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-srbnb-internal-prs"></i>
+											${__("BNS Internal PRs (Clear SRBNB → COGS)")}
+											<span class="badge badge-info ml-2" id="badge-srbnb-internal-prs">0</span>
+										</strong>
+									</div>
+									<div class="sub-section-content" id="subcontent-srbnb-internal-prs" style="display: none; padding-top: 10px;">
+										<p class="text-muted small mb-2">
+											${__("Internal transfers between own warehouses. SRBNB liability can be cleared via a Journal Entry: Dr SRBNB / Cr Clearing Account (configurable in BNS Settings, default COGS).")}
+										</p>
+										<div class="d-flex flex-wrap align-items-center mb-2" style="gap: 8px;">
+											<label class="small mb-0">${__("JE Posting Date:")}</label>
+											<input type="date" class="form-control form-control-sm" id="srbnb-internal-je-date" style="max-width: 160px;">
+											<button class="btn btn-warning btn-xs" id="btn-srbnb-clear-internal" disabled>
+												<i class="fa fa-bolt"></i> ${__("Post Clearing JE (Draft)")}
+											</button>
+										</div>
+										<div id="table-srbnb-internal-prs"><p class="text-muted">${__("Loading...")}</p></div>
+									</div>
 								</div>
 
 								<!-- Open PRs bucket -->
@@ -956,10 +989,16 @@ class BNSDashboard {
 			self.post_historical_backfill();
 		});
 
+		// SRBNB clear internal PRs button
+		this.wrapper.find("#btn-srbnb-clear-internal").on("click", function () {
+			self.clear_internal_srbnb();
+		});
+
 		// SRBNB summary card → expand matching sub-section
 		this.wrapper.find("#srbnb-summary-cards [data-bucket]").on("click", function () {
 			const bucket = $(this).data("bucket");
 			const map = {
+				"internal-prs": "srbnb-internal-prs",
 				"open-prs": "srbnb-open-prs",
 				"orphan-pi": "srbnb-orphan-pi",
 				"stock-entries": "srbnb-stock-entries",
@@ -2424,12 +2463,15 @@ class BNSDashboard {
 
 	_render_srbnb_data(data) {
 		const b = data.buckets || {};
+		const internalPrs = b.internal_prs || {};
 		const openPrs = b.open_prs || {};
 		const orphanPi = b.orphan_pi_debits || {};
 		const stockEnt = b.stock_entries || {};
 		const journalEnt = b.journal_entries || {};
 
 		// Summary cards
+		this.wrapper.find("#srbnb-total-internal-prs").html(format_currency(internalPrs.total || 0));
+		this.wrapper.find("#srbnb-count-internal-prs").text(__("{0} entries", [internalPrs.count || 0]));
 		this.wrapper.find("#srbnb-total-open-prs").html(format_currency(openPrs.total || 0));
 		this.wrapper.find("#srbnb-count-open-prs").text(__("{0} entries", [openPrs.count || 0]));
 		this.wrapper.find("#srbnb-total-orphan-pi").html(format_currency(orphanPi.total || 0));
@@ -2440,6 +2482,7 @@ class BNSDashboard {
 		this.wrapper.find("#srbnb-count-journal-entries").text(__("{0} entries", [journalEnt.count || 0]));
 
 		// Badges
+		this.wrapper.find("#badge-srbnb-internal-prs").text(internalPrs.count || 0);
 		this.wrapper.find("#badge-srbnb-open-prs").text(openPrs.count || 0);
 		this.wrapper.find("#badge-srbnb-orphan-pi").text(orphanPi.count || 0);
 		this.wrapper.find("#badge-srbnb-stock-entries").text(stockEnt.count || 0);
@@ -2453,10 +2496,90 @@ class BNSDashboard {
 		);
 
 		// Drilldown tables
+		this._render_srbnb_internal_prs(internalPrs.rows || []);
 		this._render_srbnb_open_prs(openPrs.rows || []);
 		this._render_srbnb_orphan_pi(orphanPi.rows || []);
 		this._render_srbnb_stock_entries(stockEnt.rows || []);
 		this._render_srbnb_journal_entries(journalEnt.rows || []);
+	}
+
+	_render_srbnb_internal_prs(rows) {
+		const container = this.wrapper.find("#table-srbnb-internal-prs");
+		if (!rows.length) {
+			container.html('<p class="text-success small"><i class="fa fa-check"></i> ' + __("No BNS internal PRs on SRBNB.") + '</p>');
+			this.wrapper.find("#btn-srbnb-clear-internal").prop("disabled", true);
+			return;
+		}
+		const chkClass = "srbnb-internal-chk";
+		let html = '<div class="table-responsive"><table class="table table-sm table-bordered" style="font-size:11px;"><thead><tr>';
+		html += '<th style="width:26px;"><input type="checkbox" class="' + chkClass + '-all" checked></th>';
+		html += '<th><small>' + __("PR") + '</small></th>';
+		html += '<th><small>' + __("Linked DN") + '</small></th>';
+		html += '<th><small>' + __("Supplier") + '</small></th>';
+		html += '<th><small>' + __("Date") + '</small></th>';
+		html += '<th class="text-right"><small>' + __("SRBNB Amount") + '</small></th>';
+		html += '<th class="text-center"><small>' + __("Age") + '</small></th>';
+		html += '</tr></thead><tbody>';
+		rows.forEach(function (r) {
+			const ageClass = r.age_color === "red" ? "indicator-pill red" : (r.age_color === "amber" ? "indicator-pill orange" : "");
+			html += '<tr>';
+			html += '<td><input type="checkbox" class="' + chkClass + '" data-pr="' + frappe.utils.escape_html(r.voucher_no) + '" checked></td>';
+			html += '<td><small><a href="/app/purchase-receipt/' + frappe.utils.escape_html(r.voucher_no) + '" target="_blank">' + frappe.utils.escape_html(r.voucher_no) + '</a></small></td>';
+			const dn = r.linked_dn || '';
+			html += '<td><small>' + (dn ? '<a href="/app/delivery-note/' + frappe.utils.escape_html(dn) + '" target="_blank">' + frappe.utils.escape_html(dn) + '</a>' : '<span class="text-muted">&mdash;</span>') + '</small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(r.supplier || '') + '</small></td>';
+			html += '<td><small>' + frappe.utils.escape_html(r.posting_date || '') + '</small></td>';
+			html += '<td class="text-right"><small>' + format_currency(r.amount) + '</small></td>';
+			html += '<td class="text-center"><small><span class="' + ageClass + '">' + (r.age_days || 0) + 'd</span></small></td>';
+			html += '</tr>';
+		});
+		html += '</tbody></table></div>';
+		container.html(html);
+		container.find("." + chkClass + "-all").on("change", function () {
+			container.find("." + chkClass).prop("checked", $(this).is(":checked"));
+		});
+		this.wrapper.find("#btn-srbnb-clear-internal").prop("disabled", false);
+	}
+
+	async clear_internal_srbnb() {
+		const company = this.get_company();
+		if (!company) return;
+		const pr_names = [];
+		this.wrapper.find("#table-srbnb-internal-prs .srbnb-internal-chk:checked").each(function () {
+			pr_names.push($(this).data("pr"));
+		});
+		if (!pr_names.length) {
+			frappe.msgprint(__("Select at least one internal PR."));
+			return;
+		}
+		const posting_date = this.wrapper.find("#srbnb-internal-je-date").val() || frappe.datetime.get_today();
+		frappe.confirm(
+			__("Create a draft Journal Entry to clear SRBNB for {0} internal PRs dated {1}?<br><br>Dr SRBNB / Cr Clearing Account (from BNS Settings). The JE will be saved as Draft — review and submit manually.", [pr_names.length, posting_date]),
+			async () => {
+				try {
+					const r = await frappe.call({
+						method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.clear_internal_srbnb",
+						args: { company: company, pr_names: pr_names, posting_date: posting_date },
+						freeze: true,
+						freeze_message: __("Creating clearing JE..."),
+					});
+					const res = r.message || {};
+					if (res.error) {
+						frappe.msgprint({ title: __("Error"), message: res.error, indicator: "red" });
+						return;
+					}
+					frappe.msgprint({
+						title: __("Clearing JE Created (Draft)"),
+						message: __("Journal Entry <a href='/app/journal-entry/{0}' target='_blank'><b>{0}</b></a> created for {1} — Dr SRBNB / Cr {2}. Review and submit manually.",
+							[res.journal_entry, format_currency(res.amount), res.clearing_account]),
+						indicator: "green",
+					});
+					this.load_srbnb_reconciliation();
+				} catch (e) {
+					frappe.msgprint(__("Failed: {0}", [e.message || e]));
+				}
+			}
+		);
 	}
 
 	_render_srbnb_open_prs(rows) {
