@@ -207,11 +207,16 @@ def classify_invoice(inv, tax_rows, issue_filter):
             rows.append(_row(inv, ISSUE_POS_MISMATCH, total_gst))
 
     # 2. Tax Type vs POS Mismatch
-    if ISSUE_TAX_TYPE_MISMATCH in issue_filter and tax_rows:
-        pos_is_same_state = pos_state == company_state
-        if pos_is_same_state and igst_amount:
+    # For purchases, inter/intra-state is determined by supplier state vs company state.
+    # IGST is correct when supplier and company are in different states.
+    # CGST+SGST is correct when supplier and company are in the same state.
+    if ISSUE_TAX_TYPE_MISMATCH in issue_filter and tax_rows and supplier_state and company_state:
+        is_intra_state = supplier_state == company_state
+        if is_intra_state and igst_amount:
+            # Same-state parties but IGST used — should be CGST+SGST
             rows.append(_row(inv, ISSUE_TAX_TYPE_MISMATCH, igst_amount))
-        elif not pos_is_same_state and cgst_sgst_amount:
+        elif not is_intra_state and cgst_sgst_amount and not igst_amount:
+            # Inter-state parties but only CGST+SGST used — should be IGST
             rows.append(_row(inv, ISSUE_TAX_TYPE_MISMATCH, cgst_sgst_amount))
 
     # 3. ITC Expensed — PoS rules
