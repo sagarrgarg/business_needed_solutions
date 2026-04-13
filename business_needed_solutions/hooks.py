@@ -33,6 +33,7 @@ app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=
                   "/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=38",
                   "/assets/business_needed_solutions/js/direct_print.js?v=49",
                   "/assets/business_needed_solutions/js/item.js",
+                  "/assets/business_needed_solutions/js/pan_gstin_mismatch_banner.js?v=1",
                 ]
 
 # include js, css files in header of web template

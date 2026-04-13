@@ -67,6 +67,37 @@
   {
    "hidden": 0,
    "is_query_report": 0,
+   "label": "GST & Compliance",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "GST ITC Health Check",
+   "link_count": 0,
+   "link_to": "GST ITC Health Check",
+   "link_type": "Report",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Unlinked Customer-Supplier by PAN",
+   "link_count": 0,
+   "link_to": "Unlinked Customer-Supplier by PAN",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
    "label": "Accounting Reports",
    "link_count": 0,
    "link_type": "DocType",
@@ -113,17 +144,6 @@
    "label": "Pure Accounts Payable Summary",
    "link_count": 0,
    "link_to": "Pure Accounts Payable Summary",
-   "link_type": "Report",
-   "onboard": 0,
-   "type": "Link"
-  },
-  {
-   "dependencies": "",
-   "hidden": 0,
-   "is_query_report": 1,
-   "label": "Unlinked Customer-Supplier by PAN",
-   "link_count": 0,
-   "link_to": "Unlinked Customer-Supplier by PAN",
    "link_type": "Report",
    "onboard": 0,
    "type": "Link"
