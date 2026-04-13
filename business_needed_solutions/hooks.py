@@ -433,6 +433,9 @@ after_migrate = "business_needed_solutions.bns_branch_accounting.migration.after
 # get_value_filters_fix is handled via override_whitelisted_methods.
 _global_runtime_patches = [
 	"business_needed_solutions.bns_branch_accounting.utils.apply_bns_runtime_patches",
+	# Temporary: fix Purchase Register tax doubling when PI name = PR name
+	# Remove when ERPNext merges upstream fix
+	"business_needed_solutions.business_needed_solutions.overrides.purchase_register_fix.apply_purchase_register_fix",
 ]
 before_request = _global_runtime_patches
 before_job = _global_runtime_patches
