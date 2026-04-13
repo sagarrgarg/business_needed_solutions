@@ -4174,7 +4174,7 @@ def make_bns_internal_purchase_receipt(source_name: str, target_doc: Optional[Di
         BNSValidationError: If validation fails
         BNSInternalTransferError: If internal transfer setup fails
     """
-    _bns_require_accounts_write()
+    _bns_require_accounts_read()
     try:
         dn = frappe.get_doc("Delivery Note", source_name, for_update=True)
 
@@ -5880,7 +5880,7 @@ def make_bns_internal_purchase_invoice(source_name: str, target_doc: Optional[Di
         BNSValidationError: If validation fails
         BNSInternalTransferError: If internal transfer setup fails
     """
-    _bns_require_accounts_write()
+    _bns_require_accounts_read()
     try:
         si = frappe.get_doc("Sales Invoice", source_name, for_update=True)
 
@@ -6201,7 +6201,7 @@ def make_bns_internal_purchase_receipt_from_si(source_name: str, target_doc: Opt
         BNSValidationError: If validation fails
         BNSInternalTransferError: If internal transfer setup fails
     """
-    _bns_require_accounts_write()
+    _bns_require_accounts_read()
     try:
         si = frappe.get_doc("Sales Invoice", source_name)
 
@@ -6922,7 +6922,7 @@ def convert_sales_invoice_to_bns_internal(sales_invoice: str, purchase_invoice: 
     Raises:
         BNSValidationError: If validation fails
     """
-    _bns_require_accounts_write()
+    _bns_require_accounts_read()
     try:
         # Get Sales Invoice
         si = frappe.get_doc("Sales Invoice", sales_invoice)
@@ -7082,7 +7082,7 @@ def convert_purchase_invoice_to_bns_internal(purchase_invoice: str, sales_invoic
     Raises:
         BNSValidationError: If validation fails
     """
-    _bns_require_accounts_write()
+    _bns_require_accounts_read()
     try:
         pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
 
@@ -7332,7 +7332,7 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
     Raises:
         BNSValidationError: If validation fails
     """
-    _bns_require_accounts_write()
+    _bns_require_accounts_read()
     try:
         # Get Delivery Note
         dn = frappe.get_doc("Delivery Note", delivery_note)
@@ -7508,7 +7508,7 @@ def convert_purchase_receipt_to_bns_internal(purchase_receipt: str, delivery_not
     Raises:
         BNSValidationError: If validation fails
     """
-    _bns_require_accounts_write()
+    _bns_require_accounts_read()
     try:
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
 
@@ -8064,7 +8064,7 @@ def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
     Returns:
         Dict: Result with success message
     """
-    _bns_require_accounts_write()
+    _bns_require_accounts_read()
     try:
         dn = frappe.get_doc("Delivery Note", delivery_note, for_update=True)
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt, for_update=True)
@@ -8232,7 +8232,7 @@ def unlink_dn_pr(delivery_note: str = None, purchase_receipt: str = None) -> Dic
     Returns:
         Dict: Result with success message
     """
-    _bns_require_accounts_write()
+    _bns_require_accounts_read()
     try:
         _enforce_unlink_recovery_permission("unlink_dn_pr")
         _audit_unlink_action(
@@ -8337,7 +8337,7 @@ def link_si_pr(sales_invoice: str, purchase_receipt: str) -> Dict:
     Returns:
         Dict: Result with success message
     """
-    _bns_require_accounts_write()
+    _bns_require_accounts_read()
     try:
         si = frappe.get_doc("Sales Invoice", sales_invoice)
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
@@ -8412,7 +8412,7 @@ def unlink_si_pr(sales_invoice: str = None, purchase_receipt: str = None) -> Dic
     Returns:
         Dict: Result with success message
     """
-    _bns_require_accounts_write()
+    _bns_require_accounts_read()
     try:
         _enforce_unlink_recovery_permission("unlink_si_pr")
         _audit_unlink_action(
@@ -8481,7 +8481,7 @@ def link_si_pi(sales_invoice: str, purchase_invoice: str) -> Dict:
     Returns:
         Dict: Result with success message
     """
-    _bns_require_accounts_write()
+    _bns_require_accounts_read()
     try:
         si = frappe.get_doc("Sales Invoice", sales_invoice, for_update=True)
         pi = frappe.get_doc("Purchase Invoice", purchase_invoice, for_update=True)
@@ -8618,7 +8618,7 @@ def unlink_si_pi(sales_invoice: str = None, purchase_invoice: str = None) -> Dic
     Returns:
         Dict: Result with success message
     """
-    _bns_require_accounts_write()
+    _bns_require_accounts_read()
     try:
         _enforce_unlink_recovery_permission("unlink_si_pi")
         _audit_unlink_action(
