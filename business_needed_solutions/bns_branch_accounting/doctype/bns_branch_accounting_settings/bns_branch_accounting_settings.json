@@ -162,6 +162,14 @@
   {
    "read": 1,
    "role": "Accounts Manager"
+  },
+  {
+   "read": 1,
+   "role": "Accounts User"
+  },
+  {
+   "read": 1,
+   "role": "Purchase User"
   }
  ],
  "sort_field": "modified",
