@@ -35,6 +35,7 @@
   "negative_stock_override_roles",
   "purchase_attachment_section",
   "enforce_purchase_document_attachments",
+  "purchase_attachment_cutoff_date",
 
   "tab_break_manufacturing",
   "manufacturing_section",
@@ -247,6 +248,13 @@
    "fieldname": "enforce_purchase_document_attachments",
    "fieldtype": "Check",
    "label": "Enforce Purchase Document Attachments"
+  },
+  {
+   "depends_on": "eval:doc.enforce_purchase_document_attachments",
+   "description": "Attachment enforcement only applies to Purchase Receipts and Purchase Invoices with a posting date ON or AFTER this date. Documents posted before this date are exempt. Leave blank to enforce on all dates.",
+   "fieldname": "purchase_attachment_cutoff_date",
+   "fieldtype": "Date",
+   "label": "Enforce Attachments From Date"
   },
   {
    "fieldname": "tab_break_manufacturing",

@@ -38,6 +38,9 @@ def validate_purchase_attachments(doc, method: Optional[str] = None) -> None:
     if not _is_attachment_validation_enabled():
         return
 
+    if _is_before_attachment_cutoff(doc):
+        return
+
     if doc.get("is_return"):
         return
 
@@ -67,6 +70,22 @@ def _is_attachment_validation_enabled() -> bool:
         return bool(cint(
             frappe.db.get_single_value("BNS Settings", "enforce_purchase_document_attachments")
         ))
+    except Exception:
+        return False
+
+
+def _is_before_attachment_cutoff(doc) -> bool:
+    """Return True if the document's posting date is BEFORE the cutoff date,
+    meaning it is exempt from attachment enforcement."""
+    try:
+        cutoff = frappe.db.get_single_value("BNS Settings", "purchase_attachment_cutoff_date")
+        if not cutoff:
+            return False  # No cutoff → enforce on all dates
+        posting_date = doc.get("posting_date")
+        if not posting_date:
+            return False  # No posting date → enforce (safer default)
+        from frappe.utils import getdate
+        return getdate(posting_date) < getdate(cutoff)
     except Exception:
         return False
 
