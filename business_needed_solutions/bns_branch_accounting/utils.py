@@ -6967,7 +6967,8 @@ def convert_sales_invoice_to_bns_internal(sales_invoice: str, purchase_invoice: 
                 raise BNSValidationError(_("Purchase Invoice {0} must be submitted before linking").format(purchase_invoice))
             
             # Validate items, quantities, rates, totals, and taxes (comprehensive check for auto-linking)
-            validation_result = validate_si_pi_items_match(si.name, pi.name, check_all=True)
+            amount_tolerance = flt(frappe.db.get_single_value("BNS Branch Accounting Settings", "si_pi_amount_tolerance") or 0)
+            validation_result = validate_si_pi_items_match(si.name, pi.name, check_all=True, amount_tolerance=amount_tolerance)
             if not validation_result.get("match"):
                 missing = validation_result.get("missing_items", [])
                 qty_mismatches = validation_result.get("qty_mismatches", [])
@@ -7129,9 +7130,10 @@ def convert_purchase_invoice_to_bns_internal(purchase_invoice: str, sales_invoic
             # Validate SI is submitted
             if si.docstatus != 1:
                 raise BNSValidationError(_("Sales Invoice {0} must be submitted before linking").format(sales_invoice))
-            
+
             # Validate items, quantities, rates, totals, and taxes (comprehensive check for auto-linking)
-            validation_result = validate_si_pi_items_match(si.name, pi.name, check_all=True)
+            amount_tolerance = flt(frappe.db.get_single_value("BNS Branch Accounting Settings", "si_pi_amount_tolerance") or 0)
+            validation_result = validate_si_pi_items_match(si.name, pi.name, check_all=True, amount_tolerance=amount_tolerance)
             if not validation_result.get("match"):
                 missing = validation_result.get("missing_items", [])
                 qty_mismatches = validation_result.get("qty_mismatches", [])
