@@ -496,6 +496,18 @@ def execute(filters=None):
 								- flt(sec_row.get(fieldname, 0.0))
 							)
 		
+		# For Party Link-netted parties: if the outstanding flipped negative
+		# (i.e. AP side dominates), skip from AR — it belongs in AP report only.
+		# This mirrors the common-party logic at line 406 where net_balance <= 0
+		# routes the party to the Payable report.
+		is_party_link_netted = (
+			not is_common_party
+			and (party in skip_set or party in primary_map)
+			and updated_row.get("secondary_party")
+		)
+		if is_party_link_netted and flt(updated_row.get("outstanding", 0.0)) < -0.009:
+			continue
+
 		# Include parties with a non-zero outstanding (positive = receivable,
 		# negative = customer advance / overpayment — matches native AR Summary).
 		# Why: common parties with net <= 0 are already routed to Payable earlier
