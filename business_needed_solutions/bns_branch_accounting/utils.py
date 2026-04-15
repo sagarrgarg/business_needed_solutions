@@ -6966,92 +6966,81 @@ def convert_sales_invoice_to_bns_internal(sales_invoice: str, purchase_invoice: 
             if pi.docstatus != 1:
                 raise BNSValidationError(_("Purchase Invoice {0} must be submitted before linking").format(purchase_invoice))
             
-            # Validate items, quantities, rates, totals, and taxes (comprehensive check for auto-linking)
+            # Validate items, quantities, rates, totals, and taxes
             amount_tolerance = flt(frappe.db.get_single_value("BNS Branch Accounting Settings", "si_pi_amount_tolerance") or 0)
             validation_result = validate_si_pi_items_match(si.name, pi.name, check_all=True, amount_tolerance=amount_tolerance)
             if not validation_result.get("match"):
-                missing = validation_result.get("missing_items", [])
-                qty_mismatches = validation_result.get("qty_mismatches", [])
-                taxable_value_mismatches = validation_result.get("taxable_value_mismatches", [])
-                grand_total_mismatch = validation_result.get("grand_total_mismatch")
-                tax_mismatch = validation_result.get("tax_mismatch")
-                errors = []
-                if missing:
-                    for item in missing[:3]:  # Show first 3
-                        errors.append(_("Item {0}: SI has {1}, PI missing").format(item["item_code"], item["si_qty"]))
-                if qty_mismatches:
-                    for item in qty_mismatches[:3]:  # Show first 3
-                        errors.append(_("Item {0}: SI has {1}, PI has {2}").format(item["item_code"], item["si_qty"], item["pi_qty"]))
-                if taxable_value_mismatches:
-                    for item in taxable_value_mismatches[:3]:  # Show first 3
-                        errors.append(_("Item {0}: SI Taxable Value ₹{1:.2f}, PI Taxable Value ₹{2:.2f}").format(
-                            item["item_code"], item["si_taxable_value"], item["pi_taxable_value"]
-                        ))
-                if grand_total_mismatch:
-                    errors.append(_("Grand Total: SI ₹{0:.2f} vs PI ₹{1:.2f} (Diff: ₹{2:.2f})").format(
-                        grand_total_mismatch["si_total"], grand_total_mismatch["pi_total"], abs(grand_total_mismatch["diff"])
-                    ))
-                if tax_mismatch:
-                    errors.append(_("Total Taxes and Charges: SI ₹{0:.2f} vs PI ₹{1:.2f} (Diff: ₹{2:.2f})").format(
-                        tax_mismatch["si_tax"], tax_mismatch["pi_tax"], abs(tax_mismatch["diff"])
-                    ))
-                
-                if len(missing) > 3 or len(qty_mismatches) > 3 or len(taxable_value_mismatches) > 3:
-                    errors.append(_("... and more mismatches"))
-                raise BNSValidationError(_("Items, quantities, taxable values, totals, or taxes do not match: {0}").format("; ".join(errors)))
-            
-            # Get representing companies for validation
-            si_customer_company = frappe.db.get_value("Customer", si.customer, "bns_represents_company")
-            pi_supplier_company = None
-            if pi.supplier:
-                pi_supplier_company = frappe.db.get_value("Supplier", pi.supplier, "bns_represents_company")
-                if not pi_supplier_company:
+                # Mismatch found — still convert (status already set above),
+                # but skip linking so it surfaces in the mismatch report.
+                mismatch_details = []
+                for item in validation_result.get("missing_items", [])[:3]:
+                    mismatch_details.append(_("Item {0}: SI has {1}, PI missing").format(item["item_code"], item["si_qty"]))
+                for item in validation_result.get("qty_mismatches", [])[:3]:
+                    mismatch_details.append(_("Item {0}: SI has {1}, PI has {2}").format(item["item_code"], item["si_qty"], item["pi_qty"]))
+                gt = validation_result.get("grand_total_mismatch")
+                if gt:
+                    mismatch_details.append(_("Grand Total diff: ₹{0:.2f}").format(abs(gt["diff"])))
+
+                warning = _("Converted to BNS Internally Transferred but PI {0} not linked (mismatch: {1}). Check Internal Transfer Mismatch report.").format(
+                    pi.name, "; ".join(mismatch_details) or _("validation failed")
+                )
+                frappe.msgprint(warning, indicator="orange", title=_("Converted with Mismatch"))
+                result["warning"] = warning
+                result["purchase_invoice_found"] = pi.name
+            else:
+                # Validation passed — proceed to link
+                # Get representing companies for validation
+                si_customer_company = frappe.db.get_value("Customer", si.customer, "bns_represents_company")
+                pi_supplier_company = None
+                if pi.supplier:
+                    pi_supplier_company = frappe.db.get_value("Supplier", pi.supplier, "bns_represents_company")
+                    if not pi_supplier_company:
+                        raise BNSValidationError(
+                            _("Supplier {0} is missing bns_represents_company.").format(pi.supplier)
+                        )
+
+                # Validate companies match (PI supplier should represent SI's company)
+                if si_customer_company and pi_supplier_company:
+                    if pi_supplier_company != si_customer_company:
+                        raise BNSValidationError(
+                            _("Purchase Invoice supplier represents company {0}, but Sales Invoice customer represents {1}").format(
+                                pi_supplier_company, si_customer_company
+                            )
+                        )
+
+                # Check if PI already linked to another SI
+                existing_ref = pi.get("bns_inter_company_reference")
+                if existing_ref and existing_ref != si.name:
                     raise BNSValidationError(
-                        _("Supplier {0} is missing bns_represents_company.").format(pi.supplier)
-                    )
-            
-            # Validate companies match (PI supplier should represent SI's company)
-            if si_customer_company and pi_supplier_company:
-                if pi_supplier_company != si_customer_company:
-                    raise BNSValidationError(
-                        _("Purchase Invoice supplier represents company {0}, but Sales Invoice customer represents {1}").format(
-                            pi_supplier_company, si_customer_company
+                        _("Purchase Invoice {0} is already linked to Sales Invoice {1}").format(
+                            purchase_invoice, existing_ref
                         )
                     )
-            
-            # Check if PI already linked to another SI
-            existing_ref = pi.get("bns_inter_company_reference")
-            if existing_ref and existing_ref != si.name:
-                raise BNSValidationError(
-                    _("Purchase Invoice {0} is already linked to Sales Invoice {1}").format(
-                        purchase_invoice, existing_ref
-                    )
-                )
-            
-            # Match SI items to PI items and set sales_invoice_item on PI items
-            n_updated = _match_and_set_item_references(si, pi)
 
-            # Update Purchase Invoice document-level fields first
-            frappe.db.set_value("Purchase Invoice", pi.name, {
-                "is_bns_internal_supplier": 1,
-                "bns_inter_company_reference": si.name,
-                "status": "BNS Internally Transferred"
-            }, update_modified=False)
+                # Match SI items to PI items and set sales_invoice_item on PI items
+                n_updated = _match_and_set_item_references(si, pi)
 
-            # Reload PI to get updated values
-            pi.reload()
+                # Update Purchase Invoice document-level fields first
+                frappe.db.set_value("Purchase Invoice", pi.name, {
+                    "is_bns_internal_supplier": 1,
+                    "bns_inter_company_reference": si.name,
+                    "status": "BNS Internally Transferred"
+                }, update_modified=False)
 
-            # Then update Sales Invoice
-            si.db_set("bns_inter_company_reference", pi.name, update_modified=False)
+                # Reload PI to get updated values
+                pi.reload()
 
-            # Clear cache for both documents
-            frappe.clear_cache(doctype="Purchase Invoice")
-            frappe.clear_cache(doctype="Sales Invoice")
+                # Then update Sales Invoice
+                si.db_set("bns_inter_company_reference", pi.name, update_modified=False)
 
-            result["purchase_invoice"] = pi.name
-            result["message"] = _("Sales Invoice and Purchase Invoice linked successfully")
+                # Clear cache for both documents
+                frappe.clear_cache(doctype="Purchase Invoice")
+                frappe.clear_cache(doctype="Sales Invoice")
 
-            logger.info(f"Linked Sales Invoice {si.name} with Purchase Invoice {pi.name}, updated {n_updated} item references")
+                result["purchase_invoice"] = pi.name
+                result["message"] = _("Sales Invoice and Purchase Invoice linked successfully")
+
+                logger.info(f"Linked Sales Invoice {si.name} with Purchase Invoice {pi.name}, updated {n_updated} item references")
         
         frappe.clear_cache(doctype="Sales Invoice")
         
@@ -7131,96 +7120,85 @@ def convert_purchase_invoice_to_bns_internal(purchase_invoice: str, sales_invoic
             if si.docstatus != 1:
                 raise BNSValidationError(_("Sales Invoice {0} must be submitted before linking").format(sales_invoice))
 
-            # Validate items, quantities, rates, totals, and taxes (comprehensive check for auto-linking)
+            # Validate items, quantities, rates, totals, and taxes
             amount_tolerance = flt(frappe.db.get_single_value("BNS Branch Accounting Settings", "si_pi_amount_tolerance") or 0)
             validation_result = validate_si_pi_items_match(si.name, pi.name, check_all=True, amount_tolerance=amount_tolerance)
             if not validation_result.get("match"):
-                missing = validation_result.get("missing_items", [])
-                qty_mismatches = validation_result.get("qty_mismatches", [])
-                taxable_value_mismatches = validation_result.get("taxable_value_mismatches", [])
-                grand_total_mismatch = validation_result.get("grand_total_mismatch")
-                tax_mismatch = validation_result.get("tax_mismatch")
-                errors = []
-                if missing:
-                    for item in missing[:3]:  # Show first 3
-                        errors.append(_("Item {0}: SI has {1}, PI missing").format(item["item_code"], item["si_qty"]))
-                if qty_mismatches:
-                    for item in qty_mismatches[:3]:  # Show first 3
-                        errors.append(_("Item {0}: SI has {1}, PI has {2}").format(item["item_code"], item["si_qty"], item["pi_qty"]))
-                if taxable_value_mismatches:
-                    for item in taxable_value_mismatches[:3]:  # Show first 3
-                        errors.append(_("Item {0}: SI Taxable Value ₹{1:.2f}, PI Taxable Value ₹{2:.2f}").format(
-                            item["item_code"], item["si_taxable_value"], item["pi_taxable_value"]
-                        ))
-                if grand_total_mismatch:
-                    errors.append(_("Grand Total: SI ₹{0:.2f} vs PI ₹{1:.2f} (Diff: ₹{2:.2f})").format(
-                        grand_total_mismatch["si_total"], grand_total_mismatch["pi_total"], abs(grand_total_mismatch["diff"])
-                    ))
-                if tax_mismatch:
-                    errors.append(_("Total Taxes and Charges: SI ₹{0:.2f} vs PI ₹{1:.2f} (Diff: ₹{2:.2f})").format(
-                        tax_mismatch["si_tax"], tax_mismatch["pi_tax"], abs(tax_mismatch["diff"])
-                    ))
-                
-                if len(missing) > 3 or len(qty_mismatches) > 3 or len(taxable_value_mismatches) > 3:
-                    errors.append(_("... and more mismatches"))
-                raise BNSValidationError(_("Items, quantities, taxable values, totals, or taxes do not match: {0}").format("; ".join(errors)))
-            
-            # Get representing companies for validation
-            si_customer_company = frappe.db.get_value("Customer", si.customer, "bns_represents_company")
-            pi_supplier_company = None
-            if pi.supplier:
-                pi_supplier_company = frappe.db.get_value("Supplier", pi.supplier, "bns_represents_company")
-                if not pi_supplier_company:
+                # Mismatch found — still convert (status already set above),
+                # but skip linking so it surfaces in the mismatch report.
+                mismatch_details = []
+                for item in validation_result.get("missing_items", [])[:3]:
+                    mismatch_details.append(_("Item {0}: SI has {1}, PI missing").format(item["item_code"], item["si_qty"]))
+                for item in validation_result.get("qty_mismatches", [])[:3]:
+                    mismatch_details.append(_("Item {0}: SI has {1}, PI has {2}").format(item["item_code"], item["si_qty"], item["pi_qty"]))
+                gt = validation_result.get("grand_total_mismatch")
+                if gt:
+                    mismatch_details.append(_("Grand Total diff: ₹{0:.2f}").format(abs(gt["diff"])))
+
+                warning = _("Converted to BNS Internally Transferred but SI {0} not linked (mismatch: {1}). Check Internal Transfer Mismatch report.").format(
+                    si.name, "; ".join(mismatch_details) or _("validation failed")
+                )
+                frappe.msgprint(warning, indicator="orange", title=_("Converted with Mismatch"))
+                result["warning"] = warning
+                result["sales_invoice_found"] = si.name
+            else:
+                # Validation passed — proceed to link
+                # Get representing companies for validation
+                si_customer_company = frappe.db.get_value("Customer", si.customer, "bns_represents_company")
+                pi_supplier_company = None
+                if pi.supplier:
+                    pi_supplier_company = frappe.db.get_value("Supplier", pi.supplier, "bns_represents_company")
+                    if not pi_supplier_company:
+                        raise BNSValidationError(
+                            _("Supplier {0} is missing bns_represents_company.").format(pi.supplier)
+                        )
+
+                # Validate companies match (PI supplier should represent SI's company)
+                if si_customer_company and pi_supplier_company:
+                    if pi_supplier_company != si_customer_company:
+                        raise BNSValidationError(
+                            _("Purchase Invoice supplier represents company {0}, but Sales Invoice customer represents {1}").format(
+                                pi_supplier_company, si_customer_company
+                            )
+                        )
+
+                # Check if SI already linked to another PI
+                existing_ref = si.get("bns_inter_company_reference")
+                if existing_ref and existing_ref != pi.name:
                     raise BNSValidationError(
-                        _("Supplier {0} is missing bns_represents_company.").format(pi.supplier)
-                    )
-            
-            # Validate companies match (PI supplier should represent SI's company)
-            if si_customer_company and pi_supplier_company:
-                if pi_supplier_company != si_customer_company:
-                    raise BNSValidationError(
-                        _("Purchase Invoice supplier represents company {0}, but Sales Invoice customer represents {1}").format(
-                            pi_supplier_company, si_customer_company
+                        _("Sales Invoice {0} is already linked to Purchase Invoice {1}").format(
+                            sales_invoice, existing_ref
                         )
                     )
-            
-            # Check if SI already linked to another PI
-            existing_ref = si.get("bns_inter_company_reference")
-            if existing_ref and existing_ref != pi.name:
-                raise BNSValidationError(
-                    _("Sales Invoice {0} is already linked to Purchase Invoice {1}").format(
-                        sales_invoice, existing_ref
-                    )
-                )
-            
-            # Match SI items to PI items and set sales_invoice_item on PI items
-            n_updated = _match_and_set_item_references(si, pi)
 
-            # Update Purchase Invoice document-level fields first
-            frappe.db.set_value("Purchase Invoice", pi.name, {
-                "is_bns_internal_supplier": 1,
-                "bns_inter_company_reference": si.name,
-                "status": "BNS Internally Transferred"
-            }, update_modified=False)
+                # Match SI items to PI items and set sales_invoice_item on PI items
+                n_updated = _match_and_set_item_references(si, pi)
 
-            # Reload PI to get updated values
-            pi.reload()
+                # Update Purchase Invoice document-level fields first
+                frappe.db.set_value("Purchase Invoice", pi.name, {
+                    "is_bns_internal_supplier": 1,
+                    "bns_inter_company_reference": si.name,
+                    "status": "BNS Internally Transferred"
+                }, update_modified=False)
 
-            # Then update Sales Invoice
-            si.db_set("bns_inter_company_reference", pi.name, update_modified=False)
-            if si.status != "BNS Internally Transferred":
-                si.db_set("status", "BNS Internally Transferred", update_modified=False)
-            if not si.get("is_bns_internal_customer"):
-                si.db_set("is_bns_internal_customer", 1, update_modified=False)
+                # Reload PI to get updated values
+                pi.reload()
 
-            # Clear cache for both documents
-            frappe.clear_cache(doctype="Purchase Invoice")
-            frappe.clear_cache(doctype="Sales Invoice")
-            
-            result["sales_invoice"] = si.name
-            result["message"] = _("Purchase Invoice and Sales Invoice linked successfully")
-            
-            logger.info(f"Linked Purchase Invoice {pi.name} with Sales Invoice {si.name}, updated {n_updated} item references")
+                # Then update Sales Invoice
+                si.db_set("bns_inter_company_reference", pi.name, update_modified=False)
+                if si.status != "BNS Internally Transferred":
+                    si.db_set("status", "BNS Internally Transferred", update_modified=False)
+                if not si.get("is_bns_internal_customer"):
+                    si.db_set("is_bns_internal_customer", 1, update_modified=False)
+
+                # Clear cache for both documents
+                frappe.clear_cache(doctype="Purchase Invoice")
+                frappe.clear_cache(doctype="Sales Invoice")
+
+                result["sales_invoice"] = si.name
+                result["message"] = _("Purchase Invoice and Sales Invoice linked successfully")
+
+                logger.info(f"Linked Purchase Invoice {pi.name} with Sales Invoice {si.name}, updated {n_updated} item references")
         
         frappe.clear_cache(doctype="Purchase Invoice")
         
