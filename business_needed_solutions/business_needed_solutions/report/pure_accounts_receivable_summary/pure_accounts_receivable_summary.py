@@ -433,78 +433,76 @@ def execute(filters=None):
 			# Not a common party, apply existing Party Link logic
 			# Make a copy so we don't overwrite main_dict
 			updated_row = row.copy()
-			
+			was_netted = False
+
 			# Check if party is a secondary party in Party Link
 			if party in skip_set:
 				# Secondary party: find its primary party and net against it
-				# Find the primary party for this secondary
 				primary_party_for_secondary = None
 				for primary_party, secondary_list in primary_map.items():
 					if party in secondary_list:
 						primary_party_for_secondary = primary_party
 						break
-				
+
 				if primary_party_for_secondary:
 					# Check if primary party exists in main_dict (same report type)
-					has_primary_in_report = primary_party_for_secondary in main_dict
-					
-					if has_primary_in_report:
+					if primary_party_for_secondary in main_dict:
 						# Primary party is in this report, skip secondary (it will be netted into primary)
 						continue
 					else:
-						# Primary party is not in this report, but check if it has opposite side outstanding
-						# For Receivable: secondary is Customer, primary is Supplier
-						# Check if primary Supplier has AP outstanding in secondary_dict
+						# Primary party is not in this report — check opposite side
 						if primary_party_for_secondary in secondary_dict:
 							primary_row = secondary_dict[primary_party_for_secondary]
 							updated_row["secondary_party_type"] = primary_row["party_type"]
 							updated_row["secondary_party"] = primary_party_for_secondary
-							# Net AR - AP for defined numeric fields
 							for fieldname in numeric_fields:
 								updated_row[fieldname] = (
-									flt(updated_row.get(fieldname, 0.0)) 
+									flt(updated_row.get(fieldname, 0.0))
 									- flt(primary_row.get(fieldname, 0.0))
 								)
 
 							for fieldname in ageing_bucket_fields:
 								updated_row[fieldname] = (
-									flt(updated_row.get(fieldname, 0.0)) 
+									flt(updated_row.get(fieldname, 0.0))
 									- flt(primary_row.get(fieldname, 0.0))
 								)
+							was_netted = True
 
 			# For primary parties: net against their secondary parties
 			if party in primary_map:
 				for secondary_party in primary_map[party]:
-					# Skip if secondary party is already processed as common party
 					if secondary_party in processed_common_parties:
 						continue
-					
-					# If the secondary party has Payable amounts in secondary_dict
+
 					if secondary_party in secondary_dict:
 						sec_row = secondary_dict[secondary_party]
 						updated_row["secondary_party_type"] = sec_row["party_type"]
 						updated_row["secondary_party"] = sec_row["party"]
 						for fieldname in numeric_fields:
 							updated_row[fieldname] = (
-								flt(updated_row.get(fieldname, 0.0)) 
+								flt(updated_row.get(fieldname, 0.0))
 								- flt(sec_row.get(fieldname, 0.0))
 							)
 
 						for fieldname in ageing_bucket_fields:
 							updated_row[fieldname] = (
-								flt(updated_row.get(fieldname, 0.0)) 
+								flt(updated_row.get(fieldname, 0.0))
 								- flt(sec_row.get(fieldname, 0.0))
 							)
-		
-		# Include parties with a non-zero outstanding (positive = receivable,
-		# negative = customer advance / overpayment — matches native AR Summary).
-		# Why: common parties with net <= 0 are already routed to Payable earlier
-		# via `continue`, so reaching this line with a negative outstanding means
-		# either (a) standalone customer with pure advance (no supplier mirror) or
-		# (b) standalone customer whose credit notes > invoices. Both deserve a
-		# row with the negative amount, just like ERPNext's native AR Summary
-		# shows it. Dropping them made advance-only customers invisible across
-		# both Pure AR and Pure AP reports.
+						was_netted = True
+
+			# Direction guard for Party Link-netted parties (mirrors common-party
+			# guard at line ~406). After netting, if outstanding went negative the
+			# balance is payable — skip from this Receivable report; the Payable
+			# report will show it with positive outstanding.
+			# Standalone advances (was_netted=False) are NOT affected.
+			if was_netted and flt(updated_row.get("outstanding", 0.0)) < -0.009:
+				continue
+
+		# Include parties with a non-zero outstanding.
+		# Standalone customers with negative outstanding (pure advance /
+		# credit notes > invoices) are kept - they have no supplier mirror
+		# so dropping them would hide them from both reports.
 		if abs(flt(updated_row.get("outstanding", 0.0))) > 0.009:
 			if filters.get("adjust_running_accounts"):
 				redistribute_negative_ageing_buckets(updated_row, ageing_bucket_fields)
