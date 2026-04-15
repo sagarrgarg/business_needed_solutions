@@ -1,0 +1,19 @@
+---
+source_file: "business_needed_solutions/business_needed_solutions/report/stock_ledger_negative_episodes/stock_ledger_negative_episodes.py"
+type: "code"
+community: "Negative Stock Episodes"
+location: "L236"
+tags:
+  - graphify/code
+  - graphify/EXTRACTED
+  - community/Negative_Stock_Episodes
+---
+
+# prepare_report_data()
+
+## Connections
+- [[Prepare episodes data for the report.]] - `rationale_for` [EXTRACTED]
+- [[execute()_8]] - `calls` [EXTRACTED]
+- [[stock_ledger_negative_episodes.py]] - `contains` [EXTRACTED]
+
+#graphify/code #graphify/EXTRACTED #community/Negative_Stock_Episodes

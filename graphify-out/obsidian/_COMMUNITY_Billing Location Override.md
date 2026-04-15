@@ -1,0 +1,20 @@
+---
+type: community
+cohesion: 1.00
+members: 1
+---
+
+# Billing Location Override
+
+**Cohesion:** 1.00 - tightly connected
+**Members:** 1 nodes
+
+## Members
+- [[billing_location.set_customer_address_from_billing_location]] - code - business_needed_solutions/bns_branch_accounting/overrides/billing_location.py
+
+## Live Query (requires Dataview plugin)
+
+```dataview
+TABLE source_file, type FROM #community/Billing_Location_Override
+SORT file.name ASC
+```

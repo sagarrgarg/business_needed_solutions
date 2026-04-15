@@ -1,0 +1,208 @@
+{
+  "main": {
+    "id": "e9cef0b7268eb9a4",
+    "type": "split",
+    "children": [
+      {
+        "id": "9545ea27a58f6670",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "6cd1968d2dff4335",
+            "type": "leaf",
+            "state": {
+              "type": "graph",
+              "state": {},
+              "icon": "lucide-git-fork",
+              "title": "Graph view"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "73e1ad145aa39123",
+    "type": "split",
+    "children": [
+      {
+        "id": "38ac00fef7fec1fd",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "51616a585937dd70",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "1610e06e40568084",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "1d15880e76080baf",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "391e96a3436ecc60",
+    "type": "split",
+    "children": [
+      {
+        "id": "ece1ccde070154e4",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "72f0ad5014dee874",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks"
+            }
+          },
+          {
+            "id": "5cf7fcc5161f0dae",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links"
+            }
+          },
+          {
+            "id": "ea15fa673a345747",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "b3e88942427fd2ec",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "11e899cab1c1e968",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "6cd1968d2dff4335",
+  "lastOpenFiles": [
+    "_COMMUNITY_pure_accounts_receivable_summary.py.md",
+    "_COMMUNITY_bank_gl.js.md",
+    "_COMMUNITY__find_internal_supplier().md",
+    "_COMMUNITY_BNS Settings (single doctype holding ....md",
+    "_COMMUNITY_FrappeTestCase.md",
+    "_COMMUNITY__check_dn_pr_fixable().md",
+    "_COMMUNITY_stock_update_validation.py.md",
+    "_COMMUNITY_stock_entry_component_qty_variance.py.md",
+    "_COMMUNITY_negative-stock voucher detection (qty....md",
+    "_COMMUNITY_Exception.md",
+    "_COMMUNITY_internal_transfer_receive_mismatch.js.md",
+    "_COMMUNITY_BNSDashboard.md",
+    "_COMMUNITY_party_gl.py.md",
+    "_COMMUNITY_bns_branch_accounting_settings.js.md",
+    "_COMMUNITY_bns_dashboard.py.md",
+    "_COMMUNITY_Common Party GL Square-Off.md",
+    "_COMMUNITY_internal_transfer_accounting_audit.py.md",
+    "_COMMUNITY_utils.py.md",
+    "Why purely a nudge, never blocks submission; toggled by BNS Settings common_party_warning_on_wrong_side.md",
+    "bns_check_linked_party_crossed_balance(frm) client.md",
+    "payment_entry_linked_party_warning.js_1.md",
+    "execute_historical_backfill(company, cutoff_date, pair_keys, cost_center).md",
+    "preview_historical_backfill(company, cutoff_date).md",
+    "execute_common_party_squareoff(company, as_of_date, pair_keys, posting_date, cost_center).md",
+    "preview_common_party_squareoff(company, as_of_date) whitelisted.md",
+    "_filter_pairs_by_keys(pairs, pair_keys).md"
+  ]
+}

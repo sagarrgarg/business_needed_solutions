@@ -1,0 +1,376 @@
+---
+type: community
+cohesion: 0.01
+members: 340
+---
+
+# Internal Transfer Engine
+
+**Cohesion:** 0.01 - loosely connected
+**Members:** 340 nodes
+
+## Members
+- [[Aggregate PI taxcharge amounts account-wise in base currency.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Aggregate SI taxcharge amounts account-wise in base currency.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Append one NDJSON debug line for runtime investigation.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Apply BNS GL correction for vouchers included in Repost Accounting Ledger.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[BNSInternalTransferError]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[BNSValidationError]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Backfill sales_invoice_item on Purchase Invoice items and delivery_note_item on]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Balance PI GL entries for BNS internal PIs in the Phase 1 window.      When repo]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Block PI submit when itemsamountstaxes diverge from the linked Sales Invoice.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Block creating another internal SI (draftsubmitted) for same DN context.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Build GL entry while preserving dimensions from template.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Build the canonical tracking key for DB-backed repost tracking.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Bulk convert documents to BNS Internally Transferred status.      Args]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Business Needed Solutions - Utility Re-exports  BNS internal transfer logic has]] - rationale - business_needed_solutions/business_needed_solutions/utils.py
+- [[Check DB-backed tracking first (status Processed), fallback to cache.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Check DN is in scoped BNS internal flow (samedifferent GSTIN).     Cutoff check]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Check DN is in scoped BNS internal same-GSTIN flow.     Cutoff check is the call]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Check PI is in scoped BNS internal different-GSTIN SI-PI flow.     Cutoff check]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Check PR is in scoped BNS internal same-GSTIN DN-PR flow.     Cutoff check is t]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Check PR is in scoped SI-PR transfer flow (different GSTIN style).     Cutoff c]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Check SI is in scoped BNS internal different-GSTIN flow.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Check if BNS Repost Tracking doctype and table exist and are usable.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Check if a bns_inter_company_reference is stale and safe to clear.      Returns]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Check if the Sales Invoice status should be updated for internal transfers.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Check if the document's customer is a BNS internal customer.      Args]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Check if the document's supplier is a BNS internal supplier.      Args]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Claim or create a DB-backed lock for repost tracking. Returns True if lock acqui]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Convert a Delivery Note to BNS Internally Transferred status (same GSTIN only).]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Convert a Purchase Invoice to BNS Internally Transferred status.          This f]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Convert a Purchase Receipt to BNS Internally Transferred status (same GSTIN only]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Convert a Sales Invoice to BNS Internally Transferred status.          This func]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Create a Purchase Invoice from a Sales Invoice for internal customers when GST d]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Create a Purchase Receipt from a Delivery Note for internal customers.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Create a Purchase Receipt from a Sales Invoice for internal customers when updat]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Custom exception for BNS internal transfer operations.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Custom exception for BNS validation operations.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Debug helper to inspect BNS GL rewrite scope and amount resolution.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Delete GLPLE rows for one voucher before controlled rebuild.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Deprecated use _get_internal_transfer_cutoff_date instead.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Deprecated use is_after_internal_transfer_cutoff instead.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Detect whether PR is linked to DN andor SI via source reference fields.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Enforce PR linkage rules after configured cutoff.      Rules     - Same GSTIN]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Enforce internal SI different-GSTIN and DN strict parity after cutoff.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Enforce interstate internal PI linkage after configured cutoff.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Enqueue bulk verification and repost as a background job.      Args         cut]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Ensure BNS runtime monkey patches are applied in every process (webworker).]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Ensure PR repost valuation path can use Purchase Receipt Item.bns_transfer_rate.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Ensure mapped target document is a strict one-to-one mirror of source.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Find Delivery Note by supplier_delivery_note from Purchase Receipt.          Arg]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Find Purchase Invoice by supplier_invoice_number (bill_no) matching Sales Invoic]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Find Purchase Receipt by supplier_delivery_note matching Delivery Note name.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Find Sales Invoice by bill_no (supplier_invoice_number) matching Purchase Invoic]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Find existing non-cancelled PI linked to the given source SI.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Find existing non-cancelled PR linked to the given source DNSI.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Find supplier that represents the given company.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Find the Purchase Invoice created from the original Sales Invoice     so it can]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[For PRPI, resolve the source DNSI posting_date that governs the chain.     For]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Force rebuild GL entries for one internal-transfer voucher using patched get_gl_]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Force rebuild GL for one DNPR voucher and return result.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Force-correct GL for DNPR vouchers affected by a Repost Item Valuation doc.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Force-correct GL for DNPR vouchers included in a Repost Accounting Ledger doc.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Gate unlink recovery operations via the Role Permission Manager.      Admin acce]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Get BNS Branch Accounting account settings required for GL rewrite.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Get preview of documents that can be bulk converted to BNS Internal.      Args]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Get submitted Purchase Invoices linked to a Sales Invoice for SI-PI flow.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Get submitted Purchase Receipts linked to a Delivery Note for DN-PR flow.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Get submitted Purchase Receipts linked to a Sales Invoice for SI-PR flow.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Get the company that the customer represents.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Get the company that the customer represents._1]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Get the mapping configuration for Delivery Note to Purchase Receipt.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Get the mapping configuration for Sales Invoice to Purchase Invoice.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Get the mapping configuration for Sales Invoice to Purchase Receipt.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Link a Delivery Note with a Purchase Receipt for BNS Internal transfer.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Link a Sales Invoice with a Purchase Invoice for BNS Internal transfer.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Link a Sales Invoice with a Purchase Receipt for BNS Internal transfer (differen]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Load SI item rates, per-name map, and item_code buckets for PI line matching.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Mark repost tracking as Failed in DB, with cache fallback.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Mark repost tracking as Processed in DB, with cache fallback.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Mark voucher as processed via DB-backed tracking (Processed), fallback to cache.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Match DN items to PR items by item_code + qty and set delivery_note_item on PR i]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Match SI items to PI items by item_code + qty and set sales_invoice_item on PI i]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Match one PI line to an SI bucket row (same logic as _match_and_set_item_referen]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Mirror PI item valuation_rate from bns_transfer_rate for SI-PI flow.      Only]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Mirror PR item valuation_rate from bns_transfer_rate for DN-PR same-GSTIN flow.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Patch ERPNext GL generation for DNPRPISI in BNS internal scopes.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Patch Repost Accounting Ledger start_repost to run BNS correction after ERPNext]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Patch Repost Item Valuation GL phase to run BNS-scoped failsafe correction.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Populate Purchase Invoice Item.bns_transfer_rate before validatesubmit.      Us]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Re-apply BNS internal status for PI after ERPNext repost status recomputation.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Re-apply BNS internal status for SI after ERPNext repost status recomputation.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Re-assert BNS internal status after repost completion.      ERPNext repost flow]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Re-map stale delivery_note_item references on PR items to current DN item IDs.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Re-run repost GLE only for scoped DNPR vouchers as failsafe.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Read  lookup endpoint gate — checks BNS Branch Accounting Settings     read per]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Read valuation from Delivery Note Stock Ledger Entry for this item.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Read valuation from latest non-cancelled Sales Invoice Stock Ledger row for this]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Refresh PIPR item transfer-rate after SI repost completion (SI-PISI-PR).]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Refresh PR item bns_transfer_rate after repost completion (DN-PR same GSTIN).]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Refresh the lock expiry for an active repost tracking record.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Release the DB-backed lock. Defensive cleanup.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Replace ERPNext's repost error emailer with a no-op.      Repost Item Valuation]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Require PI item transfer-rate for internal SI-linked update-stock PI rows.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve Accounting Rewrite cutoff FY to year_start_date, or None if disabled.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve DN transfer amount from billing rate side (not valuation).      Zero-rat]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve Internal Transfer cutoff FY to year_start_date, or None if disabled.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve PI item transfer-rate through the full fallback chain.      Fallback ord]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve PR GST scope as 'same' or 'different'.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve PR transfer amount from billing rate side (not valuation).      Zero-rat]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve bns_transfer_rate for a Purchase Invoice SLE row.      Scope     - Purc]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve bns_transfer_rate for a Purchase Receipt SLE row.      Scope     - Purc]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve impacted vouchers for repost callbacks across both repost modes.      So]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve incoming_rate for an SI item from its linked Delivery Note.      Fallbac]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve linked Delivery Note for Purchase Receipt in same-GSTIN flow.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve linked Sales Invoice name from PI header, bill_no, or PR chain.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve transfer-rate override for PRPI SLE rows.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Resolve valuation amount and stock account from generated GL entries.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Return True when internal DN has same billingcompany GSTIN.      Returns False]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Return True when submitted PI belongs to BNS internal SI-PISI-PR flow.      D]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Return an address linked to supplier via Dynamic Link.      1. If preferred_a]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Return human-friendly docstatus label.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Return per-ledger row counts for one voucher.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Return the Repost doctype name for a given scope.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Rewrite DN GL entries into BNS internal branch-accounting pattern.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Rewrite PI GL entries into BNS internal SI-PI stock-transfer pattern.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Rewrite PR GL entries into BNS internal branch-accounting pattern.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Rewrite SI GL entries into BNS internal different-GSTIN pattern.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Run a guarded repost so custom BNS GL rewrite is applied reliably.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Set PI status to 'BNS Internally Transferred' on submit for SI-backed internal P]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Set cache-only marker as fallback when DB tracking unavailable.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Sync PI Stock Ledger Entry incoming values from PI Item transfer-rate.      Only]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Sync PR Stock Ledger Entry incoming values from PR Item transfer-rate.      Only]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Sync Purchase Invoice Item.bns_transfer_rate from Sales Invoice Item.incoming_ra]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Sync Purchase Receipt Item.bns_transfer_rate from Delivery Note Item.incoming_ra]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Sync Purchase Receipt Item.bns_transfer_rate from Sales Invoice Item.incoming_ra]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Sync Sales Invoice Item.incoming_rate from Delivery Note Item.incoming_rate.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Trigger PI repost after transfer-rate mirror with lock-first and finally cleanup]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Trigger PR repost after transfer-rate mirror with lock-first and finally cleanup]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[True when posting_date = Accounting Rewrite cutoff FY start     AND Phase 1 (In]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[True when posting_date = Internal Transfer cutoff FY start.     Returns False w]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[UI helper to check duplicate internal SI existence for DN context.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Unlink a Delivery Note and Purchase Receipt.          This function allows unlin]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Unlink a Sales Invoice and Purchase Invoice.          This function allows unlin]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Unlink a Sales Invoice and Purchase Receipt (when PR was created from SI).]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update Sales Invoice with Purchase Receipt reference for record connections.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update addresses for internal transfer Purchase Invoice.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update addresses for internal transfer.      For BNS internal transfers the DN's]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update bidirectional linked document references.          Args         doctype]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update delivery note with purchase receipt reference.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update details for the Purchase Invoice from Sales Invoice.          TRANSFER UN]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update details for the Purchase Receipt from Delivery Note.          TRANSFER UN]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update details for the Purchase Receipt from Sales Invoice.          TRANSFER UN]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update sales invoice with purchase invoice reference.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update taxes for the purchase invoice.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update taxes for the purchase receipt.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update the status of a Delivery Note based on GSTIN match.          TRANSFER UND]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update the status of a Purchase Receipt based on is_bns_internal_supplier.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Update the status of a Sales Invoice to BNS Internally Transferred      when s]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Validate inter-company party relationships.          Checks that bns_represents_]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Validate return entries (Credit Notes) for BNS internal customers.      Previous]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Validate return entries for Delivery Notes with BNS internal customers.      Pre]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Validate strict one-to-one parity for internal PR against its source.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Validate strict one-to-one parity for internal SI rows mapped from DN.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Validate that Delivery Note and Purchase Receipt items match.          Args]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Validate that PRPI quantities don't exceed source document quantities.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Validate that Sales Invoice and Purchase Receipt items match.      Args]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Validate that all Sales Invoice items and quantities match Purchase Invoice item]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Validate that the delivery note is for an internal customer.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Validate that the sales invoice is for an internal customer with different GST.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[When clearing a bns_inter_company_reference on one side, also clear the     back]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Write  mutate endpoint gate — checks BNS Branch Accounting Settings     write p]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[Write a durable audit trail for manual unlink recovery operations.]] - rationale - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_apply_bns_internal_gl_rewrite_patch()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_apply_bns_repost_accounting_ledger_patch()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_apply_bns_repost_gl_failsafe_patch()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_apply_bns_transfer_rate_stock_ledger_patch()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_audit_unlink_action()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_balance_bns_internal_pi_gl_entries()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_bns_debug_log()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_bns_repost_voucher_marker_key()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_bns_require_accounts_read()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_bns_require_accounts_write()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_build_bns_repost_tracking_key()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_build_si_rate_maps_for_pi()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_claim_bns_repost_lock()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_clear_counter_backref()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_consume_si_bucket_for_pi_line()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_delete_ledger_rows_for_voucher()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_docstatus_label()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_enforce_one_to_one_item_and_amount_parity()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_enforce_unlink_recovery_permission()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_find_internal_supplier()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_find_return_against_pi()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_force_rebuild_bns_gl_for_voucher()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_accounting_rewrite_cutoff_date()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_bns_branch_accounting_accounts()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_bns_transfer_rate_for_pi_sle()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_bns_transfer_rate_for_pr_sle()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_bns_transfer_rate_for_sle()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_delivery_note_mapping()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_existing_pi_for_source()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_existing_pr_for_source()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_internal_transfer_cutoff_date()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_internal_validation_cutoff_date()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_ledger_row_counts_for_voucher()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_linked_delivery_note_for_pr()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_outgoing_rate_from_si_stock_ledger()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_pr_source_link_flags()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_rate_from_dn_stock_ledger()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_repost_doctype_for_scope()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_representing_company()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_representing_company_from_customer()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_sales_invoice_mapping()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_sales_invoice_to_pr_mapping()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_submitted_pis_for_si()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_submitted_prs_for_dn()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_get_submitted_prs_for_si()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_is_bns_internal_delivery_note()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_is_bns_internal_different_gstin_purchase_invoice()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_is_bns_internal_different_gstin_sales_invoice()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_is_bns_internal_purchase_invoice_from_si()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_is_bns_internal_same_gstin_delivery_note()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_is_bns_internal_same_gstin_purchase_receipt()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_is_bns_internal_si_linked_purchase_receipt()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_is_bns_repost_tracking_available()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_is_bns_repost_voucher_processed()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_is_same_gstin_internal_delivery_note()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_is_stale_inter_company_ref()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_make_bns_gl_entry()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_mark_bns_repost_tracking_failed()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_mark_bns_repost_tracking_processed()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_mark_bns_repost_voucher_processed()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_mark_bns_repost_voucher_processed_cache()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_match_and_set_dn_pr_item_references()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_match_and_set_item_references()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_mirror_pi_item_valuation_from_transfer_rate()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_mirror_pr_item_valuation_from_transfer_rate()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_reassert_purchase_invoice_bns_internal_status()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_reassert_sales_invoice_bns_internal_status()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_refresh_bns_repost_lock()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_release_bns_repost_lock()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_remap_pr_delivery_note_items()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_resolve_dn_transfer_amount()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_resolve_impacted_vouchers_for_repost()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_resolve_pi_item_transfer_rate_extras()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_resolve_pi_tax_account_amounts()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_resolve_pr_gstin_scope()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_resolve_pr_transfer_amount()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_resolve_rate_from_dn_chain()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_resolve_si_name_for_internal_pi()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_resolve_si_tax_account_amounts()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_resolve_source_posting_date()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_resolve_supplier_address()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_resolve_valuation_from_gl_entries()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_rewrite_bns_internal_dn_gl_entries()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_rewrite_bns_internal_pi_gl_entries()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_rewrite_bns_internal_pr_gl_entries()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_rewrite_bns_internal_si_gl_entries()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_run_bns_gl_repost_accounting_correction()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_run_bns_gl_repost_correction()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_should_update_sales_invoice_status()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_suppress_repost_error_emails()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_sync_pi_item_transfer_rate_from_si()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_sync_pi_sle_from_transfer_rate()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_sync_pr_item_transfer_rate_from_dn()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_sync_pr_item_transfer_rate_from_si()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_sync_pr_sle_from_transfer_rate()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_sync_si_item_incoming_rate_from_dn()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_throw_si_dn_mismatch()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_trigger_bns_internal_gl_repost()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_trigger_pi_repost_for_transfer_rate()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_trigger_pr_repost_for_transfer_rate()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_update_addresses()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_update_addresses_pi()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_update_delivery_note_reference()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_update_details()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_update_details_pi()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_update_details_pr_from_si()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_update_sales_invoice_pr_reference()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_update_sales_invoice_reference()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_update_taxes()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_update_taxes_pi()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_validate_internal_delivery_note()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_validate_internal_pr_one_to_one_parity()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_validate_internal_sales_invoice()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_validate_internal_si_dn_one_to_one_parity()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[_validate_single_internal_si_per_dn()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[apply_bns_runtime_patches()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[apply_internal_pi_transfer_rates_from_si()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[backfill_item_references()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[bns_debug_internal_gl_scope()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[bns_force_rebuild_gl_for_voucher()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[bns_force_rewrite_gl_for_repost_accounting_ledger()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[bns_force_rewrite_gl_for_repost_item_valuation()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[bulk_convert_to_bns_internal()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[check_existing_internal_si_for_dn()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[convert_delivery_note_to_bns_internal()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[convert_purchase_invoice_to_bns_internal()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[convert_purchase_receipt_to_bns_internal()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[convert_sales_invoice_to_bns_internal()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[enqueue_verify_and_repost_internal_transfers()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[get_bulk_conversion_preview()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[get_delivery_note_by_supplier_delivery_note()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[get_purchase_invoice_by_supplier_invoice()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[get_purchase_receipt_by_supplier_delivery_note()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[get_sales_invoice_by_bill_no()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[is_after_accounting_rewrite_cutoff()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[is_after_internal_transfer_cutoff()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[is_after_internal_validation_cutoff()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[is_bns_internal_customer()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[is_bns_internal_supplier()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[link_dn_pr()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[link_si_pi()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[link_si_pr()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[make_bns_internal_purchase_invoice()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[make_bns_internal_purchase_receipt()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[make_bns_internal_purchase_receipt_from_si()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[refresh_bns_internal_status_after_repost()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[refresh_pr_transfer_rate_after_repost()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[refresh_si_transfer_rate_after_repost()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[unlink_dn_pr()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[unlink_si_pi()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[unlink_si_pr()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[update_delivery_note_status_for_bns_internal()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[update_linked_doc()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[update_purchase_invoice_status_for_bns_internal()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[update_purchase_receipt_status_for_bns_internal()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[update_sales_invoice_status_for_bns_internal()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[utils.py]] - code - business_needed_solutions/business_needed_solutions/utils.py
+- [[validate_bns_internal_customer_return()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[validate_bns_internal_delivery_note_return()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[validate_dn_pr_items_match()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[validate_inter_company_party()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[validate_internal_purchase_invoice_linkage()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[validate_internal_purchase_invoice_si_parity()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[validate_internal_purchase_invoice_transfer_rate()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[validate_internal_purchase_receipt_linkage()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[validate_internal_sales_invoice_linkage()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[validate_internal_transfer_qty()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[validate_si_pi_items_match()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+- [[validate_si_pr_items_match()]] - code - business_needed_solutions/bns_branch_accounting/utils.py
+
+## Live Query (requires Dataview plugin)
+
+```dataview
+TABLE source_file, type FROM #community/Internal_Transfer_Engine
+SORT file.name ASC
+```
+
+## Connections to other communities
+- 19 edges to [[_COMMUNITY_DN-PR Link Fixup]]
+- 8 edges to [[_COMMUNITY_Item Transfer Rate Utils]]
+- 8 edges to [[_COMMUNITY_Group 31]]
+- 4 edges to [[_COMMUNITY_Group 43]]
+- 3 edges to [[_COMMUNITY_Stock Update Validation]]
+- 3 edges to [[_COMMUNITY_Group 44]]
+- 2 edges to [[_COMMUNITY_Group 55]]
+- 2 edges to [[_COMMUNITY_Group 54]]
+
+## Top bridge nodes
+- [[utils.py]] - degree 209, connects to 7 communities
+- [[BNSValidationError]] - degree 19, connects to 1 community
+- [[_bns_require_accounts_write()]] - degree 9, connects to 1 community
+- [[_get_submitted_prs_for_si()]] - degree 7, connects to 1 community
+- [[_remap_pr_delivery_note_items()]] - degree 7, connects to 1 community

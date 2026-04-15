@@ -5,5 +5,5 @@
 tags
 node_modules
 __pycache__
-graphify-out/
+graphify-out/cache/
 .claude/

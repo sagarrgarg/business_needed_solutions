@@ -1,0 +1,18 @@
+---
+source_file: "business_needed_solutions/bns_branch_accounting/test_common_party_reconciliation.py"
+type: "code"
+community: "BNS Settings Tests"
+location: "L77"
+tags:
+  - graphify/code
+  - graphify/EXTRACTED
+  - community/BNS_Settings_Tests
+---
+
+# _ensure_customer()
+
+## Connections
+- [[setUpClass()]] - `calls` [EXTRACTED]
+- [[test_common_party_reconciliation.py]] - `contains` [EXTRACTED]
+
+#graphify/code #graphify/EXTRACTED #community/BNS_Settings_Tests
