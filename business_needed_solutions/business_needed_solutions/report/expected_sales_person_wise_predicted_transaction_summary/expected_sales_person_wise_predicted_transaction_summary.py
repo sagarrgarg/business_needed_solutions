@@ -152,7 +152,12 @@ def get_columns(filters):
 	return columns
 
 
+_ALLOWED_DOC_TYPES = {"Sales Order", "Delivery Note", "Sales Invoice"}
+
 def get_entries(filters):
+	if filters.get("doc_type") not in _ALLOWED_DOC_TYPES:
+		frappe.throw(_("Invalid document type: {0}").format(filters.get("doc_type")))
+
 	date_field = filters["doc_type"] == "Sales Order" and "transaction_date" or "posting_date"
 	if filters["doc_type"] == "Sales Order":
 		qty_field = "delivered_qty"
@@ -211,8 +216,9 @@ def get_conditions(filters, date_field):
 	if filters.get("sales_person"):
 		lft, rgt = frappe.get_value("Sales Person", filters.get("sales_person"), ["lft", "rgt"])
 		conditions.append(
-			f"exists(select name from `tabSales Person` where lft >= {lft} and rgt <= {rgt} and name=st.sales_person)"
+			"exists(select name from `tabSales Person` where lft >= %s and rgt <= %s and name=st.sales_person)"
 		)
+		values.extend([lft, rgt])
 
 	if filters.get("from_date"):
 		conditions.append(f"dt.{date_field}>=%s")

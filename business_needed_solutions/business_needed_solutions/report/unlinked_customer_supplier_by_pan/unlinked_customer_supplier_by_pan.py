@@ -1,5 +1,6 @@
 import frappe
 from frappe import _
+from frappe.utils import escape_html
 import urllib.parse
 
 def execute(filters=None):
@@ -55,16 +56,25 @@ def execute(filters=None):
 
             if not party_link:
                 # Separate Buttons for Each Direction
+                esc_cust = escape_html(customer['name'])
+                esc_supp = escape_html(supplier_name)
+
                 customer_to_supplier_btn = (
-                    f"<button class='btn btn-success' style='margin-right:5px;'"
-                    f" onclick=\"createPartyLink('{customer['name']}', '{supplier_name}', 'Customer', 'Supplier')\">"
-                    f"Create</button>"
+                    f'<button class="btn btn-success" style="margin-right:5px;"'
+                    f' data-primary="{esc_cust}" data-secondary="{esc_supp}"'
+                    f' data-primary-type="Customer" data-secondary-type="Supplier"'
+                    f' onclick="createPartyLink(this.dataset.primary, this.dataset.secondary,'
+                    f' this.dataset.primaryType, this.dataset.secondaryType)">'
+                    f'Create</button>'
                 )
 
                 supplier_to_customer_btn = (
-                    f"<button class='btn btn-primary'"
-                    f" onclick=\"createPartyLink('{supplier_name}', '{customer['name']}', 'Supplier', 'Customer')\">"
-                    f"Create</button>"
+                    f'<button class="btn btn-primary"'
+                    f' data-primary="{esc_supp}" data-secondary="{esc_cust}"'
+                    f' data-primary-type="Supplier" data-secondary-type="Customer"'
+                    f' onclick="createPartyLink(this.dataset.primary, this.dataset.secondary,'
+                    f' this.dataset.primaryType, this.dataset.secondaryType)">'
+                    f'Create</button>'
                 )
 
                 data.append({
