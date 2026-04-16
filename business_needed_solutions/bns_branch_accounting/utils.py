@@ -8718,6 +8718,31 @@ def unlink_si_pi(sales_invoice: str = None, purchase_invoice: str = None) -> Dic
         frappe.throw(str(e))
 
 
+def _eligible_internal_dn_names(internal_customers: List[str]) -> Set[str]:
+    """Return submitted Delivery Notes that belong to an internal customer and
+    have matching billing / company GSTIN. Used to decide which Purchase
+    Receipts are eligible for BNS conversion — PR eligibility is independent
+    of the caller's posting-date window, because a PR in the window may
+    reference a DN outside it (e.g. month-end GR crossing FY boundary)."""
+    if not internal_customers:
+        return set()
+    rows = frappe.get_all(
+        "Delivery Note",
+        filters=[
+            ["docstatus", "=", 1],
+            ["customer", "in", internal_customers],
+        ],
+        fields=["name", "billing_address_gstin", "company_gstin"],
+        limit_page_length=0,
+    )
+    return {
+        r.name for r in rows
+        if r.get("billing_address_gstin")
+        and r.get("company_gstin")
+        and r.get("billing_address_gstin") == r.get("company_gstin")
+    }
+
+
 @frappe.whitelist()
 def get_bulk_conversion_preview(from_date: str, to_date: str = None, force: int = 0) -> Dict:
     """
@@ -8741,109 +8766,100 @@ def get_bulk_conversion_preview(from_date: str, to_date: str = None, force: int 
         else:
             to_date_obj = get_fiscal_year(from_date_obj)[2]
 
-        si_filters = [
-            ["docstatus", "=", 1],
-            ["posting_date", ">=", from_date_obj],
-            ["posting_date", "<=", to_date_obj],
-            ["customer", "!=", ""]
-        ]
+        internal_customers = frappe.get_all(
+            "Customer", filters={"is_bns_internal_customer": 1}, pluck="name"
+        )
+        internal_suppliers = frappe.get_all(
+            "Supplier", filters={"is_bns_internal_supplier": 1}, pluck="name"
+        )
 
-        pi_filters = [
-            ["docstatus", "=", 1],
-            ["posting_date", ">=", from_date_obj],
-            ["posting_date", "<=", to_date_obj],
-            ["supplier", "!=", ""]
-        ]
-
-        dn_filters = [
-            ["docstatus", "=", 1],
-            ["posting_date", ">=", from_date_obj],
-            ["posting_date", "<=", to_date_obj],
-            ["customer", "!=", ""]
-        ]
-
-        pr_filters = [
-            ["docstatus", "=", 1],
-            ["posting_date", ">=", from_date_obj],
-            ["posting_date", "<=", to_date_obj],
-            ["supplier_delivery_note", "!=", ""]
-        ]
-        
         # Get counts for Sales Invoice
         si_count = 0
-        si_list = frappe.get_all(
-            "Sales Invoice",
-            filters=si_filters,
-            fields=["name", "customer", "is_bns_internal_customer", "status"],
-            limit=10000
-        )
-        for si in si_list:
-            customer_internal = frappe.db.get_value("Customer", si.customer, "is_bns_internal_customer")
-            if customer_internal:
+        if internal_customers:
+            si_list = frappe.get_all(
+                "Sales Invoice",
+                filters=[
+                    ["docstatus", "=", 1],
+                    ["posting_date", ">=", from_date_obj],
+                    ["posting_date", "<=", to_date_obj],
+                    ["customer", "in", internal_customers],
+                ],
+                fields=["name", "is_bns_internal_customer", "status"],
+                limit_page_length=0,
+            )
+            for si in si_list:
                 if force or not si.get("is_bns_internal_customer") or si.status != "BNS Internally Transferred":
                     si_count += 1
-        
+
         # Get counts for Purchase Invoice
         pi_count = 0
-        pi_list = frappe.get_all(
-            "Purchase Invoice",
-            filters=pi_filters,
-            fields=["name", "supplier", "is_bns_internal_supplier", "status"],
-            limit=10000
-        )
-        for pi in pi_list:
-            supplier_internal = frappe.db.get_value("Supplier", pi.supplier, "is_bns_internal_supplier")
-            if supplier_internal:
+        if internal_suppliers:
+            pi_list = frappe.get_all(
+                "Purchase Invoice",
+                filters=[
+                    ["docstatus", "=", 1],
+                    ["posting_date", ">=", from_date_obj],
+                    ["posting_date", "<=", to_date_obj],
+                    ["supplier", "in", internal_suppliers],
+                ],
+                fields=["name", "is_bns_internal_supplier", "status"],
+                limit_page_length=0,
+            )
+            for pi in pi_list:
                 if force or not pi.get("is_bns_internal_supplier") or pi.status != "BNS Internally Transferred":
                     pi_count += 1
-        
-        # Get counts for Delivery Note (same GSTIN only)
+
+        # Get counts for Delivery Note (same GSTIN only, within date window).
         dn_count = 0
-        dn_list = frappe.get_all(
-            "Delivery Note",
-            filters=dn_filters,
-            fields=["name", "customer", "is_bns_internal_customer", "status",
-                    "billing_address_gstin", "company_gstin", "bns_inter_company_reference"],
-            limit=10000
-        )
-        for dn in dn_list:
-            customer_internal = frappe.db.get_value("Customer", dn.customer, "is_bns_internal_customer")
-            if customer_internal:
+        if internal_customers:
+            dn_list = frappe.get_all(
+                "Delivery Note",
+                filters=[
+                    ["docstatus", "=", 1],
+                    ["posting_date", ">=", from_date_obj],
+                    ["posting_date", "<=", to_date_obj],
+                    ["customer", "in", internal_customers],
+                ],
+                fields=["name", "is_bns_internal_customer", "status",
+                        "billing_address_gstin", "company_gstin", "bns_inter_company_reference"],
+                limit_page_length=0,
+            )
+            for dn in dn_list:
                 billing_gstin = dn.get("billing_address_gstin")
                 company_gstin = dn.get("company_gstin")
-                if billing_gstin and company_gstin and billing_gstin == company_gstin:
-                    dn_ref = (dn.get("bns_inter_company_reference") or "").strip()
-                    if (
-                        force
-                        or not dn.get("is_bns_internal_customer")
-                        or dn.status != "BNS Internally Transferred"
-                        or not dn_ref
-                    ):
-                        dn_count += 1
-        
-        # Get counts for Purchase Receipt (from DN with same GSTIN)
+                if not (billing_gstin and company_gstin and billing_gstin == company_gstin):
+                    continue
+                dn_ref = (dn.get("bns_inter_company_reference") or "").strip()
+                if (
+                    force
+                    or not dn.get("is_bns_internal_customer")
+                    or dn.status != "BNS Internally Transferred"
+                    or not dn_ref
+                ):
+                    dn_count += 1
+
+        # Eligibility set for PR match: all internal-customer same-GSTIN DNs,
+        # date-independent — a PR in the date window may reference a DN
+        # outside the window (e.g. month-end GR crossing FY boundary).
+        eligible_dn_names: Set[str] = _eligible_internal_dn_names(internal_customers)
+
+        # Get counts for Purchase Receipt (linked to an eligible same-GSTIN DN)
         pr_count = 0
-        pr_list = frappe.get_all(
-            "Purchase Receipt",
-            filters=pr_filters,
-            fields=["name", "supplier_delivery_note", "is_bns_internal_supplier", "status"],
-            limit=10000
-        )
-        for pr in pr_list:
-            if pr.supplier_delivery_note:
-                # Check if supplier_delivery_note is a Delivery Note
-                if frappe.db.exists("Delivery Note", pr.supplier_delivery_note):
-                    dn_name = pr.supplier_delivery_note
-                    dn_customer = frappe.db.get_value("Delivery Note", dn_name, "customer")
-                    if dn_customer:
-                        customer_internal = frappe.db.get_value("Customer", dn_customer, "is_bns_internal_customer")
-                        if customer_internal:
-                            # Check GSTIN match
-                            dn_billing_gstin = frappe.db.get_value("Delivery Note", dn_name, "billing_address_gstin")
-                            dn_company_gstin = frappe.db.get_value("Delivery Note", dn_name, "company_gstin")
-                            if dn_billing_gstin and dn_company_gstin and dn_billing_gstin == dn_company_gstin:
-                                if force or not pr.get("is_bns_internal_supplier") or pr.status != "BNS Internally Transferred":
-                                    pr_count += 1
+        if eligible_dn_names:
+            pr_list = frappe.get_all(
+                "Purchase Receipt",
+                filters=[
+                    ["docstatus", "=", 1],
+                    ["posting_date", ">=", from_date_obj],
+                    ["posting_date", "<=", to_date_obj],
+                    ["supplier_delivery_note", "in", list(eligible_dn_names)],
+                ],
+                fields=["name", "is_bns_internal_supplier", "status"],
+                limit_page_length=0,
+            )
+            for pr in pr_list:
+                if force or not pr.get("is_bns_internal_supplier") or pr.status != "BNS Internally Transferred":
+                    pr_count += 1
         
         total_count = si_count + pi_count + dn_count + pr_count
         
@@ -8896,22 +8912,28 @@ def bulk_convert_to_bns_internal(from_date: str, to_date: str = None, force: int
             "delivery_note": 0,
             "purchase_receipt": 0
         }
-        
-        # Convert Sales Invoices
-        si_list = frappe.get_all(
-            "Sales Invoice",
-            filters=[
-                ["docstatus", "=", 1],
-                ["posting_date", ">=", from_date_obj],
-                ["posting_date", "<=", to_date_obj],
-                ["customer", "!=", ""]
-            ],
-            fields=["name", "customer", "is_bns_internal_customer", "status"],
-            limit=10000
+
+        internal_customers = frappe.get_all(
+            "Customer", filters={"is_bns_internal_customer": 1}, pluck="name"
         )
-        for si in si_list:
-            customer_internal = frappe.db.get_value("Customer", si.customer, "is_bns_internal_customer")
-            if customer_internal:
+        internal_suppliers = frappe.get_all(
+            "Supplier", filters={"is_bns_internal_supplier": 1}, pluck="name"
+        )
+
+        # Convert Sales Invoices
+        if internal_customers:
+            si_list = frappe.get_all(
+                "Sales Invoice",
+                filters=[
+                    ["docstatus", "=", 1],
+                    ["posting_date", ">=", from_date_obj],
+                    ["posting_date", "<=", to_date_obj],
+                    ["customer", "in", internal_customers],
+                ],
+                fields=["name", "is_bns_internal_customer", "status"],
+                limit_page_length=0,
+            )
+            for si in si_list:
                 if force or not si.get("is_bns_internal_customer") or si.status != "BNS Internally Transferred":
                     try:
                         convert_sales_invoice_to_bns_internal(si.name, None)
@@ -8919,22 +8941,21 @@ def bulk_convert_to_bns_internal(from_date: str, to_date: str = None, force: int
                     except Exception as e:
                         logger.error(f"Error converting Sales Invoice {si.name}: {str(e)}")
                         continue
-        
+
         # Convert Purchase Invoices
-        pi_list = frappe.get_all(
-            "Purchase Invoice",
-            filters=[
-                ["docstatus", "=", 1],
-                ["posting_date", ">=", from_date_obj],
-                ["posting_date", "<=", to_date_obj],
-                ["supplier", "!=", ""]
-            ],
-            fields=["name", "supplier", "is_bns_internal_supplier", "status"],
-            limit=10000
-        )
-        for pi in pi_list:
-            supplier_internal = frappe.db.get_value("Supplier", pi.supplier, "is_bns_internal_supplier")
-            if supplier_internal:
+        if internal_suppliers:
+            pi_list = frappe.get_all(
+                "Purchase Invoice",
+                filters=[
+                    ["docstatus", "=", 1],
+                    ["posting_date", ">=", from_date_obj],
+                    ["posting_date", "<=", to_date_obj],
+                    ["supplier", "in", internal_suppliers],
+                ],
+                fields=["name", "is_bns_internal_supplier", "status"],
+                limit_page_length=0,
+            )
+            for pi in pi_list:
                 if force or not pi.get("is_bns_internal_supplier") or pi.status != "BNS Internally Transferred":
                     try:
                         convert_purchase_invoice_to_bns_internal(pi.name, None)
@@ -8942,72 +8963,69 @@ def bulk_convert_to_bns_internal(from_date: str, to_date: str = None, force: int
                     except Exception as e:
                         logger.error(f"Error converting Purchase Invoice {pi.name}: {str(e)}")
                         continue
-        
-        # Convert Delivery Notes (same GSTIN only)
-        dn_list = frappe.get_all(
-            "Delivery Note",
-            filters=[
-                ["docstatus", "=", 1],
-                ["posting_date", ">=", from_date_obj],
-                ["posting_date", "<=", to_date_obj],
-                ["customer", "!=", ""]
-            ],
-            fields=["name", "customer", "is_bns_internal_customer", "status",
-                    "billing_address_gstin", "company_gstin", "bns_inter_company_reference"],
-            limit=10000
-        )
-        for dn in dn_list:
-            customer_internal = frappe.db.get_value("Customer", dn.customer, "is_bns_internal_customer")
-            if customer_internal:
+
+        # Convert Delivery Notes (same GSTIN only, within date window)
+        if internal_customers:
+            dn_list = frappe.get_all(
+                "Delivery Note",
+                filters=[
+                    ["docstatus", "=", 1],
+                    ["posting_date", ">=", from_date_obj],
+                    ["posting_date", "<=", to_date_obj],
+                    ["customer", "in", internal_customers],
+                ],
+                fields=["name", "is_bns_internal_customer", "status",
+                        "billing_address_gstin", "company_gstin", "bns_inter_company_reference"],
+                limit_page_length=0,
+            )
+            for dn in dn_list:
                 billing_gstin = dn.get("billing_address_gstin")
                 company_gstin = dn.get("company_gstin")
-                if billing_gstin and company_gstin and billing_gstin == company_gstin:
-                    dn_ref = (dn.get("bns_inter_company_reference") or "").strip()
-                    needs_convert = (
-                        force
-                        or not dn.get("is_bns_internal_customer")
-                        or dn.status != "BNS Internally Transferred"
-                        or not dn_ref
-                    )
-                    if needs_convert:
-                        try:
-                            result = convert_delivery_note_to_bns_internal(dn.name, None)
-                            if result.get("success"):
-                                converted["delivery_note"] += 1
-                        except Exception as e:
-                            logger.error(f"Error converting Delivery Note {dn.name}: {str(e)}")
-                            frappe.log_error(f"Error converting Delivery Note {dn.name}: {str(e)}", "BNS Bulk Conversion")
-                            continue
-        
-        # Convert Purchase Receipts (from DN with same GSTIN)
-        pr_list = frappe.get_all(
-            "Purchase Receipt",
-            filters=[
-                ["docstatus", "=", 1],
-                ["posting_date", ">=", from_date_obj],
-                ["posting_date", "<=", to_date_obj],
-                ["supplier_delivery_note", "!=", ""]
-            ],
-            fields=["name", "supplier_delivery_note", "is_bns_internal_supplier", "status"],
-            limit=10000
-        )
-        for pr in pr_list:
-            if pr.supplier_delivery_note and frappe.db.exists("Delivery Note", pr.supplier_delivery_note):
-                dn_name = pr.supplier_delivery_note
-                dn_customer = frappe.db.get_value("Delivery Note", dn_name, "customer")
-                if dn_customer:
-                    customer_internal = frappe.db.get_value("Customer", dn_customer, "is_bns_internal_customer")
-                    if customer_internal:
-                        dn_billing_gstin = frappe.db.get_value("Delivery Note", dn_name, "billing_address_gstin")
-                        dn_company_gstin = frappe.db.get_value("Delivery Note", dn_name, "company_gstin")
-                        if dn_billing_gstin and dn_company_gstin and dn_billing_gstin == dn_company_gstin:
-                            if force or not pr.get("is_bns_internal_supplier") or pr.status != "BNS Internally Transferred":
-                                try:
-                                    convert_purchase_receipt_to_bns_internal(pr.name, None)
-                                    converted["purchase_receipt"] += 1
-                                except Exception as e:
-                                    logger.error(f"Error converting Purchase Receipt {pr.name}: {str(e)}")
-                                    continue
+                if not (billing_gstin and company_gstin and billing_gstin == company_gstin):
+                    continue
+                dn_ref = (dn.get("bns_inter_company_reference") or "").strip()
+                needs_convert = (
+                    force
+                    or not dn.get("is_bns_internal_customer")
+                    or dn.status != "BNS Internally Transferred"
+                    or not dn_ref
+                )
+                if needs_convert:
+                    try:
+                        result = convert_delivery_note_to_bns_internal(dn.name, None)
+                        if result.get("success"):
+                            converted["delivery_note"] += 1
+                    except Exception as e:
+                        logger.error(f"Error converting Delivery Note {dn.name}: {str(e)}")
+                        frappe.log_error(f"Error converting Delivery Note {dn.name}: {str(e)}", "BNS Bulk Conversion")
+                        continue
+
+        # Eligibility set for PR match: all internal-customer same-GSTIN DNs,
+        # date-independent — a PR in the date window may reference a DN
+        # outside the window (e.g. month-end GR crossing FY boundary).
+        eligible_dn_names: Set[str] = _eligible_internal_dn_names(internal_customers)
+
+        # Convert Purchase Receipts (linked to an eligible same-GSTIN DN)
+        if eligible_dn_names:
+            pr_list = frappe.get_all(
+                "Purchase Receipt",
+                filters=[
+                    ["docstatus", "=", 1],
+                    ["posting_date", ">=", from_date_obj],
+                    ["posting_date", "<=", to_date_obj],
+                    ["supplier_delivery_note", "in", list(eligible_dn_names)],
+                ],
+                fields=["name", "is_bns_internal_supplier", "status"],
+                limit_page_length=0,
+            )
+            for pr in pr_list:
+                if force or not pr.get("is_bns_internal_supplier") or pr.status != "BNS Internally Transferred":
+                    try:
+                        convert_purchase_receipt_to_bns_internal(pr.name, None)
+                        converted["purchase_receipt"] += 1
+                    except Exception as e:
+                        logger.error(f"Error converting Purchase Receipt {pr.name}: {str(e)}")
+                        continue
         
         total_converted = converted["sales_invoice"] + converted["purchase_invoice"] + converted["delivery_note"] + converted["purchase_receipt"]
         
