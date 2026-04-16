@@ -76,6 +76,29 @@ def _bns_require_accounts_write():
         )
 
 
+def _bns_require_doctype_read(doctype: str):
+    """Per-doctype read gate — used by BNS endpoints that operate on a
+    specific transaction doctype (Sales Invoice, Purchase Invoice,
+    Delivery Note, Purchase Receipt) rather than on branch-accounting
+    configuration. Lets admins grant routine accounts users access to
+    BNS convert/link operations without granting write on BNS Branch
+    Accounting Settings."""
+    if not frappe.has_permission(doctype, "read"):
+        frappe.throw(
+            _("You need read permission on {0} for this BNS endpoint.").format(doctype),
+            frappe.PermissionError,
+        )
+
+
+def _bns_require_doctype_write(doctype: str):
+    """Per-doctype write gate. See `_bns_require_doctype_read` for rationale."""
+    if not frappe.has_permission(doctype, "write"):
+        frappe.throw(
+            _("You need write permission on {0} for this BNS endpoint.").format(doctype),
+            frappe.PermissionError,
+        )
+
+
 def _bns_debug_log(hypothesis_id: str, location: str, message: str, data: Optional[Dict[str, Any]] = None) -> None:
     """Append one NDJSON debug line for runtime investigation."""
     try:
@@ -6923,7 +6946,7 @@ def convert_sales_invoice_to_bns_internal(sales_invoice: str, purchase_invoice: 
     Raises:
         BNSValidationError: If validation fails
     """
-    _bns_require_accounts_write()
+    _bns_require_doctype_write("Sales Invoice")
     try:
         # Get Sales Invoice
         si = frappe.get_doc("Sales Invoice", sales_invoice)
@@ -6961,8 +6984,9 @@ def convert_sales_invoice_to_bns_internal(sales_invoice: str, purchase_invoice: 
         
         # If Purchase Invoice is found/provided, validate and link
         if purchase_invoice:
+            _bns_require_doctype_write("Purchase Invoice")
             pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
-            
+
             # Validate PI is submitted
             if pi.docstatus != 1:
                 raise BNSValidationError(_("Purchase Invoice {0} must be submitted before linking").format(purchase_invoice))
@@ -7073,7 +7097,7 @@ def convert_purchase_invoice_to_bns_internal(purchase_invoice: str, sales_invoic
     Raises:
         BNSValidationError: If validation fails
     """
-    _bns_require_accounts_write()
+    _bns_require_doctype_write("Purchase Invoice")
     try:
         pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
 
@@ -7115,8 +7139,9 @@ def convert_purchase_invoice_to_bns_internal(purchase_invoice: str, sales_invoic
         
         # If Sales Invoice is found/provided, validate and link
         if sales_invoice:
+            _bns_require_doctype_write("Sales Invoice")
             si = frappe.get_doc("Sales Invoice", sales_invoice)
-            
+
             # Validate SI is submitted
             if si.docstatus != 1:
                 raise BNSValidationError(_("Sales Invoice {0} must be submitted before linking").format(sales_invoice))
@@ -7313,7 +7338,8 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
     Raises:
         BNSValidationError: If validation fails
     """
-    _bns_require_accounts_write()
+    _bns_require_doctype_write("Delivery Note")
+    _bns_require_doctype_write("Purchase Receipt")
     try:
         # Get Delivery Note
         dn = frappe.get_doc("Delivery Note", delivery_note)
@@ -7489,7 +7515,8 @@ def convert_purchase_receipt_to_bns_internal(purchase_receipt: str, delivery_not
     Raises:
         BNSValidationError: If validation fails
     """
-    _bns_require_accounts_write()
+    _bns_require_doctype_write("Purchase Receipt")
+    _bns_require_doctype_write("Delivery Note")
     try:
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
 
@@ -8705,7 +8732,8 @@ def get_bulk_conversion_preview(from_date: str, to_date: str = None, force: int 
     Returns:
         Dict: Counts of documents that can be converted
     """
-    _bns_require_accounts_read()
+    for _dt in ("Sales Invoice", "Purchase Invoice", "Delivery Note", "Purchase Receipt"):
+        _bns_require_doctype_read(_dt)
     try:
         from_date_obj = frappe.utils.getdate(from_date)
         if to_date:
@@ -8846,7 +8874,8 @@ def bulk_convert_to_bns_internal(from_date: str, to_date: str = None, force: int
     Returns:
         Dict: Results with counts of converted documents
     """
-    _bns_require_accounts_write()
+    for _dt in ("Sales Invoice", "Purchase Invoice", "Delivery Note", "Purchase Receipt"):
+        _bns_require_doctype_write(_dt)
     try:
         from_date_obj = frappe.utils.getdate(from_date)
         if to_date:
