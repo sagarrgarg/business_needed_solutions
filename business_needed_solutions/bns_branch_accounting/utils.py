@@ -16,6 +16,7 @@ from erpnext.accounts.doctype.sales_invoice.sales_invoice import update_address,
 from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
     get_accounting_dimensions,
 )
+from erpnext.accounts.utils import get_fiscal_year
 from frappe.utils import flt, cint, get_link_to_form, getdate, add_to_date, now_datetime
 from frappe import bold
 from typing import Optional, Dict, Any, List, Tuple, Set
@@ -8710,7 +8711,7 @@ def get_bulk_conversion_preview(from_date: str, to_date: str = None, force: int 
         if to_date:
             to_date_obj = frappe.utils.getdate(to_date)
         else:
-            to_date_obj = frappe.get_fiscal_year(from_date_obj)[2]
+            to_date_obj = get_fiscal_year(from_date_obj)[2]
 
         si_filters = [
             ["docstatus", "=", 1],
@@ -8851,9 +8852,9 @@ def bulk_convert_to_bns_internal(from_date: str, to_date: str = None, force: int
         if to_date:
             to_date_obj = frappe.utils.getdate(to_date)
         else:
-            to_date_obj = frappe.get_fiscal_year(from_date_obj)[2]
+            to_date_obj = get_fiscal_year(from_date_obj)[2]
 
-        if force and to_date_obj > frappe.get_fiscal_year(from_date_obj)[2]:
+        if force and to_date_obj > get_fiscal_year(from_date_obj)[2]:
             logger.warning(
                 "bulk_convert_to_bns_internal: force=1 with date range %s to %s spans "
                 "multiple fiscal years — documents will be stamped with current settings",
@@ -9996,7 +9997,7 @@ def _repost_chain(chain: Dict[str, Any], allow_cross_fy_repost: bool = False) ->
     skipped = []
     errors = []
 
-    current_fy = frappe.get_fiscal_year(getdate(frappe.utils.nowdate()))
+    current_fy = get_fiscal_year(getdate(frappe.utils.nowdate()))
 
     def _repost_voucher(voucher_type: str, voucher_no: str):
         """Create a Repost Item Valuation entry for a voucher."""
@@ -10006,7 +10007,7 @@ def _repost_chain(chain: Dict[str, Any], allow_cross_fy_repost: bool = False) ->
                 return
 
             if not allow_cross_fy_repost:
-                voucher_fy = frappe.get_fiscal_year(getdate(doc.posting_date))
+                voucher_fy = get_fiscal_year(getdate(doc.posting_date))
                 if voucher_fy[0] != current_fy[0]:
                     msg = (
                         f"Skipping repost of {voucher_type} {voucher_no} "
