@@ -4198,7 +4198,7 @@ def make_bns_internal_purchase_receipt(source_name: str, target_doc: Optional[Di
         BNSValidationError: If validation fails
         BNSInternalTransferError: If internal transfer setup fails
     """
-    _bns_require_accounts_write()
+    _bns_require_doctype_write("Purchase Receipt")
     try:
         dn = frappe.get_doc("Delivery Note", source_name, for_update=True)
 
@@ -5904,7 +5904,7 @@ def make_bns_internal_purchase_invoice(source_name: str, target_doc: Optional[Di
         BNSValidationError: If validation fails
         BNSInternalTransferError: If internal transfer setup fails
     """
-    _bns_require_accounts_write()
+    _bns_require_doctype_write("Purchase Invoice")
     try:
         si = frappe.get_doc("Sales Invoice", source_name, for_update=True)
 
@@ -6225,7 +6225,7 @@ def make_bns_internal_purchase_receipt_from_si(source_name: str, target_doc: Opt
         BNSValidationError: If validation fails
         BNSInternalTransferError: If internal transfer setup fails
     """
-    _bns_require_accounts_write()
+    _bns_require_doctype_write("Purchase Receipt")
     try:
         si = frappe.get_doc("Sales Invoice", source_name)
 
@@ -8072,7 +8072,8 @@ def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
     Returns:
         Dict: Result with success message
     """
-    _bns_require_accounts_write()
+    _bns_require_doctype_write("Delivery Note")
+    _bns_require_doctype_write("Purchase Receipt")
     try:
         dn = frappe.get_doc("Delivery Note", delivery_note, for_update=True)
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt, for_update=True)
@@ -8345,7 +8346,8 @@ def link_si_pr(sales_invoice: str, purchase_receipt: str) -> Dict:
     Returns:
         Dict: Result with success message
     """
-    _bns_require_accounts_write()
+    _bns_require_doctype_write("Sales Invoice")
+    _bns_require_doctype_write("Purchase Receipt")
     try:
         si = frappe.get_doc("Sales Invoice", sales_invoice)
         pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
@@ -8489,7 +8491,8 @@ def link_si_pi(sales_invoice: str, purchase_invoice: str) -> Dict:
     Returns:
         Dict: Result with success message
     """
-    _bns_require_accounts_write()
+    _bns_require_doctype_write("Sales Invoice")
+    _bns_require_doctype_write("Purchase Invoice")
     try:
         si = frappe.get_doc("Sales Invoice", sales_invoice, for_update=True)
         pi = frappe.get_doc("Purchase Invoice", purchase_invoice, for_update=True)
