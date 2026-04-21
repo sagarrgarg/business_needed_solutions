@@ -134,23 +134,16 @@ class BNSStockEntry(StockEntry):
         If BNS variance feature is disabled, falls back to ERPNext's strict validation.
         Otherwise, allows quantities within the configured +/- % tolerance.
         """
-        # Early exit conditions (same as ERPNext)
         if self.purpose not in ["Manufacture", "Material Transfer for Manufacture"]:
             return
-        
-        if not frappe.db.get_single_value("Manufacturing Settings", "validate_components_quantities_per_bom"):
-            return
-        
+
         if not self.fg_completed_qty:
             return
-        
-        # Check if BNS variance feature is enabled
+
         if not self._is_bns_variance_enabled():
-            # Fall back to ERPNext's strict validation
             super().validate_component_and_quantities()
             return
-        
-        # BNS variance validation
+
         self._validate_with_variance_tolerance()
     
     def _is_bns_variance_enabled(self):
