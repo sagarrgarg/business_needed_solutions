@@ -133,11 +133,6 @@ class BNSStockEntry(StockEntry):
 
         If BNS variance feature is disabled, falls back to ERPNext's strict validation.
         Otherwise, allows quantities within the configured +/- % tolerance.
-
-        Batch/Serial safety: ERPNext's get_matched_items() aggregates
-        qty across all rows of the same item_code, so batch-tracked items
-        split into multiple rows (different batches/SBBs) are summed
-        correctly before comparison with BOM expected qty.
         """
         # Early exit conditions (same as ERPNext)
         if self.purpose not in ["Manufacture", "Material Transfer for Manufacture"]:
@@ -180,28 +175,36 @@ class BNSStockEntry(StockEntry):
             frappe.db.get_single_value("BNS Settings", "bns_default_variance_qty", cache=True)
         )
     
+    def _get_aggregated_qty(self, item_code):
+        """Sum qty across all Stock Entry rows matching the item_code."""
+        total = 0
+        found = False
+        for row in self.items:
+            if row.item_code == item_code or row.original_item == item_code:
+                if row.s_warehouse and not row.is_finished_item and not row.is_scrap_item:
+                    total += flt(row.qty)
+                    found = True
+        return total if found else None
+
     def _validate_with_variance_tolerance(self):
         """
         Validate component quantities with variance tolerance.
-        
-        Computes expected quantities from BOM (respecting multi-level setting),
-        calculates allowed variance for each item, and validates actual
-        quantities are within tolerance.
+
+        Aggregates qty across all rows of the same item_code (handles
+        batch-tracked items split into multiple rows) before comparing
+        against the BOM expected qty.
         """
-        # Get expected raw materials from BOM
         raw_materials = self.get_bom_raw_materials(self.fg_completed_qty)
-        
-        # Build variance map from BOM items
+
         variance_map = self._build_variance_map()
         default_variance = self._get_default_variance()
-        
+
         precision = frappe.get_precision("Stock Entry Detail", "qty")
-        
+
         for item_code, details in raw_materials.items():
-            matched_item = self.get_matched_items(item_code)
-            
-            if not matched_item:
-                # Item missing from stock entry
+            actual_qty_raw = self._get_aggregated_qty(item_code)
+
+            if actual_qty_raw is None:
                 frappe.throw(
                     _("According to the BOM {0}, the Item '{1}' is missing in the stock entry.").format(
                         get_link_to_form("BOM", self.bom_no),
@@ -210,20 +213,17 @@ class BNSStockEntry(StockEntry):
                     title=_("Missing Item")
                 )
                 continue
-            
+
             expected_qty = flt(details.get("qty"), precision)
-            actual_qty = flt(matched_item.qty, precision)
-            
-            # Get variance for this item (per-item override or default)
+            actual_qty = flt(actual_qty_raw, precision)
+
             variance_pct = self._get_item_variance(item_code, variance_map, default_variance)
-            
-            # Calculate allowed absolute variance
+
             allowed_abs = flt(expected_qty * variance_pct / 100, precision)
-            
-            # Check if actual quantity is within tolerance
+
             lower_bound = flt(expected_qty - allowed_abs, precision)
             upper_bound = flt(expected_qty + allowed_abs, precision)
-            
+
             if actual_qty < lower_bound or actual_qty > upper_bound:
                 frappe.throw(
                     _("For the item {0}, the quantity {1} is outside the allowed variance range.<br><br>"
@@ -269,7 +269,7 @@ class BNSStockEntry(StockEntry):
     def _collect_variance_from_bom(self, bom_no, variance_map):
         """
         Collect variance values from a single BOM's items.
-        
+
         Args:
             bom_no (str): BOM name
             variance_map (dict): Map to populate with item_code -> variance_pct
@@ -279,14 +279,14 @@ class BNSStockEntry(StockEntry):
             filters={"parent": bom_no, "parenttype": "BOM"},
             fields=["item_code", "bns_variance_qty"]
         )
-        
+
         for item in bom_items:
             item_code = item.get("item_code")
-            variance = flt(item.get("bns_variance_qty"))
-            
-            # Only add if variance is explicitly set and not already in map
-            if variance > 0 and item_code not in variance_map:
-                variance_map[item_code] = variance
+            raw_variance = item.get("bns_variance_qty")
+
+            # Distinguish "not set" (None/empty) from "explicitly 0%"
+            if raw_variance is not None and raw_variance != "" and item_code not in variance_map:
+                variance_map[item_code] = flt(raw_variance)
     
     def _collect_variance_from_bom_tree(self, bom_no, variance_map, visited=None):
         """
@@ -314,12 +314,11 @@ class BNSStockEntry(StockEntry):
         
         for item in bom_items:
             item_code = item.get("item_code")
-            variance = flt(item.get("bns_variance_qty"))
+            raw_variance = item.get("bns_variance_qty")
             child_bom = item.get("bom_no")
-            
-            # Collect variance for this item
-            if variance > 0 and item_code not in variance_map:
-                variance_map[item_code] = variance
+
+            if raw_variance is not None and raw_variance != "" and item_code not in variance_map:
+                variance_map[item_code] = flt(raw_variance)
             
             # Recurse into child BOM if exists
             if child_bom:
