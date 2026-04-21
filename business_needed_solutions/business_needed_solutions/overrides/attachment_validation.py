@@ -128,7 +128,11 @@ def _is_ewaybill_required(doc) -> bool:
       2. At least one line item is a stock item (goods). update_stock alone
          does not count — non-stock-only PIs must not require e-Waybill.
       3. abs(base_grand_total) >= e_waybill_threshold from GST Settings.
+      4. Supplier GST category is not "Unregistered".
     """
+    if _is_unregistered_supplier(doc):
+        return False
+
     try:
         enable_ewaybill = frappe.db.get_single_value("GST Settings", "enable_e_waybill")
         if not cint(enable_ewaybill):
@@ -167,6 +171,11 @@ def _require_ewaybill(doc) -> None:
         )
 
 
+def _is_unregistered_supplier(doc) -> bool:
+    """True when the document's GST category is Unregistered."""
+    return (doc.get("gst_category") or "").strip().lower() == "unregistered"
+
+
 def _has_linked_purchase_receipt(doc) -> bool:
     """Return True if any PI item references a Purchase Receipt."""
     for item in doc.items or []:
@@ -193,6 +202,7 @@ def check_ewaybill_applicability(
     items_json=None,
     is_bns_internal_supplier=0,
     supplier=None,
+    gst_category=None,
 ):
     """
     Client-callable endpoint to determine whether the e-Waybill field should be
@@ -215,6 +225,9 @@ def check_ewaybill_applicability(
     if cint(is_bns_internal_supplier):
         return {"required": False, "threshold": _get_ewaybill_threshold()}
     if supplier and cint(frappe.db.get_value("Supplier", supplier, "is_bns_internal_supplier")):
+        return {"required": False, "threshold": _get_ewaybill_threshold()}
+
+    if (gst_category or "").strip().lower() == "unregistered":
         return {"required": False, "threshold": _get_ewaybill_threshold()}
 
     try:

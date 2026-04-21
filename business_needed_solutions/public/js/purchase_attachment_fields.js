@@ -83,7 +83,8 @@ function _refreshEwaybillVisibility(frm) {
         update_stock: frm.doc.update_stock || 0,
         items_json: JSON.stringify((frm.doc.items || []).map(function(d) { return {item_code: d.item_code}; })),
         is_bns_internal_supplier: cint(frm.doc.is_bns_internal_supplier),
-        supplier: frm.doc.supplier || ''
+        supplier: frm.doc.supplier || '',
+        gst_category: frm.doc.gst_category || ''
       },
       callback: function(r) {
         if (!r || !r.message) return;
@@ -107,6 +108,7 @@ frappe.ui.form.on('Purchase Receipt', {
   refresh: function(frm) { setupPurchaseAttachmentFields(frm); },
   supplier: function(frm) { setupPurchaseAttachmentFields(frm); },
   is_bns_internal_supplier: function(frm) { setupPurchaseAttachmentFields(frm); },
+  gst_category: function(frm) { _refreshEwaybillVisibility(frm); },
   base_grand_total: function(frm) { _refreshEwaybillVisibility(frm); },
   items_remove: function(frm) { _refreshEwaybillVisibility(frm); }
 });
@@ -119,6 +121,9 @@ frappe.ui.form.on('Purchase Invoice', {
   refresh: function(frm) { setupPurchaseAttachmentFields(frm); },
   supplier: function(frm) { setupPurchaseAttachmentFields(frm); },
   is_bns_internal_supplier: function(frm) { setupPurchaseAttachmentFields(frm); },
+  gst_category: function(frm) {
+    if (!_isLinkedToPR(frm)) _refreshEwaybillVisibility(frm);
+  },
   base_grand_total: function(frm) {
     if (!_isLinkedToPR(frm)) _refreshEwaybillVisibility(frm);
   },
