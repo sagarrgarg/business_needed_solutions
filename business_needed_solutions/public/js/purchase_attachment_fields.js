@@ -84,7 +84,8 @@ function _refreshEwaybillVisibility(frm) {
         items_json: JSON.stringify((frm.doc.items || []).map(function(d) { return {item_code: d.item_code}; })),
         is_bns_internal_supplier: cint(frm.doc.is_bns_internal_supplier),
         supplier: frm.doc.supplier || '',
-        gst_category: frm.doc.gst_category || ''
+        gst_category: frm.doc.gst_category || '',
+        posting_date: frm.doc.posting_date || ''
       },
       callback: function(r) {
         if (!r || !r.message) return;

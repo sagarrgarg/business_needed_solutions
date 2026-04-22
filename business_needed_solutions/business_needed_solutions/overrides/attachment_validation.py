@@ -203,6 +203,7 @@ def check_ewaybill_applicability(
     is_bns_internal_supplier=0,
     supplier=None,
     gst_category=None,
+    posting_date=None,
 ):
     """
     Client-callable endpoint to determine whether the e-Waybill field should be
@@ -221,6 +222,12 @@ def check_ewaybill_applicability(
         frappe.throw(_("Not permitted"), frappe.PermissionError)
     if not _is_attachment_validation_enabled():
         return {"required": False, "threshold": 0}
+
+    if posting_date:
+        from frappe.utils import getdate
+        cutoff = frappe.db.get_single_value("BNS Settings", "purchase_attachment_cutoff_date")
+        if cutoff and getdate(posting_date) < getdate(cutoff):
+            return {"required": False, "threshold": 0}
 
     if cint(is_bns_internal_supplier):
         return {"required": False, "threshold": _get_ewaybill_threshold()}
