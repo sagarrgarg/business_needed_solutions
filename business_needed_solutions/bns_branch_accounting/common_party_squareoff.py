@@ -346,28 +346,41 @@ def square_off_all_common_parties(
 		result["pairs"] = pairs
 		return result
 
-	for pair in pairs:
+	total = len(pairs)
+	for idx, pair in enumerate(pairs, 1):
 		sp = frappe.db.savepoint("bns_common_party_squareoff")
 		try:
-			# Re-read balances inside the savepoint to catch races where another
-			# request (auto-hook or parallel manual post) has already squared off
-			# this pair. Skip if it's no longer crossed or the amount has shrunk.
 			live = _refresh_pair_balances(pair)
 			if live is None:
 				result["skipped"].append({"pair_key": pair["pair_key"], "reason": "no_longer_crossed"})
-				continue
-			jv = square_off_linked_party(
-				live,
-				posting_date=posting_date or as_of_date,
-				cost_center=cost_center,
-				remark=remark,
-			)
-			result["posted"].append(
-				{"pair_key": live["pair_key"], "journal_entry": jv.name, "amount": live["square_off_amount"]}
-			)
+			else:
+				jv = square_off_linked_party(
+					live,
+					posting_date=posting_date or as_of_date,
+					cost_center=cost_center,
+					remark=remark,
+				)
+				result["posted"].append(
+					{"pair_key": live["pair_key"], "journal_entry": jv.name, "amount": live["square_off_amount"]}
+				)
 		except Exception as exc:
 			frappe.db.rollback(save_point=sp)
 			result["errors"].append({"pair_key": pair["pair_key"], "error": str(exc)})
+
+		frappe.db.commit()
+
+		if idx % 5 == 0 or idx == total:
+			frappe.publish_realtime(
+				"bns_squareoff_progress",
+				{
+					"current": idx,
+					"total": total,
+					"posted": len(result["posted"]),
+					"errors": len(result["errors"]),
+				},
+				doctype="BNS Settings",
+			)
+
 	return result
 
 

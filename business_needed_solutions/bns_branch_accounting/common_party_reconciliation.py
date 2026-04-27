@@ -304,9 +304,14 @@ def reconcile_all_parties(
 	if party_filter is not None:
 		filter_set = {tuple(x) for x in party_filter if x}
 
-	for party_type, party in _iter_parties_for_scope(company, scope, party_types):
-		if filter_set is not None and (party_type, party) not in filter_set:
-			continue
+	parties = [
+		(pt, p)
+		for pt, p in _iter_parties_for_scope(company, scope, party_types)
+		if filter_set is None or (pt, p) in filter_set
+	]
+	total = len(parties)
+
+	for idx, (party_type, party) in enumerate(parties, 1):
 		result = reconcile_single_party(
 			company=company,
 			party_type=party_type,
@@ -314,24 +319,38 @@ def reconcile_all_parties(
 			window=window,
 			include_advances=include_advances,
 		)
+
 		if result.get("error"):
 			summary["errors"].append({"party_type": party_type, "party": party, "error": result["error"]})
-			continue
-		if result.get("skipped_reason"):
+		elif result.get("skipped_reason"):
 			summary["skipped_parties"] += 1
-			continue
-		rows = int(result.get("reconciled_rows") or 0)
-		if rows > 0:
-			summary["reconciled_parties"].append(
+		else:
+			rows = int(result.get("reconciled_rows") or 0)
+			if rows > 0:
+				summary["reconciled_parties"].append(
+					{
+						"party_type": party_type,
+						"party": party,
+						"account": result.get("account"),
+						"reconciled_rows": rows,
+					}
+				)
+				summary["total_allocations"] += rows
+				summary["total_invoices_touched"] += int(result.get("invoices_touched") or 0)
+
+		frappe.db.commit()
+
+		if idx % 5 == 0 or idx == total:
+			frappe.publish_realtime(
+				"bns_reconcile_progress",
 				{
-					"party_type": party_type,
-					"party": party,
-					"account": result.get("account"),
-					"reconciled_rows": rows,
-				}
+					"current": idx,
+					"total": total,
+					"reconciled": len(summary["reconciled_parties"]),
+					"errors": len(summary["errors"]),
+				},
+				doctype="BNS Settings",
 			)
-			summary["total_allocations"] += rows
-			summary["total_invoices_touched"] += int(result.get("invoices_touched") or 0)
 
 	summary["finished_at"] = str(now_datetime())
 	return summary
