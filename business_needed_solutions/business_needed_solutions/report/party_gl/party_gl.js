@@ -162,35 +162,8 @@ frappe.query_reports["Party GL"] = {
 			default: 1,
 		},
 		{
-			fieldname: "show_opening_entries",
-			label: __("Show Opening Entries"),
-			fieldtype: "Check",
-		},
-		{
-			fieldname: "include_default_book_entries",
-			label: __("Include Default FB Entries"),
-			fieldtype: "Check",
-			default: 1,
-		},
-		{
-			fieldname: "show_cancelled_entries",
-			label: __("Show Cancelled Entries"),
-			fieldtype: "Check",
-			hidden: 1,
-		},
-		{
-			fieldname: "show_net_values_in_party_account",
-			label: __("Show Net Values in Party Account"),
-			fieldtype: "Check",
-		},
-		{
 			fieldname: "show_in_account_currency",
 			label: __("Show in Account Currency"),
-			fieldtype: "Check",
-		},
-		{
-			fieldname: "add_values_in_transaction_currency",
-			label: __("Add Columns in Transaction Currency"),
 			fieldtype: "Check",
 		},
 		{
@@ -199,14 +172,17 @@ frappe.query_reports["Party GL"] = {
 			fieldtype: "Check",
 		},
 		{
-			fieldname: "ignore_err",
-			label: __("Ignore Exchange Rate Revaluation Journals"),
+			fieldname: "itemised",
+			label: __("Itemised View"),
 			fieldtype: "Check",
+			description: __("Expand each Sales / Purchase Invoice into item-level rows."),
 		},
 		{
-			fieldname: "ignore_cr_dr_notes",
-			label: __("Ignore System Generated Credit / Debit Notes"),
+			fieldname: "show_gst_rate",
+			label: __("Show GST Rate"),
 			fieldtype: "Check",
+			depends_on: "eval:doc.itemised",
+			description: __("Show combined GST % per item (CGST+SGST or IGST). Itemised View must be on."),
 		},
 	],
 	
@@ -413,6 +389,8 @@ async function downloadStatementPDF(report) {
 		loadStatementMeta(report);
 	}
 
+	var isItemised = !!filters.itemised;
+
 	frappe.prompt(
 		[
 			{
@@ -423,7 +401,7 @@ async function downloadStatementPDF(report) {
 					{ value: "Portrait", label: __("Portrait") },
 					{ value: "Landscape", label: __("Landscape") },
 				],
-				default: "Portrait",
+				default: isItemised ? "Landscape" : "Portrait",
 			},
 			{
 				fieldtype: "Check",
@@ -431,6 +409,7 @@ async function downloadStatementPDF(report) {
 				label: __("Pick Columns"),
 				description: __("Select specific columns to include. If unchecked, all columns are included."),
 				default: 0,
+				hidden: isItemised ? 1 : 0,
 			},
 			{
 				fieldtype: "Section Break",

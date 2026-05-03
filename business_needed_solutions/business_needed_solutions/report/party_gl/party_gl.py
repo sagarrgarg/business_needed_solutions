@@ -159,7 +159,188 @@ def get_result(filters, account_details):
 
 	result = get_result_as_list(data, filters)
 
+	if filters.get("itemised"):
+		result = inject_item_rows(result, filters)
+
 	return result
+
+
+def inject_item_rows(result, filters):
+	"""For each Sales/Purchase Invoice voucher row, append item-level sub-rows.
+
+	Item rows carry no posting_date/debit/credit so they don't disturb balance
+	or row-class detection (opening/closing/total) used by the template.
+	"""
+	si_nos, pi_nos = [], []
+	for d in result:
+		vno = d.get("voucher_no")
+		vtype = d.get("voucher_type")
+		if not vno or not vtype:
+			continue
+		if vtype == "Sales Invoice":
+			si_nos.append(vno)
+		elif vtype == "Purchase Invoice":
+			pi_nos.append(vno)
+
+	if not si_nos and not pi_nos:
+		return result
+
+	items_map = {}  # voucher_no -> [item dicts]
+
+	item_fields = (
+		"parent, item_code, item_name, qty, uom, stock_qty, stock_uom, "
+		"conversion_factor, price_list_rate, discount_percentage, rate, amount, "
+		"custom_d1_, custom_d2_, custom_d3_"
+	)
+
+	def _safe_fetch(table, parents):
+		if not parents:
+			return []
+		try:
+			return frappe.db.sql(
+				f"select {item_fields} from `{table}` where parent in %(p)s order by parent, idx",
+				{"p": parents},
+				as_dict=1,
+			)
+		except Exception:
+			# Fallback if BNS triple-discount custom fields are absent on this site
+			return frappe.db.sql(
+				"""select parent, item_code, item_name, qty, uom, stock_qty, stock_uom,
+				conversion_factor, price_list_rate, discount_percentage, rate, amount
+				from `""" + table + "` where parent in %(p)s order by parent, idx",
+				{"p": parents},
+				as_dict=1,
+			)
+
+	for r in _safe_fetch("tabSales Invoice Item", si_nos):
+		items_map.setdefault(r.parent, []).append(r)
+	for r in _safe_fetch("tabPurchase Invoice Item", pi_nos):
+		items_map.setdefault(r.parent, []).append(r)
+
+	if not items_map:
+		return result
+
+	gst_map = {}  # {parent_voucher: {item_code: total_gst_rate}}
+	if filters.get("show_gst_rate"):
+		gst_map.update(_fetch_gst_rates("tabSales Taxes and Charges", si_nos))
+		gst_map.update(_fetch_gst_rates("tabPurchase Taxes and Charges", pi_nos))
+
+	def _qty_label(it):
+		qty = it.get("qty") or 0
+		uom = it.get("uom") or ""
+		stock_qty = it.get("stock_qty") or 0
+		stock_uom = it.get("stock_uom") or ""
+		cf = it.get("conversion_factor") or 1
+		# Show dual UOM only if conversion is non-trivial
+		if stock_uom and stock_uom != uom and cf and cf != 1:
+			return f"{qty:g} {uom} ({stock_qty:g} {stock_uom})"
+		return f"{qty:g} {uom}".strip()
+
+	def _disc_label(it):
+		d1 = it.get("custom_d1_") or 0
+		d2 = it.get("custom_d2_") or 0
+		d3 = it.get("custom_d3_") or 0
+		dp = it.get("discount_percentage") or 0
+		tiers = [x for x in (d1, d2, d3) if x]
+		# Only show compounded format when 2+ tiers actually present
+		if len(tiers) >= 2:
+			parts = "+".join(f"{x:g}" for x in tiers)
+			return f"{parts} ({dp:.2f}%)" if dp else parts
+		return f"{dp:.2f}%" if dp else ""
+
+	new_result = []
+	for d in result:
+		new_result.append(d)
+		vno = d.get("voucher_no")
+		if vno and vno in items_map:
+			currency = d.get("account_currency")
+			parent_gst = gst_map.get(vno, {})
+			for it in items_map[vno]:
+				item_label = it.get("item_code") or ""
+				if it.get("item_name") and it.get("item_name") != it.get("item_code"):
+					item_label = f"{item_label} — {it.get('item_name')}"
+				gst_rate = parent_gst.get(it.get("item_code"), 0) if filters.get("show_gst_rate") else 0
+				new_result.append(_dict({
+					"is_item_row": 1,
+					"parent_voucher_no": vno,
+					"item_code": it.get("item_code"),
+					"item_name": it.get("item_name"),
+					"item_label": item_label,
+					"qty_label": _qty_label(it),
+					"price_list_rate": it.get("price_list_rate") or 0,
+					"discount_percentage": it.get("discount_percentage") or 0,
+					"discount_label": _disc_label(it),
+					"rate": it.get("rate") or 0,
+					"amount": it.get("amount") or 0,
+					"gst_rate": gst_rate,
+					"gst_rate_label": (f"{gst_rate:g}%" if gst_rate else "") if filters.get("show_gst_rate") else "",
+					"account_currency": currency,
+				}))
+	return new_result
+
+
+def _fetch_gst_rates(tax_table, parents):
+	"""Sum GST rates per item across all GST-type tax rows on each invoice.
+
+	Returns: {parent_voucher_no: {item_code: total_gst_percent}}
+	Handles both intra-state (CGST + SGST) and inter-state (IGST) cases —
+	since they're mutually exclusive on a given invoice, summing rates yields
+	the effective combined GST %.
+	"""
+	if not parents:
+		return {}
+
+	import json
+
+	# Try gst_tax_type field (india_compliance app); fall back to account name pattern
+	try:
+		rows = frappe.db.sql(
+			f"""select parent, item_wise_tax_detail
+			from `{tax_table}`
+			where parent in %(p)s
+			and item_wise_tax_detail is not null
+			and item_wise_tax_detail != ''
+			and gst_tax_type is not null
+			and gst_tax_type != ''
+			and gst_tax_type not like '%%cess%%'""",
+			{"p": parents},
+			as_dict=1,
+		)
+	except Exception:
+		rows = frappe.db.sql(
+			f"""select parent, item_wise_tax_detail
+			from `{tax_table}`
+			where parent in %(p)s
+			and item_wise_tax_detail is not null
+			and item_wise_tax_detail != ''
+			and (account_head like '%%GST%%' or account_head like '%%IGST%%'
+				or account_head like '%%CGST%%' or account_head like '%%SGST%%'
+				or account_head like '%%UTGST%%')
+			and account_head not like '%%Cess%%'""",
+			{"p": parents},
+			as_dict=1,
+		)
+
+	out = {}
+	for r in rows:
+		raw = r.item_wise_tax_detail
+		if not raw:
+			continue
+		try:
+			detail = json.loads(raw) if isinstance(raw, str) else raw
+		except Exception:
+			continue
+		if not isinstance(detail, dict):
+			continue
+		parent_map = out.setdefault(r.parent, {})
+		for item_code, val in detail.items():
+			rate = 0
+			if isinstance(val, list) and val:
+				rate = val[0] or 0
+			elif isinstance(val, dict):
+				rate = val.get("tax_rate") or 0
+			parent_map[item_code] = parent_map.get(item_code, 0) + (rate or 0)
+	return out
 
 
 def get_gl_entries(filters, accounting_dimensions):
@@ -828,6 +1009,18 @@ def get_columns(filters):
             "width": 150,
         },
     ]
+
+    if filters.get("itemised"):
+        columns += [
+            {"label": _("Item"), "fieldname": "item_label", "fieldtype": "Data", "width": 220},
+            {"label": _("Qty"), "fieldname": "qty_label", "fieldtype": "Data", "width": 130},
+            {"label": _("Price List"), "fieldname": "price_list_rate", "fieldtype": "Currency", "options": "account_currency", "width": 100},
+            {"label": _("Disc %"), "fieldname": "discount_label", "fieldtype": "Data", "width": 90},
+            {"label": _("Net Rate"), "fieldname": "rate", "fieldtype": "Currency", "options": "account_currency", "width": 100},
+            {"label": _("Amount"), "fieldname": "amount", "fieldtype": "Currency", "options": "account_currency", "width": 110},
+        ]
+        if filters.get("show_gst_rate"):
+            columns.append({"label": _("GST %"), "fieldname": "gst_rate_label", "fieldtype": "Data", "width": 70})
 
     return columns
 

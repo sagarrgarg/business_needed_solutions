@@ -249,6 +249,44 @@
         font-style: italic;
     }
 
+    /* ===== ITEMISED MODE ===== */
+    .statement-table.itemised th,
+    .statement-table.itemised td {
+        font-size: 7pt;
+        padding: 4px 3px !important;
+    }
+    .item-row td {
+        background: #fafafa !important;
+        border-top: 1px dashed #ccc !important;
+        border-bottom: 1px dashed #ccc !important;
+        color: #333;
+    }
+    .statement-table tbody tr.item-row:nth-child(even) td {
+        background: #fafafa !important;
+    }
+    .item-indent {
+        text-align: right;
+        color: #999;
+        font-weight: 700;
+        padding-right: 4px !important;
+    }
+    .item-cell .item-code {
+        font-weight: 600;
+        color: #000;
+    }
+    .item-cell .item-name {
+        color: #555;
+    }
+    .qty-cell {
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+    }
+    .gst-cell {
+        font-weight: 600;
+        color: #1a1a1a;
+        white-space: nowrap;
+    }
+
     /* ===== TERMS & BANK BOX ===== */
     .terms-box, .bank-box {
         background: #f5f5f5;
@@ -431,20 +469,31 @@
 
     <!-- Transactions Table: columns shown based on print_settings.columns (from Download Statement dialog) -->
     {% var sc = (print_settings && print_settings.columns); %}
+    {% var itemised = !!(filters && filters.itemised); %}
+    {% var showGst = itemised && !!(filters && filters.show_gst_rate); %}
     {% var show_all = !sc || !sc.length; %}
     {% var show_date = show_all || (sc && sc.indexOf('posting_date') !== -1); %}
     {% var show_ref = show_all || (sc && sc.indexOf('reference') !== -1); %}
     {% var show_debit = show_all || (sc && sc.indexOf('debit') !== -1); %}
     {% var show_credit = show_all || (sc && sc.indexOf('credit') !== -1); %}
     {% var show_balance = show_all || (sc && sc.indexOf('balance') !== -1); %}
-    <table class="statement-table">
+    {% var totalCols = (show_date?1:0) + (show_ref?1:0) + (show_debit?1:0) + (show_credit?1:0) + (show_balance?1:0); %}
+    <table class="statement-table {%= itemised ? 'itemised' : '' %}">
         <thead>
             <tr>
-                {% if (show_date) { %}<th style="width: 10%">{%= __("Date") %}</th>{% } %}
-                {% if (show_ref) { %}<th style="width: 44%">{%= __("Reference") %}</th>{% } %}
-                {% if (show_debit) { %}<th class="text-right" style="width: 14%">{%= __("Debit") %}</th>{% } %}
-                {% if (show_credit) { %}<th class="text-right" style="width: 14%">{%= __("Credit") %}</th>{% } %}
-                {% if (show_balance) { %}<th class="text-right" style="width: 18%">{%= __("Balance") %}</th>{% } %}
+                {% if (show_date) { %}<th style="width: {%= itemised ? (showGst ? '6%' : '7%') : '10%' %}">{%= __("Date") %}</th>{% } %}
+                {% if (show_ref) { %}<th style="width: {%= itemised ? (showGst ? '15%' : '17%') : '44%' %}">{%= __("Reference") %}</th>{% } %}
+                {% if (itemised) { %}
+                    <th style="width: {%= showGst ? '19%' : '21%' %}">{%= __("Item") %}</th>
+                    <th class="text-right" style="width: 9%">{%= __("Qty") %}</th>
+                    <th class="text-right" style="width: 7%">{%= __("Price List") %}</th>
+                    <th class="text-right" style="width: 6%">{%= __("Disc %") %}</th>
+                    <th class="text-right" style="width: 7%">{%= __("Net Rate") %}</th>
+                    {% if (showGst) { %}<th class="text-right" style="width: 5%">{%= __("GST %") %}</th>{% } %}
+                {% } %}
+                {% if (show_debit) { %}<th class="text-right" style="width: {%= itemised ? '7%' : '14%' %}">{%= __("Debit") %}</th>{% } %}
+                {% if (show_credit) { %}<th class="text-right" style="width: {%= itemised ? '7%' : '14%' %}">{%= __("Credit") %}</th>{% } %}
+                {% if (show_balance) { %}<th class="text-right" style="width: {%= itemised ? (showGst ? '10%' : '10%') : '18%' %}">{%= __("Balance") %}</th>{% } %}
             </tr>
         </thead>
         <tbody>
@@ -454,13 +503,32 @@
             {% var rowClass = ''; %}
             {% var isClosing = false; %}
             {% var acct = row.account || ''; %}
-            {% if (!row.posting_date && acct) { %}
+            {% var isItemRow = !!row.is_item_row; %}
+            {% if (!row.posting_date && acct && !isItemRow) { %}
                 {% if (acct.indexOf("Opening") > -1) { rowClass = 'opening-row'; } %}
                 {% if (acct.indexOf("Closing") > -1) { rowClass = 'closing-row'; isClosing = true; } %}
                 {% if (acct.indexOf("Total") > -1) { rowClass = 'total-row'; } %}
             {% } %}
+            {% if (isItemRow) { rowClass = 'item-row'; } %}
             <tr class="{%= rowClass %}" {% if (isClosing) { %}data-closing-balance="{%= row.balance || '' %}"{% } %}>
-                {% if (row.posting_date) { %}
+                {% if (isItemRow) { %}
+                    {% if (show_date) { %}<td></td>{% } %}
+                    {% if (show_ref) { %}<td class="item-indent">↳</td>{% } %}
+                    <td class="item-cell">
+                        <span class="item-code">{%= row.item_code || '' %}</span>
+                        {% if (row.item_name && row.item_name !== row.item_code) { %}
+                            <span class="item-name"> — {%= row.item_name %}</span>
+                        {% } %}
+                    </td>
+                    <td class="text-right qty-cell">{%= row.qty_label || '' %}</td>
+                    <td class="cur-cell">{%= fmtCurCell(row.price_list_rate || 0, row.account_currency || fallbackCurrency) %}</td>
+                    <td class="text-right">{%= row.discount_label || '' %}</td>
+                    <td class="cur-cell">{%= fmtCurCell(row.rate || 0, row.account_currency || fallbackCurrency) %}</td>
+                    {% if (showGst) { %}<td class="text-right gst-cell">{%= row.gst_rate_label || '' %}</td>{% } %}
+                    {% if (show_debit) { %}<td></td>{% } %}
+                    {% if (show_credit) { %}<td></td>{% } %}
+                    {% if (show_balance) { %}<td class="cur-cell text-muted">{%= fmtCurCell(row.amount || 0, row.account_currency || fallbackCurrency) %}</td>{% } %}
+                {% } else if (row.posting_date) { %}
                     {% if (show_date) { %}<td>{%= frappe.datetime.str_to_user(row.posting_date) %}</td>{% } %}
                     {% if (show_ref) { %}
                     <td>
@@ -491,12 +559,18 @@
                         </div>
                     </td>
                     {% } %}
+                    {% if (itemised) { %}
+                        <td colspan="{%= showGst ? 6 : 5 %}"></td>
+                    {% } %}
                     {% if (show_debit) { %}<td class="cur-cell">{%= fmtCurCell(row.debit || 0, row.account_currency || fallbackCurrency) %}</td>{% } %}
                     {% if (show_credit) { %}<td class="cur-cell">{%= fmtCurCell(row.credit || 0, row.account_currency || fallbackCurrency) %}</td>{% } %}
                     {% if (show_balance) { %}<td class="cur-cell" style="font-weight: 600;">{%= fmtBalCell(row.balance) %}</td>{% } %}
                 {% } else { %}
                     {% if (show_date) { %}<td></td>{% } %}
                     {% if (show_ref) { %}<td><strong>{%= acct ? frappe.format(acct, {fieldtype: "Link"}) : '' %}</strong></td>{% } %}
+                    {% if (itemised) { %}
+                        <td colspan="{%= showGst ? 6 : 5 %}"></td>
+                    {% } %}
                     {% if (show_debit) { %}<td class="cur-cell">{%= acct ? fmtCurCell(row.debit || 0, row.account_currency || fallbackCurrency) : '' %}</td>{% } %}
                     {% if (show_credit) { %}<td class="cur-cell">{%= acct ? fmtCurCell(row.credit || 0, row.account_currency || fallbackCurrency) : '' %}</td>{% } %}
                     {% if (show_balance) { %}<td class="cur-cell" style="font-weight: 600;">{%= acct ? fmtBalCell(row.balance) : '' %}</td>{% } %}
