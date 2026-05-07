@@ -144,6 +144,9 @@ def _is_ewaybill_required(doc) -> bool:
     if threshold <= 0:
         return False
 
+    if not _has_stock_items(doc):
+        return False
+
     return abs(flt(doc.base_grand_total)) >= threshold
 
 
