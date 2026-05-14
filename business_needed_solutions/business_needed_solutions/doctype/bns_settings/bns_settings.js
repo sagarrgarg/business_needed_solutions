@@ -18,6 +18,18 @@ frappe.ui.form.on('BNS Settings', {
             });
         }, __('Actions'));
 
+        // GL/SLE Audit — open the audit report (cutoff set there)
+        frm.add_custom_button(__('Run GL/SLE Audit'), function() {
+            const route = ['query-report', 'GL SLE Audit'];
+            const today = frappe.datetime.get_today();
+            const default_cutoff = frappe.datetime.add_months(today, -3);
+            frappe.route_options = {
+                cutoff_date: default_cutoff,
+                company: frappe.defaults.get_user_default('Company') || undefined,
+            };
+            frappe.set_route(route);
+        }, __('Actions'));
+
         // Backdate: Clear existing address preferred flags
         frm.add_custom_button(__('Clear Existing Address Flags (Backdate)'), function() {
             frappe.confirm(
