@@ -29,7 +29,7 @@ app_license = "Commercial"
 app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=121",
                   "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=215",
                   "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=49",
-                  "/assets/business_needed_solutions/js/delivery_note.js?v=135",
+                  "/assets/business_needed_solutions/js/delivery_note.js?v=136",
                   "/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=38",
                   "/assets/business_needed_solutions/js/direct_print.js?v=49",
                   "/assets/business_needed_solutions/js/item.js",

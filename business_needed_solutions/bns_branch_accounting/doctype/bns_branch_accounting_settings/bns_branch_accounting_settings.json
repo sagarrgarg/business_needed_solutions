@@ -21,6 +21,7 @@
   "accounting_rewrite_cutoff_fy",
   "validation_section",
   "si_pi_amount_tolerance",
+  "allow_different_gstin_dn_to_pr",
   "tab_ewaybill",
   "enable_internal_dn_ewaybill"
  ],
@@ -126,6 +127,13 @@
    "fieldname": "si_pi_amount_tolerance",
    "fieldtype": "Currency",
    "label": "SI-PI Amount Tolerance"
+  },
+  {
+   "default": "0",
+   "description": "Allow Delivery Note to Purchase Receipt direct conversion even when company GSTIN and billing GSTIN differ. When enabled, diff-GSTIN DN/PR flows through the same-GSTIN code path: PR is linked via bns_inter_company_reference, status becomes BNS Internally Transferred, and GL rewrite uses Internal Branch Debtor/Creditor + Sales/Purchase Transfer accounts. Compliance note: inter-state goods movement without a Sales Invoice is allowed under GST only for delivery-challan use cases (own-use stock transfer, job work, etc.). Toggle off for normal operation.",
+   "fieldname": "allow_different_gstin_dn_to_pr",
+   "fieldtype": "Check",
+   "label": "Allow Different GSTIN DN → PR"
   },
   {
    "fieldname": "tab_ewaybill",

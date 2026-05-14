@@ -199,4 +199,76 @@ frappe.ui.form.on('Delivery Note', {
             }
         }
     }
-}); 
+});
+
+
+// Diff-GSTIN DN -> PR opt-in: draft-only button that stamps the per-document
+// flag and submits the Delivery Note through the same-GSTIN internal transfer
+// pipeline. Two-gate visibility: org-level setting must be ON, and the DN
+// itself must be a draft, internal-customer, diff-GSTIN delivery challan.
+frappe.ui.form.on('Delivery Note', {
+    refresh: function(frm) {
+        if (frm.doc.docstatus !== 0) {
+            return;
+        }
+        if (!frm.doc.customer) {
+            return;
+        }
+        const billing_gstin = (frm.doc.billing_address_gstin || '').trim();
+        const company_gstin = (frm.doc.company_gstin || '').trim();
+        if (!billing_gstin || !company_gstin || billing_gstin === company_gstin) {
+            return;
+        }
+        // Skip when DN already opted in — re-stamping is a no-op.
+        if (frm.doc.bns_allow_diff_gstin_dn_pr) {
+            return;
+        }
+
+        frappe.db.get_value('Customer', frm.doc.customer, 'is_bns_internal_customer')
+            .then((cust_res) => {
+                if (!cust_res || !cust_res.message || !cust_res.message.is_bns_internal_customer) {
+                    return;
+                }
+                frappe.db.get_single_value('BNS Branch Accounting Settings', 'allow_different_gstin_dn_to_pr')
+                    .then((global_on) => {
+                        if (!global_on) {
+                            return;
+                        }
+                        frm.add_custom_button(__('Submit as Diff GSTIN Internal Transfer'), function() {
+                            frappe.warn(
+                                __('Submit as Diff GSTIN Internal Transfer?'),
+                                __(
+                                    'This will flag the Delivery Note for direct DN → PR conversion ' +
+                                    'even though Company GSTIN ({0}) and Billing GSTIN ({1}) differ, ' +
+                                    'then submit it. The DN will route through the same-GSTIN GL ' +
+                                    'rewrite pattern (Internal Branch Debtor / Sales Transfer + Stock ' +
+                                    'in Transit / Stock). This is for inter-state stock transfers on ' +
+                                    'a delivery challan basis only (e.g. own-use, job work). The opt-in ' +
+                                    'flag and your user/timestamp are recorded permanently on the DN.',
+                                    [company_gstin, billing_gstin]
+                                ),
+                                () => {
+                                    frappe.call({
+                                        method: 'business_needed_solutions.bns_branch_accounting.utils.submit_diff_gstin_dn_for_internal_transfer',
+                                        args: { delivery_note: frm.doc.name },
+                                        freeze: true,
+                                        freeze_message: __('Submitting as Diff GSTIN Internal Transfer...'),
+                                        callback: function(r) {
+                                            if (!r.exc && r.message && r.message.success) {
+                                                frappe.show_alert({
+                                                    message: r.message.message || __('Submitted'),
+                                                    indicator: 'green',
+                                                });
+                                                frm.reload_doc();
+                                            }
+                                        },
+                                    });
+                                },
+                                __('Submit'),
+                                true,
+                            );
+                        }, __('Actions'));
+                    });
+            });
+    },
+});

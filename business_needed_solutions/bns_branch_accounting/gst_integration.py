@@ -13,7 +13,10 @@ import frappe
 from frappe import _
 from india_compliance.gst_india.utils import is_api_enabled
 
-from business_needed_solutions.bns_branch_accounting.utils import is_bns_internal_customer
+from business_needed_solutions.bns_branch_accounting.utils import (
+    _diff_gstin_dn_pr_active_for_dn,
+    is_bns_internal_customer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +65,12 @@ def validate_internal_dn_vehicle_no(doc, method: Optional[str] = None) -> None:
         return
 
     # Only enforce for intra-state (same full GSTIN) transfers.
-    # Inter-state (different GSTIN) transfers use the Sales Invoice flow,
-    # so vehicle details are not required on the DN.
-    if _is_inter_state_transfer(doc):
+    # Inter-state (different GSTIN) transfers usually use the Sales Invoice
+    # flow, so vehicle details are not required on the DN — unless the DN
+    # carries the per-document diff-GSTIN DN -> PR opt-in flag, in which
+    # case the inter-state movement rides on the DN as a delivery challan
+    # and still needs transport details for the e-Waybill.
+    if _is_inter_state_transfer(doc) and not _diff_gstin_dn_pr_active_for_dn(doc):
         logger.debug(
             f"DN {doc.name}: Inter-state internal transfer — vehicle/transporter "
             f"not mandatory on DN (handled via Sales Invoice)"
@@ -136,7 +142,10 @@ def maybe_generate_internal_dn_ewaybill(doc, method: Optional[str] = None) -> No
             logger.debug(f"Customer {doc.customer} is not a BNS internal customer")
             return
 
-        # Guard: Check if GSTIN is same (internal transfer under same GSTIN)
+        # Guard: Check if GSTIN is same (internal transfer under same GSTIN).
+        # When the DN carries the per-document diff-GSTIN opt-in flag, also
+        # auto-generate for the inter-state internal transfer so the e-Waybill
+        # backs the delivery-challan-style movement.
         company_gstin = (doc.get("company_gstin") or "").strip().upper()
         billing_gstin = (doc.get("billing_address_gstin") or "").strip().upper()
 
@@ -144,7 +153,7 @@ def maybe_generate_internal_dn_ewaybill(doc, method: Optional[str] = None) -> No
             logger.debug(f"Missing GSTIN - company: {company_gstin}, billing: {billing_gstin}")
             return
 
-        if company_gstin != billing_gstin:
+        if company_gstin != billing_gstin and not _diff_gstin_dn_pr_active_for_dn(doc):
             logger.debug("GSTINs differ — not a same-GSTIN internal transfer")
             return
 

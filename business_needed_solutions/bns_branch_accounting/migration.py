@@ -29,6 +29,7 @@ def after_migrate() -> None:
         add_bns_internal_transfer_links()
         ensure_si_pr_reference_field()
         ensure_pr_item_sales_invoice_item_field()
+        ensure_diff_gstin_dn_pr_fields()
         remove_old_pr_internal_customer_field()
         disable_pi_update_stock_mandatory_script()
         initialize_bns_repost_tracking_state()
@@ -299,6 +300,74 @@ def ensure_pr_item_sales_invoice_item_field() -> None:
     except Exception as e:
         logger.error("Error creating %s: %s", field_name, str(e))
         frappe.db.rollback()
+
+
+def ensure_diff_gstin_dn_pr_fields() -> None:
+    """Ensure Delivery Note has the per-document diff-GSTIN DN -> PR opt-in
+    fields. These fields are stamped only by the dedicated whitelisted API
+    (utils.submit_diff_gstin_dn_for_internal_transfer) — they are not editable
+    in the form UI. Read-only + hidden + no_copy so amendments and
+    duplications start clean.
+    """
+    field_specs = [
+        {
+            "dt": "Delivery Note",
+            "fieldname": "bns_allow_diff_gstin_dn_pr",
+            "label": "BNS Allow Diff GSTIN DN -> PR",
+            "fieldtype": "Check",
+            "insert_after": "bns_inter_company_reference",
+            "default": "0",
+            "read_only": 1,
+            "hidden": 1,
+            "no_copy": 1,
+            "print_hide": 1,
+            "module": "BNS Branch Accounting",
+            "description": (
+                "Per-document opt-in for direct DN -> PR conversion when "
+                "company GSTIN and billing GSTIN differ. Stamped by the "
+                "'Submit as Diff GSTIN Internal Transfer' button only."
+            ),
+        },
+        {
+            "dt": "Delivery Note",
+            "fieldname": "bns_diff_gstin_enabled_by",
+            "label": "BNS Diff GSTIN Enabled By",
+            "fieldtype": "Link",
+            "options": "User",
+            "insert_after": "bns_allow_diff_gstin_dn_pr",
+            "read_only": 1,
+            "hidden": 1,
+            "no_copy": 1,
+            "print_hide": 1,
+            "module": "BNS Branch Accounting",
+            "description": "User who flipped the diff-GSTIN DN -> PR opt-in.",
+        },
+        {
+            "dt": "Delivery Note",
+            "fieldname": "bns_diff_gstin_enabled_on",
+            "label": "BNS Diff GSTIN Enabled On",
+            "fieldtype": "Datetime",
+            "insert_after": "bns_diff_gstin_enabled_by",
+            "read_only": 1,
+            "hidden": 1,
+            "no_copy": 1,
+            "print_hide": 1,
+            "module": "BNS Branch Accounting",
+            "description": "Timestamp when diff-GSTIN DN -> PR opt-in was set.",
+        },
+    ]
+    for spec in field_specs:
+        field_name = f"{spec['dt']}-{spec['fieldname']}"
+        if frappe.db.exists("Custom Field", field_name):
+            continue
+        try:
+            cf = frappe.new_doc("Custom Field")
+            cf.update(spec)
+            cf.insert(ignore_permissions=True)
+            frappe.db.commit()
+        except Exception as e:
+            logger.error("Error creating %s: %s", field_name, str(e))
+            frappe.db.rollback()
 
 
 def disable_pi_update_stock_mandatory_script() -> None:

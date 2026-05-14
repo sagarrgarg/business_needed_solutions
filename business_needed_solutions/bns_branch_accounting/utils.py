@@ -457,7 +457,14 @@ def validate_bns_internal_accounting_settings_for_dn_pr(
         "internal_branch_debtor_account": _("Internal Branch Debtor Account"),
         "internal_branch_creditor_account": _("Internal Branch Creditor Account"),
     }
-    if doc.doctype == "Delivery Note" and (doc.get("billing_address_gstin") or "") == (doc.get("company_gstin") or ""):
+    # DN routes through same-GSTIN GL rewrite when GSTINs match OR when the
+    # DN carries the per-document diff-GSTIN opt-in flag. Both paths need the
+    # sales transfer account configured.
+    dn_routes_same_gstin = doc.doctype == "Delivery Note" and (
+        (doc.get("billing_address_gstin") or "") == (doc.get("company_gstin") or "")
+        or _diff_gstin_dn_pr_active_for_dn(doc)
+    )
+    if dn_routes_same_gstin:
         required_fields["internal_sales_transfer_account"] = _("Internal Sales Transfer Account")
     elif doc.doctype == "Purchase Receipt":
         required_fields["internal_purchase_transfer_account"] = _("Internal Purchase Transfer Account")
@@ -526,6 +533,82 @@ def validate_bns_internal_accounting_settings_for_dn_pr(
         ).format(doc.doctype, "\n".join(parts)),
         title=_("BNS Internal Accounting Setup Required"),
     )
+
+
+def _diff_gstin_dn_pr_global_enabled() -> bool:
+    """Return True when the org-level setting permits direct DN -> PR for
+    different-GSTIN flows.
+
+    Acts as a master switch only. To actually flip a DN through the
+    same-GSTIN code path, each Delivery Note must additionally carry
+    ``bns_allow_diff_gstin_dn_pr = 1`` — stamped via the
+    ``submit_diff_gstin_dn_for_internal_transfer`` whitelisted API.
+
+    Compliance: inter-state goods movement on a delivery challan (DN)
+    without a Sales Invoice is permitted under GST for own-use stock
+    transfer, job work, and similar non-sale movements. The toggle and
+    per-DN opt-in together provide a two-step audit trail for those
+    narrow cases.
+    """
+    try:
+        return bool(
+            frappe.db.get_single_value(
+                "BNS Branch Accounting Settings", "allow_different_gstin_dn_to_pr"
+            )
+        )
+    except Exception:
+        return False
+
+
+# Backwards-compatible alias — older callers may import this name. New code
+# should call _diff_gstin_dn_pr_global_enabled() or
+# _diff_gstin_dn_pr_active_for_dn() depending on whether per-DN check applies.
+_diff_gstin_dn_pr_override_enabled = _diff_gstin_dn_pr_global_enabled
+
+
+def _dn_has_diff_gstin_opt_in(dn) -> bool:
+    """Return True when a Delivery Note has been opted in to the diff-GSTIN
+    DN -> PR flow via the per-document flag.
+
+    Accepts either a DN docname (str) or a doc-like object with
+    ``.get("bns_allow_diff_gstin_dn_pr")``. Decoupled from the global
+    setting so callers can keep the per-DN flag honored even after an admin
+    flips the org-level toggle off (existing flagged DNs stay valid by
+    design — design decision recorded with the feature ship).
+    """
+    if dn is None:
+        return False
+    if isinstance(dn, str):
+        if not dn:
+            return False
+        try:
+            return bool(
+                frappe.db.get_value("Delivery Note", dn, "bns_allow_diff_gstin_dn_pr")
+            )
+        except Exception:
+            return False
+    # Doc-like: prefer attribute, fall back to dict-style get.
+    try:
+        return bool(dn.get("bns_allow_diff_gstin_dn_pr"))
+    except Exception:
+        return False
+
+
+def _diff_gstin_dn_pr_active_for_dn(dn) -> bool:
+    """Return True when the diff-GSTIN DN -> PR override should apply for a
+    given Delivery Note at runtime.
+
+    Once a DN has been stamped with ``bns_allow_diff_gstin_dn_pr = 1`` via the
+    submit-time button, downstream behaviour (status update, GL rewrite,
+    e-Waybill, conversion/link/bulk eligibility) stays active for that
+    document regardless of the org-level setting state. This preserves
+    historical GL pairing for already-flagged DNs/PRs after an admin flips
+    the global setting off (design decision locked with the per-DN button).
+
+    The global setting is consulted separately by the entrypoints that
+    create new flagged DNs (button visibility, submit API) — not here.
+    """
+    return _dn_has_diff_gstin_opt_in(dn)
 
 
 def _get_internal_transfer_cutoff_date():
@@ -638,7 +721,18 @@ def _get_pr_source_link_flags(doc) -> Dict[str, Any]:
 
 
 def _resolve_pr_gstin_scope(doc, has_dn_link: bool, has_si_link: bool) -> Optional[str]:
-    """Resolve PR GST scope as 'same' or 'different'."""
+    """Resolve PR GST scope as 'same' or 'different'.
+
+    When the PR is linked to a Delivery Note flagged with the per-document
+    diff-GSTIN DN -> PR opt-in (``bns_allow_diff_gstin_dn_pr``), treat scope
+    as 'same' so the rest of the BNS pipeline routes the PR through the DN-PR
+    code path even when GSTINs differ.
+    """
+    if has_dn_link and not has_si_link:
+        link_flags = _get_pr_source_link_flags(doc)
+        for dn_name in link_flags.get("dn_names") or []:
+            if _dn_has_diff_gstin_opt_in(dn_name):
+                return "same"
     company_gstin = (doc.get("company_gstin") or "").strip()
     billing_gstin = (doc.get("billing_address_gstin") or "").strip()
     if company_gstin and billing_gstin:
@@ -652,14 +746,21 @@ def _resolve_pr_gstin_scope(doc, has_dn_link: bool, has_si_link: bool) -> Option
 
 def _is_bns_internal_same_gstin_delivery_note(doc) -> bool:
     """Check DN is in scoped BNS internal same-GSTIN flow.
-    Cutoff check is the caller's responsibility."""
-    return bool(
+    Cutoff check is the caller's responsibility.
+
+    When the DN carries the per-document diff-GSTIN opt-in flag, the
+    same-GSTIN code path applies regardless of GSTIN match.
+    """
+    if not (
         doc
         and doc.doctype == "Delivery Note"
         and doc.docstatus == 1
         and is_bns_internal_customer(doc)
-        and (doc.get("billing_address_gstin") or "") == (doc.get("company_gstin") or "")
-    )
+    ):
+        return False
+    if _diff_gstin_dn_pr_active_for_dn(doc):
+        return True
+    return (doc.get("billing_address_gstin") or "") == (doc.get("company_gstin") or "")
 
 
 def _is_bns_internal_delivery_note(doc) -> bool:
@@ -674,7 +775,12 @@ def _is_bns_internal_delivery_note(doc) -> bool:
 
 
 def _is_same_gstin_internal_delivery_note(doc) -> bool:
-    """Return True when internal DN has same billing/company GSTIN.
+    """Return True when internal DN should route through the same-GSTIN GL
+    rewrite path.
+
+    Same-GSTIN path runs when billing GSTIN == company GSTIN, OR when the
+    DN carries the per-document diff-GSTIN opt-in flag (and both GSTINs
+    are populated so the document is not a non-GST corner case).
 
     Returns False when either GSTIN is empty/None to avoid triggering the
     same-GSTIN GL rewrite path for non-GST companies or documents where
@@ -684,7 +790,9 @@ def _is_same_gstin_internal_delivery_note(doc) -> bool:
     company = (doc.get("company_gstin") or "").strip()
     if not billing or not company:
         return False
-    return billing == company
+    if billing == company:
+        return True
+    return _diff_gstin_dn_pr_active_for_dn(doc)
 
 
 def _is_bns_internal_different_gstin_sales_invoice(doc) -> bool:
@@ -780,7 +888,12 @@ def _get_linked_delivery_note_for_pr(doc) -> Optional[str]:
 
 def _is_bns_internal_same_gstin_purchase_receipt(doc) -> bool:
     """Check PR is in scoped BNS internal same-GSTIN DN->PR flow.
-    Cutoff check is the caller's responsibility."""
+    Cutoff check is the caller's responsibility.
+
+    When the linked Delivery Note carries the per-document diff-GSTIN opt-in
+    flag, the same-GSTIN path applies regardless of the source DN's GSTIN
+    match.
+    """
     if not (
         doc
         and doc.doctype == "Purchase Receipt"
@@ -792,6 +905,9 @@ def _is_bns_internal_same_gstin_purchase_receipt(doc) -> bool:
     dn_name = _get_linked_delivery_note_for_pr(doc)
     if not dn_name:
         return False
+
+    if _diff_gstin_dn_pr_active_for_dn(dn_name):
+        return True
 
     dn_gstin = frappe.db.get_value("Delivery Note", dn_name, "billing_address_gstin")
     dn_company_gstin = frappe.db.get_value("Delivery Note", dn_name, "company_gstin")
@@ -4683,7 +4799,13 @@ def update_delivery_note_status_for_bns_internal(doc, method: Optional[str] = No
         company_gstin = getattr(doc, 'company_gstin', None)
 
         if billing_address_gstin is not None and company_gstin is not None:
-            if billing_address_gstin == company_gstin:
+            # Treat diff-GSTIN DN as same-GSTIN when the DN carries the
+            # per-document opt-in flag — the DN-PR direct flow needs the
+            # internal-customer flag and the "BNS Internally Transferred"
+            # status so the rest of the BNS pipeline (status, per_billed, GL
+            # rewrite, repost) applies.
+            route_as_same_gstin = billing_address_gstin == company_gstin or _diff_gstin_dn_pr_active_for_dn(doc)
+            if route_as_same_gstin:
                 per_billed = 100
                 doc.db_set("status", "BNS Internally Transferred", update_modified=False)
                 doc.db_set("per_billed", per_billed, update_modified=False)
@@ -4691,7 +4813,7 @@ def update_delivery_note_status_for_bns_internal(doc, method: Optional[str] = No
                 if is_after_accounting_rewrite_cutoff(doc.get("posting_date")):
                     _trigger_bns_internal_gl_repost(doc, source="dn_on_submit_status_update")
                 frappe.clear_cache(doctype="Delivery Note")
-                logger.info(f"Updated Delivery Note {doc.name} status to BNS Internally Transferred (same GSTIN)")
+                logger.info(f"Updated Delivery Note {doc.name} status to BNS Internally Transferred (same GSTIN or diff-GSTIN override)")
             else:
                 doc.db_set("status", "To Bill", update_modified=False)
                 doc.db_set("is_bns_internal_customer", 0, update_modified=False)
@@ -7317,6 +7439,118 @@ def get_delivery_note_by_supplier_delivery_note(purchase_receipt: str) -> Dict:
 
 
 @frappe.whitelist()
+def submit_diff_gstin_dn_for_internal_transfer(delivery_note: str) -> Dict[str, Any]:
+    """Stamp the diff-GSTIN DN -> PR opt-in flag and submit the Delivery Note.
+
+    Workflow:
+      - Draft DN must exist, be for an internal customer, and have populated
+        company GSTIN + billing GSTIN that differ.
+      - Org-level setting ``allow_different_gstin_dn_to_pr`` must be ON.
+      - Caller must hold write permission on Delivery Note AND on
+        BNS Branch Accounting Settings (per Role Permission Manager).
+      - Flag, enabling user, and timestamp are stamped before submit so the
+        ``on_submit`` hooks (status update, GL rewrite trigger, e-Waybill
+        auto-gen) see the per-doc opt-in.
+
+    Once a DN is flagged + submitted, downstream behaviour (GL rewrite,
+    repost, conversion/link, e-Waybill) stays active regardless of any
+    future change to the org-level setting.
+
+    Returns: {success, delivery_note, status, message}.
+    """
+    _bns_require_doctype_write("Delivery Note")
+    _bns_require_accounts_write()
+
+    if not delivery_note:
+        frappe.throw(_("Delivery Note name is required."))
+    if not frappe.db.exists("Delivery Note", delivery_note):
+        frappe.throw(_("Delivery Note {0} does not exist.").format(delivery_note))
+
+    if not _diff_gstin_dn_pr_global_enabled():
+        frappe.throw(
+            _(
+                "Diff-GSTIN DN -> PR is not enabled at the company level. "
+                "Enable 'Allow Different GSTIN DN → PR' in BNS Branch "
+                "Accounting Settings first."
+            ),
+            title=_("Org Setting Disabled"),
+        )
+
+    dn = frappe.get_doc("Delivery Note", delivery_note)
+    if dn.docstatus != 0:
+        frappe.throw(
+            _(
+                "Diff-GSTIN DN -> PR opt-in can only be applied to a Draft "
+                "Delivery Note. {0} is currently in '{1}' state."
+            ).format(delivery_note, _docstatus_label(dn.docstatus)),
+            title=_("Draft Only"),
+        )
+
+    if not is_bns_internal_customer(dn):
+        frappe.throw(
+            _("Delivery Note {0} customer is not marked as BNS Internal Customer.").format(delivery_note),
+            title=_("Internal Customer Required"),
+        )
+
+    company_gstin = (dn.get("company_gstin") or "").strip()
+    billing_gstin = (dn.get("billing_address_gstin") or "").strip()
+    if not company_gstin or not billing_gstin:
+        frappe.throw(
+            _("Both Company GSTIN and Billing GSTIN must be populated on the Delivery Note before using this flow."),
+            title=_("GSTIN Required"),
+        )
+    if company_gstin == billing_gstin:
+        frappe.throw(
+            _(
+                "Company GSTIN and Billing GSTIN are the same on this Delivery Note. "
+                "The diff-GSTIN opt-in is only for inter-state transfers; use the "
+                "regular submit action for same-GSTIN movement."
+            ),
+            title=_("Use Standard DN Submit"),
+        )
+
+    if not is_after_internal_transfer_cutoff(dn.get("posting_date")):
+        frappe.throw(
+            _("Delivery Note {0} posting date is before the Internal Transfer Cutoff.").format(delivery_note),
+            title=_("Cutoff Date Restriction"),
+        )
+
+    # Stamp the opt-in fields before submit so on_submit hooks observe them.
+    dn.bns_allow_diff_gstin_dn_pr = 1
+    dn.bns_diff_gstin_enabled_by = frappe.session.user
+    dn.bns_diff_gstin_enabled_on = now_datetime()
+
+    try:
+        dn.submit()
+    except Exception:
+        logger.error(
+            "submit_diff_gstin_dn_for_internal_transfer: submit failed for %s",
+            delivery_note,
+            exc_info=True,
+        )
+        raise
+
+    _audit_unlink_action(
+        "diff_gstin_dn_pr_opt_in_submitted",
+        {
+            "delivery_note": delivery_note,
+            "company_gstin": company_gstin,
+            "billing_address_gstin": billing_gstin,
+            "enabled_by": frappe.session.user,
+        },
+    )
+
+    return {
+        "success": True,
+        "delivery_note": dn.name,
+        "status": dn.get("status"),
+        "message": _(
+            "Delivery Note {0} submitted as Diff GSTIN Internal Transfer."
+        ).format(dn.name),
+    }
+
+
+@frappe.whitelist()
 def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: Optional[str] = None) -> Dict:
     """
     Convert a Delivery Note to BNS Internally Transferred status (same GSTIN only).
@@ -7360,13 +7594,13 @@ def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: 
         if billing_address_gstin is None or company_gstin is None:
             raise BNSValidationError(_("GSTIN information is missing. Cannot convert to BNS Internal transfer."))
         
-        if billing_address_gstin != company_gstin:
+        if billing_address_gstin != company_gstin and not _diff_gstin_dn_pr_active_for_dn(dn):
             raise BNSValidationError(
-                _("GSTIN mismatch: billing_address_gstin ({0}) != company_gstin ({1}). Only same GSTIN transfers can be converted.").format(
+                _("GSTIN mismatch: billing_address_gstin ({0}) != company_gstin ({1}). Only same GSTIN transfers can be converted. Use the 'Submit as Diff GSTIN Internal Transfer' button on the Delivery Note (requires 'Allow Different GSTIN DN → PR' enabled in BNS Branch Accounting Settings) to permit inter-state direct conversion.").format(
                     billing_address_gstin, company_gstin
                 )
             )
-        
+
         # Clear stale/wrong DN reference before checking "already converted"
         dn_ref = (dn.get("bns_inter_company_reference") or "").strip()
         if dn_ref:
@@ -7550,9 +7784,9 @@ def convert_purchase_receipt_to_bns_internal(purchase_receipt: str, delivery_not
         if dn_billing_gstin is None or dn_company_gstin is None:
             raise BNSValidationError(_("Delivery Note GSTIN information is missing. Cannot convert to BNS Internal transfer."))
         
-        if dn_billing_gstin != dn_company_gstin:
+        if dn_billing_gstin != dn_company_gstin and not _diff_gstin_dn_pr_active_for_dn(dn):
             raise BNSValidationError(
-                _("Delivery Note GSTIN mismatch: billing_address_gstin ({0}) != company_gstin ({1}). Only same GSTIN transfers can be converted.").format(
+                _("Delivery Note GSTIN mismatch: billing_address_gstin ({0}) != company_gstin ({1}). Only same GSTIN transfers can be converted. Use the 'Submit as Diff GSTIN Internal Transfer' button on the Delivery Note (requires 'Allow Different GSTIN DN → PR' enabled in BNS Branch Accounting Settings) to permit inter-state direct conversion.").format(
                     dn_billing_gstin, dn_company_gstin
                 )
             )
@@ -8099,9 +8333,9 @@ def link_dn_pr(delivery_note: str, purchase_receipt: str) -> Dict:
         if not dn_billing_gstin or not dn_company_gstin:
             raise BNSValidationError(_("Delivery Note GSTIN information is missing"))
         
-        if dn_billing_gstin != dn_company_gstin:
+        if dn_billing_gstin != dn_company_gstin and not _diff_gstin_dn_pr_active_for_dn(dn):
             raise BNSValidationError(
-                _("GSTIN mismatch: Only same GSTIN transfers can be linked. billing_address_gstin ({0}) != company_gstin ({1})").format(
+                _("GSTIN mismatch: Only same GSTIN transfers can be linked. billing_address_gstin ({0}) != company_gstin ({1}). Use the 'Submit as Diff GSTIN Internal Transfer' button on the Delivery Note (requires 'Allow Different GSTIN DN → PR' enabled in BNS Branch Accounting Settings) to permit inter-state direct linking.").format(
                     dn_billing_gstin, dn_company_gstin
                 )
             )
@@ -8723,10 +8957,16 @@ def unlink_si_pi(sales_invoice: str = None, purchase_invoice: str = None) -> Dic
 
 def _eligible_internal_dn_names(internal_customers: List[str]) -> Set[str]:
     """Return submitted Delivery Notes that belong to an internal customer and
-    have matching billing / company GSTIN. Used to decide which Purchase
+    are eligible for BNS conversion. Used to decide which Purchase
     Receipts are eligible for BNS conversion — PR eligibility is independent
     of the caller's posting-date window, because a PR in the window may
-    reference a DN outside it (e.g. month-end GR crossing FY boundary)."""
+    reference a DN outside it (e.g. month-end GR crossing FY boundary).
+
+    Eligibility rules:
+      - Same-GSTIN DN: always eligible.
+      - Diff-GSTIN DN: eligible only when the DN carries the per-document
+        ``bns_allow_diff_gstin_dn_pr`` opt-in flag.
+    """
     if not internal_customers:
         return set()
     rows = frappe.get_all(
@@ -8735,15 +8975,24 @@ def _eligible_internal_dn_names(internal_customers: List[str]) -> Set[str]:
             ["docstatus", "=", 1],
             ["customer", "in", internal_customers],
         ],
-        fields=["name", "billing_address_gstin", "company_gstin"],
+        fields=[
+            "name", "billing_address_gstin", "company_gstin",
+            "bns_allow_diff_gstin_dn_pr",
+        ],
         limit_page_length=0,
     )
-    return {
-        r.name for r in rows
-        if r.get("billing_address_gstin")
-        and r.get("company_gstin")
-        and r.get("billing_address_gstin") == r.get("company_gstin")
-    }
+    eligible: Set[str] = set()
+    for r in rows:
+        billing = (r.get("billing_address_gstin") or "").strip()
+        company = (r.get("company_gstin") or "").strip()
+        if not billing or not company:
+            continue
+        if billing == company:
+            eligible.add(r.name)
+            continue
+        if cint(r.get("bns_allow_diff_gstin_dn_pr")):
+            eligible.add(r.name)
+    return eligible
 
 
 @frappe.whitelist()
