@@ -28,6 +28,7 @@
   "enable_custom_update_items_po_so",
   "stock_entry_controls_section",
   "enforce_stock_update_or_reference",
+  "allow_zero_qty_return_si_bypass",
   "enable_per_warehouse_negative_stock_disallow",
   "negative_stock_override_section",
   "allow_negative_stock_override",
@@ -206,6 +207,14 @@
    "fieldname": "enforce_stock_update_or_reference",
    "fieldtype": "Check",
    "label": "Enforce Stock Update or Reference"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.enforce_stock_update_or_reference",
+   "description": "Bypass the Stock-Update-or-Reference check for value-only return Sales Invoices: every line qty=0, is_return=1, return_against linked, update_stock=0. Use for marketplace cashback / promo refunds where money is refunded but no stock physically returned. Other returns are unaffected.",
+   "fieldname": "allow_zero_qty_return_si_bypass",
+   "fieldtype": "Check",
+   "label": "Allow Zero-Qty Return SI Bypass"
   },
   {
    "default": "0",

@@ -14,7 +14,7 @@ import frappe
 from frappe import _
 from typing import Optional, List
 import logging
-from frappe.utils import cint
+from frappe.utils import cint, flt
 from business_needed_solutions.bns_branch_accounting.utils import (
     is_after_internal_validation_cutoff,
     validate_internal_purchase_invoice_linkage,
@@ -63,6 +63,19 @@ def validate_stock_update_or_reference(doc, method: Optional[str] = None) -> Non
             _validate_sales_invoice_rate_adjustment_without_dn_links(doc)
             logger.debug(
                 "Sales Invoice %s is a rate-adjustment debit note, skipping reference validation",
+                doc.name,
+            )
+            return
+
+        # Zero-qty return SI bypass: when BNS Settings opts in, value-only return
+        # invoices (is_return=1, return_against set, every line qty=0,
+        # update_stock=0) skip the reference check. Covers marketplace cashback /
+        # promo refunds where the customer is refunded money but no stock is
+        # physically returned. Auto-detected from doc state — no app-specific
+        # flag plumbing.
+        if _is_zero_qty_return_si(doc) and _is_zero_qty_return_si_bypass_enabled():
+            logger.debug(
+                "Sales Invoice %s is a zero-qty return (cashback/promo refund), skipping reference validation",
                 doc.name,
             )
             return
@@ -119,6 +132,41 @@ def _has_sales_invoice_dn_links(doc) -> bool:
         if item.get("delivery_note") or item.get("dn_detail"):
             return True
     return False
+
+
+def _is_zero_qty_return_si(doc) -> bool:
+    """Return True when the Sales Invoice is a value-only return: is_return=1,
+    return_against set, update_stock=0, and every line carries qty=0.
+
+    These are marketplace promo / cashback refunds where money is refunded but
+    no stock physically returns to the warehouse. Detection is purely from doc
+    state — no app-specific flag is consulted.
+    """
+    if doc.doctype != "Sales Invoice":
+        return False
+    if not cint(doc.get("is_return")):
+        return False
+    if not doc.get("return_against"):
+        return False
+    if cint(doc.get("update_stock")):
+        return False
+    if not doc.items:
+        return False
+    for item in doc.items:
+        if flt(item.get("qty")):
+            return False
+    return True
+
+
+def _is_zero_qty_return_si_bypass_enabled() -> bool:
+    """Read the opt-in checkbox on BNS Settings."""
+    try:
+        return bool(
+            cint(frappe.db.get_single_value("BNS Settings", "allow_zero_qty_return_si_bypass"))
+        )
+    except Exception as e:
+        logger.error(f"Error checking zero-qty return SI bypass setting: {str(e)}")
+        return False
 
 
 def _is_stock_update_validation_enabled() -> bool:
