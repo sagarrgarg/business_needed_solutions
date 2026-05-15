@@ -11,6 +11,7 @@
   "column_break_pan",
   "enforce_pan_uniqueness",
   "enforce_expense_account_for_non_stock_items",
+  "enable_bulk_cancel_sales_invoice",
 
   "tab_break_gst_compliance",
   "gst_compliance_section",
@@ -122,6 +123,13 @@
    "fieldname": "enforce_expense_account_for_non_stock_items",
    "fieldtype": "Check",
    "label": "Enforce Expense Account for Non-Stock Items"
+  },
+  {
+   "default": "0",
+   "description": "Adds 'Bulk Cancel (Background)' and 'Stop All Bulk Cancel Jobs' menu items in the Sales Invoice list view. Cancels matching SIs in background jobs (50/batch on long queue). Requires SI Cancel permission. Off by default — turn on only when you actually need to mass-cancel.",
+   "fieldname": "enable_bulk_cancel_sales_invoice",
+   "fieldtype": "Check",
+   "label": "Enable Bulk Cancel for Sales Invoice"
   },
   {
    "fieldname": "tab_break_gst_compliance",
