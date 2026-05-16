@@ -38,6 +38,27 @@ frappe.ui.form.on('Sales Invoice', {
     },
 
     refresh: function(frm) {
+        // Value-only Credit Note shortcut: shown on draft return SIs. Flips
+        // update_stock off and zeroes every item qty so the SI matches the
+        // zero-qty-return shape detected by the BNS Settings opt-in bypass
+        // (allow_zero_qty_return_si_bypass) — used for marketplace cashback
+        // / promo refunds where money is refunded but no stock comes back.
+        if (frm.doc.docstatus === 0 && frm.doc.is_return) {
+            frm.add_custom_button(__('Zero Qty Refund'), function () {
+                frappe.confirm(
+                    __('Set Update Stock = off and qty = 0 on every line? Use this only for value-only return invoices (no stock physically returned).'),
+                    function () {
+                        frm.set_value('update_stock', 0);
+                        (frm.doc.items || []).forEach(function (row) {
+                            frappe.model.set_value(row.doctype, row.name, 'qty', 0);
+                        });
+                        frm.refresh_field('items');
+                        frappe.show_alert({ message: __('Zero-qty refund applied. Save to recompute totals.'), indicator: 'orange' });
+                    }
+                );
+            }, __('Actions'));
+        }
+
         // Show button to convert to BNS Internal if customer is BNS internal but SI is not marked
         // OR if SI is marked but status is not "BNS Internally Transferred"
         if (frm.doc.docstatus == 1) {
