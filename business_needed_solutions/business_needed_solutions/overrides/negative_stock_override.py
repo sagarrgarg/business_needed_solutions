@@ -1,82 +1,123 @@
 """
 Business Needed Solutions - Negative Stock Cutoff
 
-Prerequisite: ERPNext Stock Settings → Allow Negative Stock = ON.
+Adds a date-gated negative-stock restriction on top of ERPNext's Stock Settings.
 
-Validates outgoing stock in before_submit doc_events:
+Behaviour:
+    - posting_date > cutoff_date      → BLOCKED for everyone (no role bypass).
+    - posting_date ≤ cutoff_date      → BLOCKED unless user has an override role.
+    - Feature OFF / no cutoff set     → no-op (ERPNext's own rules apply).
 
-    - posting_date > cutoff  → BLOCKED for everyone, no exceptions
-    - posting_date ≤ cutoff  → BLOCKED unless user has an override role
+Why this layer instead of a custom before_submit balance check?
+    A document-level pre-flight that re-derives "current stock" from `Bin`
+    diverges from ERPNext's authoritative ledger semantics:
 
-No monkey-patching — just a straightforward doc_event validation like
-submission_restriction.
+        * Multi-leg Material Transfers through an In-Transit warehouse:
+          row 1 (+50 to In-Transit) and row 2 (-50 from In-Transit) net to
+          zero on the warehouse, but Bin.actual_qty reads 0 BEFORE the
+          submit, so a naive shortfall check fires.
+        * Future SLEs may go negative after this insertion even when the
+          current balance looks fine.
+        * Serial / Batch / SBB bundles, reposts, repacks all have edge
+          cases that ERPNext already handles.
+
+    The right hook is Stock Ledger Entry `validate`. By the time row 2's SLE
+    validates, row 1's SLE is already inserted (ERPNext processes SLEs in
+    idx order, locking the row), so `get_previous_sle` returns the running
+    balance including intra-doc movements. `get_future_sle_with_negative_qty`
+    catches downstream impact. This is exactly the algorithm ERPNext uses in
+    `validate_negative_qty_in_future_sle` — we just invoke it independently
+    of `Stock Settings.allow_negative_stock`.
+
+Concurrency:
+    ERPNext acquires row-level locks on Bin / Stock Ledger Entry during the
+    submit transaction. Our hook runs inside that transaction, so the
+    "lock → simulate → submit or throw" sequence the user wants is provided
+    by ERPNext's existing transactional flow.
 """
 
 import frappe
 from frappe import _
 from frappe.utils import cint, flt, getdate
-from collections import defaultdict
+from erpnext.stock.stock_ledger import (
+	NegativeStockError,
+	get_previous_sle,
+	get_future_sle_with_negative_qty,
+	get_future_sle_with_negative_batch_qty,
+	is_negative_with_precision,
+)
 
 
-def validate_negative_stock(doc, method=None):
+def validate_sle_negative_stock_cutoff(doc, method=None):
 	"""
-	before_submit hook on stock documents.
+	doc_event: Stock Ledger Entry `validate`.
 
-	Checks every outgoing stock movement in the document against the
-	current Bin balance. Throws if any item would go negative.
+	Runs once per SLE row. When the BNS cutoff rule applies for this
+	row's posting_date and the current user, enforce negative-stock
+	prevention using ERPNext's own helpers.
 	"""
-	posting_date = getattr(doc, "posting_date", None)
-	if not should_restrict(posting_date):
+	if doc.is_cancelled:
 		return
 
-	outgoing = _collect_outgoing(doc)
-	if not outgoing:
+	if not _should_restrict(doc.posting_date):
 		return
 
-	cutoff = frappe.db.get_single_value("BNS Settings", "negative_stock_cutoff_date", cache=True)
-	after_cutoff = cutoff and posting_date and getdate(posting_date) > getdate(cutoff)
+	if flt(doc.actual_qty) >= 0 and doc.voucher_type != "Stock Reconciliation":
+		# Only outgoing SLEs (and stock recos) can deplete a warehouse.
+		return
 
-	for (item_code, warehouse), qty_out in outgoing.items():
-		actual_qty = flt(
-			frappe.db.get_value("Bin", {"item_code": item_code, "warehouse": warehouse}, "actual_qty")
+	# Stock Reconciliation with a positive bundle qty is a non-issue.
+	if (
+		doc.voucher_type == "Stock Reconciliation"
+		and flt(doc.actual_qty) < 0
+		and doc.serial_and_batch_bundle
+		and flt(frappe.db.get_value("Stock Reconciliation Item", doc.voucher_detail_no, "qty")) > 0
+	):
+		return
+
+	args = _sle_args(doc)
+
+	# Step 1 — would this SLE itself drive the warehouse negative once
+	# the previous SLE balance and the current actual_qty are combined?
+	previous = get_previous_sle(args) or {}
+	current_balance = flt(previous.get("qty_after_transaction"))
+	reserved = _get_reserved_stock(doc)
+	qty_after_current = flt(current_balance + flt(doc.actual_qty) - reserved, _precision())
+
+	if qty_after_current < 0 and abs(qty_after_current) > _diff_threshold():
+		_throw(
+			abs(qty_after_current),
+			doc.item_code,
+			doc.warehouse,
+			doc.posting_date,
+			doc.posting_time,
+			doc.voucher_type,
+			doc.voucher_no,
 		)
-		shortfall = flt(qty_out - actual_qty, 4)
-		if shortfall > 0:
-			if after_cutoff:
-				msg = _("{0} units of {1} needed in {2} to complete this transaction."
-						" Negative stock is blocked for posting dates after {3}.").format(
-					shortfall,
-					frappe.bold(item_code),
-					frappe.bold(warehouse),
-					frappe.format_value(cutoff, {"fieldtype": "Date"}),
-				)
-			else:
-				msg = _("{0} units of {1} needed in {2} to complete this transaction."
-						" Only authorized roles can submit negative stock on or before {3}.").format(
-					shortfall,
-					frappe.bold(item_code),
-					frappe.bold(warehouse),
-					frappe.format_value(cutoff, {"fieldtype": "Date"}),
-				)
-			frappe.throw(msg, title=_("Insufficient Stock"))
+
+	# Step 2 — would any FUTURE SLE go negative because of this insertion?
+	neg_sle = get_future_sle_with_negative_qty(args)
+	if is_negative_with_precision(neg_sle):
+		row = neg_sle[0]
+		_throw(
+			abs(row["qty_after_transaction"]),
+			doc.item_code,
+			doc.warehouse,
+			row["posting_date"],
+			row["posting_time"],
+			row["voucher_type"],
+			row["voucher_no"],
+		)
+
+	# Step 3 — batch-level check (legacy batch_no or Serial & Batch Bundle).
+	if doc.batch_no:
+		_check_batch(args, doc.batch_no)
+	elif doc.serial_and_batch_bundle:
+		_check_sbb_batches(args, doc.serial_and_batch_bundle)
 
 
-def should_restrict(posting_date):
-	"""
-	Returns True when BNS should block negative stock for this
-	posting_date and current user.
-
-	Logic:
-		- Feature disabled or no cutoff → no restriction
-		- posting_date > cutoff → ALWAYS restrict (no role bypass)
-		- posting_date ≤ cutoff → restrict unless user has override role
-
-	Args:
-		posting_date: Document posting date.
-
-	Returns:
-		bool
-	"""
+def _should_restrict(posting_date):
+	"""Cutoff + role policy. See module docstring."""
 	if frappe.flags.get("through_repost_item_valuation"):
 		return False
 
@@ -85,12 +126,14 @@ def should_restrict(posting_date):
 	):
 		return False
 
-	cutoff = frappe.db.get_single_value("BNS Settings", "negative_stock_cutoff_date", cache=True)
+	cutoff = frappe.db.get_single_value(
+		"BNS Settings", "negative_stock_cutoff_date", cache=True
+	)
 	if not cutoff or not posting_date:
 		return False
 
 	if getdate(posting_date) > getdate(cutoff):
-		return True
+		return True  # past cutoff: no bypass, ever
 
 	override_roles = _get_override_roles()
 	if override_roles:
@@ -102,7 +145,7 @@ def should_restrict(posting_date):
 
 
 def _get_override_roles():
-	"""Roles allowed to submit negative stock on or before the cutoff date."""
+	"""Cached set of roles allowed to bypass on or before the cutoff."""
 	cache_key = "_bns_negative_stock_override_roles"
 	if cache_key not in frappe.flags:
 		roles = frappe.get_all(
@@ -117,70 +160,111 @@ def _get_override_roles():
 	return frappe.flags[cache_key]
 
 
-def _collect_outgoing(doc):
-	"""
-	Collect outgoing stock movements from the document, grouped by
-	(item_code, warehouse) → total outgoing qty.
+def _sle_args(doc):
+	"""Build the args dict expected by ERPNext's stock_ledger helpers."""
+	from erpnext.stock.utils import get_combine_datetime
 
-	Non-stock items are excluded — they don't maintain bin balances and
-	must never be checked for negative stock.
-
-	Args:
-		doc: Stock document (Stock Entry, Delivery Note, etc.)
-
-	Returns:
-		dict: {(item_code, warehouse): qty_out}
-	"""
-	out = defaultdict(float)
-	doctype = doc.doctype
-
-	stock_items = _get_stock_item_set(doc)
-
-	if doctype == "Stock Entry":
-		for row in doc.items:
-			if row.s_warehouse and row.item_code in stock_items:
-				out[(row.item_code, row.s_warehouse)] += flt(row.qty)
-
-	elif doctype in ("Delivery Note", "Sales Invoice"):
-		if doctype == "Sales Invoice" and not cint(doc.update_stock):
-			return out
-		for row in doc.items:
-			if row.warehouse and flt(row.qty) > 0 and row.item_code in stock_items:
-				out[(row.item_code, row.warehouse)] += flt(row.qty)
-
-	elif doctype in ("Purchase Receipt", "Purchase Invoice"):
-		if doctype == "Purchase Invoice" and not cint(doc.update_stock):
-			return out
-		for row in doc.items:
-			if row.rejected_warehouse and flt(row.rejected_qty) > 0 and row.item_code in stock_items:
-				out[(row.item_code, row.rejected_warehouse)] += flt(row.rejected_qty)
-
-	elif doctype == "Stock Reconciliation":
-		for row in doc.items:
-			if row.warehouse and row.qty is not None and row.item_code in stock_items:
-				actual = flt(
-					frappe.db.get_value("Bin",
-						{"item_code": row.item_code, "warehouse": row.warehouse},
-						"actual_qty")
-				)
-				diff = actual - flt(row.qty)
-				if diff > 0:
-					out[(row.item_code, row.warehouse)] += diff
-
-	return out
+	args = frappe._dict(
+		{
+			"item_code": doc.item_code,
+			"warehouse": doc.warehouse,
+			"actual_qty": flt(doc.actual_qty),
+			"posting_date": doc.posting_date,
+			"posting_time": doc.posting_time,
+			"voucher_type": doc.voucher_type,
+			"voucher_no": doc.voucher_no,
+			"voucher_detail_no": doc.voucher_detail_no,
+			"batch_no": doc.batch_no,
+			"serial_and_batch_bundle": doc.serial_and_batch_bundle,
+			"name": doc.name,
+			"sle": doc.name,
+		}
+	)
+	args["posting_datetime"] = doc.posting_datetime or get_combine_datetime(
+		doc.posting_date, doc.posting_time
+	)
+	return args
 
 
-def _get_stock_item_set(doc):
-	"""
-	Return a set of item_code values from the document that are stock items.
-	Single batch query to avoid N+1.
-	"""
-	item_codes = {row.item_code for row in doc.items if row.item_code}
-	if not item_codes:
-		return set()
+def _get_reserved_stock(doc):
+	"""Reserved stock from Bin — matches ERPNext's diff calculation."""
+	from erpnext.stock.utils import get_or_make_bin
 
-	return set(frappe.get_all(
-		"Item",
-		filters={"name": ("in", list(item_codes)), "is_stock_item": 1},
-		pluck="name",
-	))
+	bin_name = get_or_make_bin(doc.item_code, doc.warehouse)
+	return flt(frappe.db.get_value("Bin", bin_name, "reserved_stock"))
+
+
+def _precision():
+	return cint(frappe.db.get_default("float_precision")) or 2
+
+
+def _diff_threshold():
+	"""Same threshold ERPNext uses in validate_negative_stock."""
+	prec = _precision()
+	return 0.0001 if prec <= 4 else 10 ** (-prec)
+
+
+def _check_batch(args, batch_no):
+	batch_args = dict(args)
+	batch_args["batch_no"] = batch_no
+	neg = get_future_sle_with_negative_batch_qty(batch_args)
+	if is_negative_with_precision(neg, is_batch=True):
+		row = neg[0]
+		_throw_batch(
+			abs(row["cumulative_total"]),
+			batch_no,
+			args["warehouse"],
+			row["posting_date"],
+			row["posting_time"],
+			row["voucher_type"],
+			row["voucher_no"],
+		)
+
+
+def _check_sbb_batches(args, bundle_id):
+	from erpnext.stock.serial_batch_bundle import get_batch_nos
+
+	for batch_no in (get_batch_nos(bundle_id) or {}):
+		_check_batch(args, batch_no)
+
+
+def _throw(deficit, item_code, warehouse, posting_date, posting_time, voucher_type, voucher_no):
+	cutoff = frappe.db.get_single_value(
+		"BNS Settings", "negative_stock_cutoff_date", cache=True
+	)
+	cutoff_label = frappe.format_value(cutoff, {"fieldtype": "Date"}) if cutoff else ""
+	msg = _(
+		"{0} units of {1} needed in {2} on {3} {4} for {5} to complete this transaction."
+	).format(
+		frappe.bold(deficit),
+		frappe.get_desk_link("Item", item_code, show_title_with_name=True),
+		frappe.get_desk_link("Warehouse", warehouse),
+		posting_date,
+		posting_time or "",
+		frappe.get_desk_link(voucher_type, voucher_no),
+	)
+	msg += "<br><br>" + _(
+		"Blocked by BNS negative-stock cutoff ({0})."
+	).format(cutoff_label)
+	frappe.throw(msg, NegativeStockError, title=_("Insufficient Stock"))
+
+
+def _throw_batch(deficit, batch_no, warehouse, posting_date, posting_time, voucher_type, voucher_no):
+	cutoff = frappe.db.get_single_value(
+		"BNS Settings", "negative_stock_cutoff_date", cache=True
+	)
+	cutoff_label = frappe.format_value(cutoff, {"fieldtype": "Date"}) if cutoff else ""
+	msg = _(
+		"{0} units of {1} needed in {2} on {3} {4} for {5} to complete this transaction."
+	).format(
+		frappe.bold(deficit),
+		frappe.get_desk_link("Batch", batch_no),
+		frappe.get_desk_link("Warehouse", warehouse),
+		posting_date,
+		posting_time or "",
+		frappe.get_desk_link(voucher_type, voucher_no),
+	)
+	msg += "<br><br>" + _(
+		"Blocked by BNS negative-stock cutoff ({0})."
+	).format(cutoff_label)
+	frappe.throw(msg, NegativeStockError, title=_("Insufficient Stock for Batch"))

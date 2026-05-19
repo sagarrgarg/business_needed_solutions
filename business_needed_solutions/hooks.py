@@ -212,12 +212,14 @@ doc_events = {
         "validate": "business_needed_solutions.business_needed_solutions.overrides.item_validation.validate_expense_account_for_non_stock_items"
     },
     "Stock Ledger Entry": {
-        "validate": "business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.validate_sle_warehouse_negative_stock"
+        "validate": [
+            "business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.validate_sle_warehouse_negative_stock",
+            "business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.validate_sle_negative_stock_cutoff",
+        ]
     },
     "Stock Entry": {
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
-            "business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.validate_negative_stock",
         ],
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
@@ -228,7 +230,6 @@ doc_events = {
         ],
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
-            "business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.validate_negative_stock",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
         ],
         "on_submit": [
@@ -243,7 +244,6 @@ doc_events = {
         "validate": "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
-            "business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.validate_negative_stock",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
             "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments"
@@ -258,7 +258,6 @@ doc_events = {
     "Stock Reconciliation": {
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
-            "business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.validate_negative_stock",
         ],
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
@@ -271,7 +270,6 @@ doc_events = {
         ],
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
-            "business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.validate_negative_stock",
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
@@ -282,7 +280,6 @@ doc_events = {
     "Purchase Invoice": {
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
-            "business_needed_solutions.business_needed_solutions.overrides.negative_stock_override.validate_negative_stock",
             "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_invoice_si_parity",
         ],
