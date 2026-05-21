@@ -3010,5 +3010,63 @@
   "depends_on": "eval:doc.custom_msme_registered == 'Yes'",
   "mandatory_depends_on": "eval:doc.custom_msme_registered == 'Yes'",
   "description": "Attach the supplier's MSME / Udyam registration certificate."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Invoice",
+  "fieldname": "bns_ewaybill_date",
+  "fieldtype": "Date",
+  "label": "e-Waybill Date",
+  "insert_after": "bns_ewaybill_attachment",
+  "module": "Business Needed Solutions",
+  "name": "Purchase Invoice-bns_ewaybill_date",
+  "description": "Date printed on the e-Waybill (required whenever the e-Waybill attachment is required)."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Invoice",
+  "fieldname": "bns_mode_of_transport",
+  "fieldtype": "Select",
+  "label": "Transport Mode",
+  "options": "\nBy Hand\nBy Lorry\nBy e-Waybill",
+  "insert_after": "bns_builty_attachment",
+  "module": "Business Needed Solutions",
+  "name": "Purchase Invoice-bns_mode_of_transport",
+  "description": "BNS transport mode for attachment enforcement. By Hand / By Lorry skip the e-Waybill requirement; By e-Waybill (or blank) runs the threshold check."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Receipt",
+  "fieldname": "bns_ewaybill_date",
+  "fieldtype": "Date",
+  "label": "e-Waybill Date",
+  "insert_after": "bns_ewaybill_attachment",
+  "module": "Business Needed Solutions",
+  "name": "Purchase Receipt-bns_ewaybill_date",
+  "description": "Date printed on the e-Waybill (required whenever the e-Waybill attachment is required)."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Purchase Receipt",
+  "fieldname": "bns_mode_of_transport",
+  "fieldtype": "Select",
+  "label": "Transport Mode",
+  "options": "\nBy Hand\nBy Lorry\nBy e-Waybill",
+  "insert_after": "bns_builty_attachment",
+  "module": "Business Needed Solutions",
+  "name": "Purchase Receipt-bns_mode_of_transport",
+  "description": "BNS transport mode for attachment enforcement. By Hand / By Lorry skip the e-Waybill requirement; By e-Waybill (or blank) runs the threshold check."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Supplier",
+  "fieldname": "bns_skip_supplier_invoice_details",
+  "fieldtype": "Check",
+  "label": "Skip Supplier Invoice No/Date Requirement",
+  "default": "0",
+  "insert_after": "is_bns_internal_supplier",
+  "module": "Business Needed Solutions",
+  "name": "Supplier-bns_skip_supplier_invoice_details",
+  "description": "When checked, Purchase Invoice/Receipt submissions for this supplier do not require Supplier Invoice No or Date."
  }
 ]

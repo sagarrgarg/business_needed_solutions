@@ -49,6 +49,7 @@ def validate_purchase_attachments(doc, method: Optional[str] = None) -> None:
 
     if doc.doctype == "Purchase Receipt":
         _require_supplier_invoice(doc)
+        _require_supplier_invoice_details(doc)
         if _is_ewaybill_required(doc):
             _require_ewaybill(doc)
 
@@ -56,6 +57,7 @@ def validate_purchase_attachments(doc, method: Optional[str] = None) -> None:
         if _has_linked_purchase_receipt(doc):
             return
         _require_supplier_invoice(doc)
+        _require_supplier_invoice_details(doc)
         if _is_ewaybill_required(doc):
             _require_ewaybill(doc)
 
@@ -119,17 +121,59 @@ def _require_supplier_invoice(doc) -> None:
         )
 
 
+def _supplier_skips_invoice_details(supplier) -> bool:
+    """Per-supplier opt-out of the bill_no/bill_date enforcement."""
+    if not supplier:
+        return False
+    return bool(cint(
+        frappe.db.get_value("Supplier", supplier, "bns_skip_supplier_invoice_details")
+    ))
+
+
+def _require_supplier_invoice_details(doc) -> None:
+    """
+    Throw if bill_no or bill_date is missing, unless the supplier has opted
+    out via bns_skip_supplier_invoice_details on the Supplier master.
+    """
+    if _supplier_skips_invoice_details(doc.get("supplier")):
+        return
+
+    if not doc.get("bill_no"):
+        frappe.throw(
+            _(
+                "Supplier Invoice No is mandatory to submit {0} {1}."
+            ).format(bold(doc.doctype), bold(doc.name)),
+            title=_("Supplier Invoice No Required"),
+        )
+
+    if not doc.get("bill_date"):
+        frappe.throw(
+            _(
+                "Supplier Invoice Date is mandatory to submit {0} {1}."
+            ).format(bold(doc.doctype), bold(doc.name)),
+            title=_("Supplier Invoice Date Required"),
+        )
+
+
 def _is_ewaybill_required(doc) -> bool:
     """
     Return True when the document needs an e-Waybill attachment.
 
-    Conditions (all must be true):
+    BNS transport mode takes priority:
+      - "By Hand" or "By Lorry"  →  e-Waybill not required (even over threshold).
+      - "By e-Waybill" or blank  →  fall through to the threshold rule.
+
+    Threshold conditions (all must be true):
       1. GST Settings has enable_e_waybill turned on.
       2. At least one line item is a stock item (goods). update_stock alone
          does not count — non-stock-only PIs must not require e-Waybill.
       3. abs(base_grand_total) >= e_waybill_threshold from GST Settings.
       4. Supplier GST category is not "Unregistered".
     """
+    mode = (doc.get("bns_mode_of_transport") or "").strip()
+    if mode in ("By Hand", "By Lorry"):
+        return False
+
     if _is_unregistered_supplier(doc):
         return False
 
@@ -162,7 +206,7 @@ def _has_stock_items(doc) -> bool:
 
 
 def _require_ewaybill(doc) -> None:
-    """Throw if the bns_ewaybill_attachment field is empty."""
+    """Throw if the bns_ewaybill_attachment or bns_ewaybill_date field is empty."""
     if not doc.get("bns_ewaybill_attachment"):
         frappe.throw(
             _(
@@ -171,6 +215,15 @@ def _require_ewaybill(doc) -> None:
                 "Please attach the e-Waybill."
             ).format(bold(doc.doctype), bold(doc.name)),
             title=_("e-Waybill Required"),
+        )
+
+    if not doc.get("bns_ewaybill_date"):
+        frappe.throw(
+            _(
+                "e-Waybill Date is mandatory to submit {0} {1}. "
+                "Please fill the date printed on the e-Waybill."
+            ).format(bold(doc.doctype), bold(doc.name)),
+            title=_("e-Waybill Date Required"),
         )
 
 
@@ -207,6 +260,7 @@ def check_ewaybill_applicability(
     supplier=None,
     gst_category=None,
     posting_date=None,
+    mode_of_transport=None,
 ):
     """
     Client-callable endpoint to determine whether the e-Waybill field should be
@@ -214,6 +268,10 @@ def check_ewaybill_applicability(
 
     For PI/PR, requires at least one stock item row (``update_stock`` is ignored
     for that check; kept only for API compatibility).
+
+    ``mode_of_transport`` is the BNS transport mode field — when set to
+    "By Hand" or "By Lorry" the e-Waybill is not required regardless of
+    threshold.
 
     Returns dict: {"required": bool, "threshold": float}
     """
@@ -231,6 +289,9 @@ def check_ewaybill_applicability(
         cutoff = frappe.db.get_single_value("BNS Settings", "purchase_attachment_cutoff_date")
         if cutoff and getdate(posting_date) < getdate(cutoff):
             return {"required": False, "threshold": 0}
+
+    if (mode_of_transport or "").strip() in ("By Hand", "By Lorry"):
+        return {"required": False, "threshold": _get_ewaybill_threshold()}
 
     if cint(is_bns_internal_supplier):
         return {"required": False, "threshold": _get_ewaybill_threshold()}
