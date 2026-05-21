@@ -379,3 +379,43 @@ def _get_ewaybill_threshold() -> float:
     except Exception as e:
         logger.error(f"Error fetching e-Waybill threshold: {e}")
         return 0
+
+
+def get_ewaybill_data_for_print(doctype: str, docname: str) -> Optional[str]:
+    """
+    Resolve e-Waybill JSON payload for a print format.
+
+    If the e-Waybill Log row exists but its `data` is empty (typical when
+    the NIC portal timed out at generation time), attempt one fresh fetch
+    via India Compliance. If the fetch fails or still returns nothing,
+    raise a clear user-facing error instead of letting `json.loads(None)`
+    blow up downstream.
+    """
+    if not docname:
+        return None
+
+    ewaybill_no = frappe.db.get_value(doctype, docname, "ewaybill")
+    if not ewaybill_no:
+        return None
+
+    data = frappe.db.get_value("e-Waybill Log", ewaybill_no, "data")
+    if data:
+        return data
+
+    try:
+        from india_compliance.gst_india.utils.e_waybill import fetch_e_waybill_data
+        fetch_e_waybill_data(doctype=doctype, docname=docname, force=True)
+    except Exception:
+        frappe.log_error(title="BNS: e-Waybill refetch at print time failed")
+
+    data = frappe.db.get_value("e-Waybill Log", ewaybill_no, "data")
+    if not data:
+        frappe.throw(
+            _(
+                "Government e-Waybill portal is not responding for e-Waybill {0}. "
+                "Please wait a few minutes and try printing again."
+            ).format(ewaybill_no),
+            title=_("e-Waybill Data Unavailable"),
+        )
+
+    return data
