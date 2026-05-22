@@ -160,8 +160,8 @@ def _is_ewaybill_required(doc) -> bool:
     Return True when the document needs an e-Waybill attachment.
 
     BNS transport mode takes priority:
-      - "By Hand" or "By Lorry"  →  e-Waybill not required (even over threshold).
-      - "By e-Waybill" or blank  →  fall through to the threshold rule.
+      - "By Hand/By Cart"        →  e-Waybill not required (even over threshold).
+      - "By Ewaybill" or blank   →  fall through to the threshold rule.
 
     Threshold conditions (all must be true):
       1. GST Settings has enable_e_waybill turned on.
@@ -171,7 +171,7 @@ def _is_ewaybill_required(doc) -> bool:
       4. Supplier GST category is not "Unregistered".
     """
     mode = (doc.get("bns_mode_of_transport") or "").strip()
-    if mode in ("By Hand", "By Lorry"):
+    if mode == "By Hand/By Cart":
         return False
 
     if _is_unregistered_supplier(doc):
@@ -270,8 +270,7 @@ def check_ewaybill_applicability(
     for that check; kept only for API compatibility).
 
     ``mode_of_transport`` is the BNS transport mode field — when set to
-    "By Hand" or "By Lorry" the e-Waybill is not required regardless of
-    threshold.
+    "By Hand/By Cart" the e-Waybill is not required regardless of threshold.
 
     Returns dict: {"required": bool, "threshold": float}
     """
@@ -290,7 +289,7 @@ def check_ewaybill_applicability(
         if cutoff and getdate(posting_date) < getdate(cutoff):
             return {"required": False, "threshold": 0}
 
-    if (mode_of_transport or "").strip() in ("By Hand", "By Lorry"):
+    if (mode_of_transport or "").strip() == "By Hand/By Cart":
         return {"required": False, "threshold": _get_ewaybill_threshold()}
 
     if cint(is_bns_internal_supplier):

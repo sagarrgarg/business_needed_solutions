@@ -156,29 +156,22 @@ class AttachmentValidationTests(unittest.TestCase):
         doc = _make_doc(
             bill_no=None,
             bill_date=None,
-            bns_mode_of_transport="By Hand",  # disable e-waybill rule
+            bns_mode_of_transport="By Hand/By Cart",  # disable e-waybill rule
         )
         av.validate_purchase_attachments(doc)
 
     # -- mode of transport --------------------------------------------------
 
-    def test_by_hand_skips_ewaybill_even_over_threshold(self):
+    def test_by_hand_by_cart_skips_ewaybill_even_over_threshold(self):
         doc = _make_doc(
-            bns_mode_of_transport="By Hand",
-            base_grand_total=10_000_000,
-        )
-        av.validate_purchase_attachments(doc)
-
-    def test_by_lorry_skips_ewaybill_even_over_threshold(self):
-        doc = _make_doc(
-            bns_mode_of_transport="By Lorry",
+            bns_mode_of_transport="By Hand/By Cart",
             base_grand_total=10_000_000,
         )
         av.validate_purchase_attachments(doc)
 
     def test_by_ewaybill_with_attach_and_date_passes(self):
         doc = _make_doc(
-            bns_mode_of_transport="By e-Waybill",
+            bns_mode_of_transport="By Ewaybill",
             bns_ewaybill_attachment="/files/ewb.pdf",
             bns_ewaybill_date="2026-05-21",
         )
@@ -186,7 +179,7 @@ class AttachmentValidationTests(unittest.TestCase):
 
     def test_by_ewaybill_missing_attach_throws(self):
         doc = _make_doc(
-            bns_mode_of_transport="By e-Waybill",
+            bns_mode_of_transport="By Ewaybill",
             bns_ewaybill_attachment=None,
             bns_ewaybill_date="2026-05-21",
         )
@@ -195,7 +188,7 @@ class AttachmentValidationTests(unittest.TestCase):
 
     def test_by_ewaybill_missing_date_throws(self):
         doc = _make_doc(
-            bns_mode_of_transport="By e-Waybill",
+            bns_mode_of_transport="By Ewaybill",
             bns_ewaybill_attachment="/files/ewb.pdf",
             bns_ewaybill_date=None,
         )

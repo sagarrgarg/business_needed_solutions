@@ -5,17 +5,17 @@
  *   bns_supplier_invoice_attachment   (Attach)
  *   bns_ewaybill_attachment           (Attach, paired with bns_ewaybill_date)
  *   bns_ewaybill_date                 (Date)
- *   bns_mode_of_transport             (Select: By Hand / By Lorry / By e-Waybill)
+ *   bns_mode_of_transport             (Select: By Hand/By Cart / By Ewaybill)
  *   bns_builty_attachment             (Attach, always optional)
  *
  * Rules:
  *   - BNS internal supplier  → entire section hidden, nothing required.
  *   - PI with linked PR rows → per-field hide based on whether each linked PR
  *     has that field filled; nothing required (server-side bypass applies).
- *   - Otherwise               → section visible. Mode = "By Hand" / "By Lorry"
- *     skips the e-Waybill threshold check entirely. Mode = "By e-Waybill" or
+ *   - Otherwise               → section visible. Mode = "By Hand/By Cart"
+ *     skips the e-Waybill threshold check entirely. Mode = "By Ewaybill" or
  *     blank → server-side threshold call decides whether e-Waybill attach+date
- *     are required.
+ *     are required. Below-threshold keeps the fields visible (optional).
  *
  * Supplier-level toggle bns_skip_supplier_invoice_details inverts the bill_no /
  * bill_date requirement for that supplier (default OFF → fields required).
@@ -191,8 +191,8 @@ function _refreshEwaybillVisibility(frm) {
 
         var ewaybillRequired = r.message.required;
         var inDraft = frm.doc.docstatus === 0;
-        frm.toggle_display('bns_ewaybill_attachment', ewaybillRequired);
-        frm.toggle_display('bns_ewaybill_date', ewaybillRequired);
+        frm.toggle_display('bns_ewaybill_attachment', true);
+        frm.toggle_display('bns_ewaybill_date', true);
         frm.toggle_reqd('bns_ewaybill_attachment', ewaybillRequired && inDraft);
         frm.toggle_reqd('bns_ewaybill_date', ewaybillRequired && inDraft);
 
