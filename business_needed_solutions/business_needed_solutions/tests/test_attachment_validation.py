@@ -151,6 +151,17 @@ class AttachmentValidationTests(unittest.TestCase):
         with self.assertRaises(frappe.ValidationError):
             av.validate_purchase_attachments(doc)
 
+    def test_pr_does_not_require_bill_no_or_date(self):
+        # Purchase Receipt has no bill_no/bill_date standard fields, so the
+        # supplier-invoice-details rule must not apply.
+        doc = _make_doc(
+            doctype="Purchase Receipt",
+            bill_no=None,
+            bill_date=None,
+            bns_mode_of_transport="By Hand/By Cart",  # isolate from e-waybill rule
+        )
+        av.validate_purchase_attachments(doc)
+
     def test_supplier_skip_flag_waives_bill_fields(self):
         self.stubs.supplier["Vendor A"]["bns_skip_supplier_invoice_details"] = 1
         doc = _make_doc(

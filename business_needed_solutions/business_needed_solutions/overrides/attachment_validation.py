@@ -49,7 +49,7 @@ def validate_purchase_attachments(doc, method: Optional[str] = None) -> None:
 
     if doc.doctype == "Purchase Receipt":
         _require_supplier_invoice(doc)
-        _require_supplier_invoice_details(doc)
+        # bill_no / bill_date are PI-only standard fields; PR has no such inputs.
         if _is_ewaybill_required(doc):
             _require_ewaybill(doc)
 
