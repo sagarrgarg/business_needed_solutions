@@ -7947,6 +7947,35 @@ def ignore_parent_cancellation_links_for_bns_internal(doc, method: Optional[str]
     doc.flags.ignore_linked_doctypes = ignore_linked_doctypes
 
 
+def ignore_payment_ledger_cancellation_links_for_dn(doc, method: Optional[str] = None) -> None:
+    """On DN cancel, skip backlink check against Payment Ledger Entry.
+
+    BNS internal DN GL rewrite posts to a party-tracked debtor account
+    (`internal_branch_debtor_account`), which makes ERPNext auto-create
+    Payment Ledger Entry rows. Those PLE rows then block DN cancel via
+    the standard link check. The reverse GL produced on cancel creates
+    offsetting PLE rows that net to zero, so skipping the check is safe.
+    Mirrors the PR/PI pattern in
+    `ignore_parent_cancellation_links_for_bns_internal`.
+    """
+    if doc.doctype != "Delivery Note":
+        return
+
+    ignore_linked_doctypes = [
+        # ERPNext's DN defaults (delivery_note.py:519-524).
+        "GL Entry",
+        "Stock Ledger Entry",
+        "Repost Item Valuation",
+        "Serial and Batch Bundle",
+        # BNS additions: PLE rows auto-created by GL rewrite to
+        # party-tracked accounts must not block DN cancel.
+        "Payment Ledger Entry",
+        "Advance Payment Ledger Entry",
+    ]
+    doc.ignore_linked_doctypes = ignore_linked_doctypes
+    doc.flags.ignore_linked_doctypes = ignore_linked_doctypes
+
+
 def unlink_references_on_purchase_cancel(doc, method: Optional[str] = None) -> None:
     """
     On PR/PI cancel, only remove BNS links; never cancel parent SI/DN.

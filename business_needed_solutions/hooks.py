@@ -238,7 +238,10 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.utils.update_delivery_note_status_for_bns_internal",
             "business_needed_solutions.bns_branch_accounting.gst_integration.maybe_generate_internal_dn_ewaybill"
         ],
-        "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.validate_delivery_note_cancellation"
+        "on_cancel": [
+            "business_needed_solutions.bns_branch_accounting.utils.validate_delivery_note_cancellation",
+            "business_needed_solutions.bns_branch_accounting.utils.ignore_payment_ledger_cancellation_links_for_dn"
+        ]
     },
     "Purchase Receipt": {
         "validate": "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
