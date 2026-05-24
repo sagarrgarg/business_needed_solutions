@@ -250,10 +250,10 @@ class BackfillHelpersTests(unittest.TestCase):
                      grand_total=1000.0, is_return=0)
         with patch.object(aps, "_linked_payment_entries", return_value=[]):
             row = aps._process_pi_for_backfill(pi, dry_run=1)
-        self.assertEqual(row["status"], "would-pay-residual")
+        self.assertEqual(row["status"], "would-pay")
         self.assertEqual(row["amount"], 1000.0)
         self.assertEqual(row["to_account"], "Cash - A")
-        self.assertEqual(row["reclassified"], [])
+        self.assertEqual(row["cancelled"], [])
 
     def test_process_pi_dry_run_correct_account_pe_already_paid(self):
         pi = _MockPI(name="PI-2", supplier="Cash Vendor", company="Acme",
@@ -269,10 +269,12 @@ class BackfillHelpersTests(unittest.TestCase):
         with patch.object(aps, "_linked_payment_entries", return_value=linked):
             row = aps._process_pi_for_backfill(pi, dry_run=1)
         self.assertEqual(row["status"], "ok")
-        self.assertEqual(row["reclassified"], [])
+        self.assertEqual(row["cancelled"], [])
         self.assertEqual(row["residual"], 0)
 
-    def test_process_pi_dry_run_wrong_account_pe(self):
+    def test_process_pi_dry_run_wrong_account_pe_plans_cancel_and_pay(self):
+        # Cancelling the wrong PE adds 1000 back to outstanding (which was 0),
+        # so the dry-run plan shows: cancel PE-WRONG, then pay 1000.
         pi = _MockPI(name="PI-3", supplier="Cash Vendor", company="Acme",
                      posting_date="2026-05-01", outstanding_amount=0.0,
                      grand_total=1000.0, is_return=0)
@@ -285,15 +287,15 @@ class BackfillHelpersTests(unittest.TestCase):
         }]
         with patch.object(aps, "_linked_payment_entries", return_value=linked):
             row = aps._process_pi_for_backfill(pi, dry_run=1)
-        # Outstanding is 0 (PE-WRONG paid it), so phase 3 says ok; phase 2
-        # reports the reclassification plan.
-        self.assertEqual(row["status"], "ok")
-        self.assertEqual(len(row["reclassified"]), 1)
-        plan = row["reclassified"][0]
+        self.assertEqual(row["status"], "would-pay")
+        self.assertEqual(row["amount"], 1000.0)
+        self.assertEqual(row["to_account"], "Cash - A")
+        self.assertEqual(len(row["cancelled"]), 1)
+        plan = row["cancelled"][0]
         self.assertEqual(plan["old_pe"], "PE-WRONG")
         self.assertEqual(plan["from_account"], "HDFC - A")
         self.assertEqual(plan["to_account"], "Cash - A")
-        self.assertEqual(plan["action"], "would cancel + recreate")
+        self.assertEqual(plan["action"], "would cancel")
 
     def test_process_pi_dry_run_multi_pi_pe_needs_manual(self):
         pi = _MockPI(name="PI-4", supplier="Cash Vendor", company="Acme",
@@ -319,6 +321,17 @@ class BackfillHelpersTests(unittest.TestCase):
             row = aps._process_pi_for_backfill(pi, dry_run=1)
         self.assertEqual(row["status"], "skipped")
 
+    def test_process_pi_dry_run_near_zero_residual_is_ok(self):
+        # Sub-paisa residual after wrong-PE cancellation should resolve as
+        # "ok" (no PE created), not trigger a tiny phantom payment.
+        pi = _MockPI(name="PI-6", supplier="Cash Vendor", company="Acme",
+                     posting_date="2026-05-01", outstanding_amount=-0.005,
+                     grand_total=1000.0, is_return=0)
+        with patch.object(aps, "_linked_payment_entries", return_value=[]):
+            row = aps._process_pi_for_backfill(pi, dry_run=1)
+        self.assertEqual(row["status"], "ok")
+        self.assertEqual(row["residual"], 0)
+
     def test_summarize_counts_by_status(self):
         rows = [
             {"status": "ok"}, {"status": "ok"}, {"status": "paid"},
@@ -326,6 +339,63 @@ class BackfillHelpersTests(unittest.TestCase):
         ]
         self.assertEqual(aps._summarize(rows),
                          {"ok": 3, "paid": 1, "needs-manual": 1})
+
+    def test_backfill_enqueues_live_run_above_threshold(self):
+        # 11 PIs in scope, live run -> must enqueue, must NOT process inline.
+        fake_pis = [_MockPI(name=f"PI-{i}", supplier="Cash Vendor",
+                            company="Acme", posting_date="2026-05-01",
+                            outstanding_amount=100.0, grand_total=100.0,
+                            is_return=0) for i in range(11)]
+        with patch("frappe.has_permission", return_value=True), \
+             patch.object(aps, "_scope_pis_for_backfill", return_value=fake_pis), \
+             patch.object(aps, "_run_backfill_inline") as inline_mock, \
+             patch("frappe.enqueue") as enqueue_mock:
+            result = aps.backfill_auto_paid_supplier(dry_run=0)
+        inline_mock.assert_not_called()
+        enqueue_mock.assert_called_once()
+        self.assertTrue(result["enqueued"])
+        self.assertEqual(result["total"], 11)
+
+    def test_backfill_runs_inline_when_live_at_or_below_threshold(self):
+        # 10 PIs (== threshold) live: inline path, no enqueue.
+        fake_pis = [_MockPI(name=f"PI-{i}", supplier="Cash Vendor",
+                            company="Acme", posting_date="2026-05-01",
+                            outstanding_amount=0.0, grand_total=100.0,
+                            is_return=0) for i in range(10)]
+        with patch("frappe.has_permission", return_value=True), \
+             patch.object(aps, "_scope_pis_for_backfill", return_value=fake_pis), \
+             patch.object(aps, "_run_backfill_inline", return_value=[]) as inline_mock, \
+             patch("frappe.enqueue") as enqueue_mock:
+            result = aps.backfill_auto_paid_supplier(dry_run=0)
+        inline_mock.assert_called_once()
+        enqueue_mock.assert_not_called()
+        self.assertFalse(result["enqueued"])
+
+    def test_backfill_dry_run_never_enqueues(self):
+        # Dry run with 500 PIs: still inline (read-only, safe to be sync).
+        fake_pis = [_MockPI(name=f"PI-{i}", supplier="Cash Vendor",
+                            company="Acme", posting_date="2026-05-01",
+                            outstanding_amount=0.0, grand_total=100.0,
+                            is_return=0) for i in range(500)]
+        with patch("frappe.has_permission", return_value=True), \
+             patch.object(aps, "_scope_pis_for_backfill", return_value=fake_pis), \
+             patch.object(aps, "_run_backfill_inline", return_value=[]) as inline_mock, \
+             patch("frappe.enqueue") as enqueue_mock:
+            result = aps.backfill_auto_paid_supplier(dry_run=1)
+        inline_mock.assert_called_once()
+        enqueue_mock.assert_not_called()
+        self.assertTrue(result["dry_run"])
+
+    def test_backfill_throws_above_hard_max(self):
+        # 2001 PIs: above hard cap, throw even in dry run.
+        fake_pis = [_MockPI(name=f"PI-{i}", supplier="Cash Vendor",
+                            company="Acme", posting_date="2026-05-01",
+                            outstanding_amount=0.0, grand_total=100.0,
+                            is_return=0) for i in range(2001)]
+        with patch("frappe.has_permission", return_value=True), \
+             patch.object(aps, "_scope_pis_for_backfill", return_value=fake_pis):
+            with self.assertRaises(frappe.ValidationError):
+                aps.backfill_auto_paid_supplier(dry_run=1)
 
 
 if __name__ == "__main__":

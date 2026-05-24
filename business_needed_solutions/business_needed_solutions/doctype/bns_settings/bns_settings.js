@@ -18,6 +18,16 @@ function _show_backfill_result(result) {
     frappe.msgprint({ title: __('Backfill Result'), message: html, wide: true });
 }
 
+// Module-level realtime listener: stays registered for the session, so a
+// background backfill result lands in front of the user even if they've
+// navigated away from BNS Settings. Idempotent — guarded by a flag.
+if (!window._bns_auto_paid_backfill_listener) {
+    window._bns_auto_paid_backfill_listener = true;
+    frappe.realtime.on('bns_auto_paid_backfill_done', function(data) {
+        _show_backfill_result(data);
+    });
+}
+
 frappe.ui.form.on('BNS Settings', {
     refresh: function(frm) {
         // Apply List View Settings button
@@ -94,7 +104,14 @@ frappe.ui.form.on('BNS Settings', {
                         callback: function(r) {
                             if (!r.message) return;
                             d.hide();
-                            _show_backfill_result(r.message);
+                            if (r.message.enqueued) {
+                                frappe.show_alert({
+                                    message: __('Backfill enqueued for {0} Purchase Invoices. You will be notified when it completes.', [r.message.total || 0]),
+                                    indicator: 'blue',
+                                }, 10);
+                            } else {
+                                _show_backfill_result(r.message);
+                            }
                         },
                     });
                 },

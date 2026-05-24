@@ -98,7 +98,15 @@ def _resolve_mop_account(mop, company):
 # Backfill: bring historical PIs in line with the auto-paid policy
 # ---------------------------------------------------------------------------
 
-_BACKFILL_LIVE_LIMIT = 200
+# Live runs above this size go to the long queue; the request returns
+# immediately and the result is published via realtime when the worker
+# finishes. Dry runs are always inline (read-only) regardless of size.
+_BACKFILL_ENQUEUE_THRESHOLD = 10
+# Hard ceiling even for enqueued runs — keeps one job from chewing through
+# the entire ledger in a single shot if a filter is forgotten.
+_BACKFILL_HARD_MAX = 2000
+# Realtime event name used to deliver the worker's report to the UI.
+_BACKFILL_REALTIME_EVENT = "bns_auto_paid_backfill_done"
 
 
 @frappe.whitelist()
@@ -112,21 +120,24 @@ def backfill_auto_paid_supplier(
     the auto-paid policy.
 
     For each submitted PI in scope:
-      1. Inspect linked Payment Entries. PEs that used the wrong cash/bank
-         account are cancelled and recreated against the supplier's MOP
-         account (only if the PE references this PI alone; multi-PI PEs are
-         reported and skipped).
-      2. After step 1, any residual outstanding amount is paid via a new
-         Payment Entry on the correct account.
+      1. Cancel every linked Payment Entry that paid against the wrong
+         cash/bank account (only if the PE references this PI alone;
+         multi-PI PEs are reported and skipped — cancelling them would
+         un-pay other invoices).
+      2. Pay the resulting outstanding (original residual + amount freed
+         by cancellations) as ONE new Payment Entry on the correct account.
 
     Returns a structured report; no direct GL Entry mutation.
+
+    Sync vs enqueue: dry runs always return inline. Live runs with more
+    than ``_BACKFILL_ENQUEUE_THRESHOLD`` PIs are enqueued to the long
+    queue and the report is published via the ``bns_auto_paid_backfill_done``
+    realtime event to the calling user when the worker finishes.
 
     Args:
         supplier: Restrict to one Supplier name. Blank = every flagged supplier.
         from_date / to_date: Posting-date window. Blank = unbounded.
-        dry_run: 1 (default) plans without writing. 0 actually applies changes
-                 and is capped at ``_BACKFILL_LIVE_LIMIT`` PIs per call to
-                 keep operations chunked.
+        dry_run: 1 (default) plans without writing. 0 actually applies changes.
     """
     from frappe.utils import cint
 
@@ -140,15 +151,46 @@ def backfill_auto_paid_supplier(
     dry_run = cint(dry_run)
     pis = _scope_pis_for_backfill(supplier, from_date, to_date)
 
-    if not dry_run and len(pis) > _BACKFILL_LIVE_LIMIT:
+    if len(pis) > _BACKFILL_HARD_MAX:
         frappe.throw(
             _(
-                "Backfill scope is {0} Purchase Invoices, above the live-run "
-                "cap of {1}. Narrow the date range or run per supplier."
-            ).format(len(pis), _BACKFILL_LIVE_LIMIT),
+                "Backfill scope is {0} Purchase Invoices, above the hard cap "
+                "of {1}. Narrow the date range or run per supplier."
+            ).format(len(pis), _BACKFILL_HARD_MAX),
             title=_("Backfill Scope Too Large"),
         )
 
+    # Live runs above the inline threshold go to the long queue. The
+    # caller receives an enqueue confirmation immediately; the worker
+    # publishes the report via realtime when it finishes.
+    if not dry_run and len(pis) > _BACKFILL_ENQUEUE_THRESHOLD:
+        pi_names = [pi.name for pi in pis]
+        frappe.enqueue(
+            "business_needed_solutions.business_needed_solutions.overrides.auto_paid_supplier._backfill_runner",
+            queue="long",
+            timeout=3600,
+            job_name=f"bns_auto_paid_backfill:{frappe.session.user}:{len(pi_names)}",
+            pi_names=pi_names,
+            user=frappe.session.user,
+        )
+        return {
+            "enqueued": True,
+            "dry_run": False,
+            "total": len(pi_names),
+        }
+
+    rows = _run_backfill_inline(pis, dry_run)
+    return {
+        "enqueued": False,
+        "dry_run": bool(dry_run),
+        "total": len(rows),
+        "by_status": _summarize(rows),
+        "rows": rows,
+    }
+
+
+def _run_backfill_inline(pis, dry_run):
+    """Process a list of PI rows synchronously, with per-PI error capture."""
     rows = []
     for pi in pis:
         try:
@@ -159,13 +201,54 @@ def backfill_auto_paid_supplier(
                 message=f"PI {pi.name}: {exc}\n{frappe.get_traceback()}",
             )
             rows.append({"pi": pi.name, "status": "error", "reason": str(exc)})
+            if not dry_run:
+                # Don't poison subsequent PIs with a half-applied transaction.
+                frappe.db.rollback()
+    return rows
 
-    return {
-        "dry_run": bool(dry_run),
-        "total": len(rows),
-        "by_status": _summarize(rows),
-        "rows": rows,
-    }
+
+def _backfill_runner(pi_names, user):
+    """Background worker: process a fixed PI list and publish the report.
+
+    Re-fetches each PI from the DB so the worker isn't dependent on the
+    enqueue snapshot, then runs the same per-PI flow as the inline path.
+    Errors are logged and reported per PI; one failure does not abort
+    the batch.
+    """
+    rows = []
+    for name in pi_names:
+        pi = frappe.db.get_value(
+            "Purchase Invoice", name,
+            [
+                "name", "supplier", "company", "posting_date",
+                "outstanding_amount", "grand_total", "is_return",
+            ],
+            as_dict=True,
+        )
+        if not pi:
+            rows.append({"pi": name, "status": "error", "reason": "PI not found"})
+            continue
+        try:
+            rows.append(_process_pi_for_backfill(pi, dry_run=0))
+        except Exception as exc:
+            frappe.log_error(
+                title="Auto-Paid Supplier Backfill (BG)",
+                message=f"PI {name}: {exc}\n{frappe.get_traceback()}",
+            )
+            rows.append({"pi": name, "status": "error", "reason": str(exc)})
+            frappe.db.rollback()
+
+    frappe.publish_realtime(
+        event=_BACKFILL_REALTIME_EVENT,
+        message={
+            "dry_run": False,
+            "enqueued": True,
+            "total": len(rows),
+            "by_status": _summarize(rows),
+            "rows": rows,
+        },
+        user=user,
+    )
 
 
 def _scope_pis_for_backfill(supplier, from_date, to_date):
@@ -248,11 +331,17 @@ def _linked_payment_entries(pi_name):
     return rows
 
 
-def _make_pe_for_pi(pi_name, mop, account, amount, posting_date, reference_no):
-    """Build (and save, not submit) a Payment Entry for a single PI allocation.
+def _make_pe_paying_outstanding(pi_name, mop, account, posting_date, reference_no):
+    """Build (and save, not submit) a Payment Entry that pays the PI's
+    current full outstanding through the target MOP account.
 
-    Uses ERPNext's ``get_payment_entry`` to inherit party + currency wiring,
-    then overrides MOP, cash/bank account, amount, and posting date.
+    Trusts ERPNext's ``get_payment_entry`` to size paid_amount /
+    received_amount / references / exchange rates correctly. We only
+    override the routing fields (MOP + cash/bank account) and the
+    reference metadata. No reference trimming, no allocated_amount
+    override — which is what caused the "Allocated Amount cannot be
+    greater than outstanding amount" validator error in the previous
+    per-PE recreate path.
     """
     from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
 
@@ -263,22 +352,24 @@ def _make_pe_for_pi(pi_name, mop, account, amount, posting_date, reference_no):
         pe.paid_to = account
     else:
         pe.paid_from = account
-    pe.paid_amount = abs(amount)
-    pe.received_amount = abs(amount)
     pe.reference_no = reference_no
     pe.reference_date = posting_date
     pe.posting_date = posting_date
-    # Trim references to just this PI and this allocation.
-    pe.references = [r for r in pe.references if r.reference_name == pi_name]
-    for r in pe.references:
-        r.allocated_amount = abs(amount)
     pe.flags.ignore_permissions = True
     pe.save()
     return pe
 
 
 def _process_pi_for_backfill(pi, dry_run):
-    """Drive the per-PI flow described in ``backfill_auto_paid_supplier``."""
+    """Per-PI flow.
+
+    1. Resolve supplier's MOP account; skip if misconfigured.
+    2. Inspect linked PEs. Any PE that paid through a different cash/bank
+       account is a wrong-account PE. Multi-PI PEs are reported as
+       needs-manual (cancelling would un-pay other invoices).
+    3. Cancel every wrong-account PE.
+    4. Pay the resulting full outstanding as ONE new PE.
+    """
     from frappe.utils import flt
 
     supplier = frappe.get_cached_doc("Supplier", pi.supplier)
@@ -306,73 +397,66 @@ def _process_pi_for_backfill(pi, dry_run):
             "pes": [p["name"] for p in multi_pi_pes],
         }
 
-    # Phase 2: cancel wrong-account PEs and recreate on correct account
-    reclassified = []
-    for wrong in wrong_pes:
-        if dry_run:
-            reclassified.append({
+    cancelled = []
+    cancelled_total = 0.0
+    if wrong_pes and dry_run:
+        for wrong in wrong_pes:
+            cancelled.append({
                 "old_pe": wrong["name"],
                 "amount": wrong["allocated_amount"],
                 "from_account": wrong["cash_bank_account"],
                 "to_account": target_account,
-                "action": "would cancel + recreate",
+                "action": "would cancel",
             })
-            continue
-        old_doc = frappe.get_doc("Payment Entry", wrong["name"])
-        old_doc.flags.ignore_permissions = True
-        old_doc.cancel()
-        new_pe = _make_pe_for_pi(
-            pi.name, mop, target_account,
-            amount=wrong["allocated_amount"],
-            posting_date=wrong["posting_date"],
-            reference_no=f"BNS-RECLASS-{wrong['name']}",
-        )
-        new_pe.submit()
-        reclassified.append({
-            "old_pe": wrong["name"],
-            "new_pe": new_pe.name,
-            "amount": wrong["allocated_amount"],
-            "from_account": wrong["cash_bank_account"],
-            "to_account": target_account,
-            "action": "cancelled + recreated",
-        })
+            cancelled_total += flt(wrong["allocated_amount"])
+    elif wrong_pes:
+        for wrong in wrong_pes:
+            old_doc = frappe.get_doc("Payment Entry", wrong["name"])
+            old_doc.flags.ignore_permissions = True
+            old_doc.cancel()
+            cancelled.append({
+                "old_pe": wrong["name"],
+                "amount": wrong["allocated_amount"],
+                "from_account": wrong["cash_bank_account"],
+                "to_account": target_account,
+                "action": "cancelled",
+            })
 
-    # Phase 3: pay any residual outstanding on the correct account
+    # Compute residual after (real or hypothetical) cancellations.
     if dry_run:
-        residual = flt(pi.outstanding_amount)
-        # In dry-run we can't recompute outstanding after hypothetical
-        # cancellations, so we report it as-is. Live-run re-fetches.
+        # Approximate: cancelling a Pay PE adds its allocation back to
+        # PI outstanding. Live-run reads the actual post-cancel value.
+        residual = flt(pi.outstanding_amount) + cancelled_total
     else:
-        pi_fresh = frappe.db.get_value(
-            "Purchase Invoice", pi.name,
-            ["outstanding_amount", "posting_date"], as_dict=True,
-        )
-        residual = flt(pi_fresh.outstanding_amount)
+        residual = flt(frappe.db.get_value(
+            "Purchase Invoice", pi.name, "outstanding_amount"))
 
-    if residual == 0:
+    # Tolerate sub-paisa rounding noise.
+    if abs(residual) < 0.01:
         return {
             "pi": pi.name, "status": "ok",
-            "reclassified": reclassified, "residual": 0,
+            "cancelled": cancelled, "residual": 0,
         }
 
     if dry_run:
         return {
-            "pi": pi.name, "status": "would-pay-residual",
+            "pi": pi.name, "status": "would-pay",
             "amount": residual, "to_account": target_account,
-            "reclassified": reclassified,
+            "cancelled": cancelled,
         }
 
-    new_pe = _make_pe_for_pi(
+    posting_date = frappe.db.get_value(
+        "Purchase Invoice", pi.name, "posting_date")
+    new_pe = _make_pe_paying_outstanding(
         pi.name, mop, target_account,
-        amount=residual,
-        posting_date=pi_fresh.posting_date,
+        posting_date=posting_date,
         reference_no=f"BNS-AUTOPAY-{pi.name}",
     )
     new_pe.submit()
     return {
         "pi": pi.name, "status": "paid",
         "new_pe": new_pe.name, "amount": residual,
-        "reclassified": reclassified,
+        "cancelled": cancelled,
     }
 
 
