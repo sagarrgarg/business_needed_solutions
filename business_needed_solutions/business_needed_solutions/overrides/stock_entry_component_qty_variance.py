@@ -74,6 +74,15 @@ class BNSStockEntry(StockEntry):
         same item_code appearing in multiple rows (e.g. different batches
         via Serial and Batch Bundle) is correctly deduplicated.  BOM
         quantities are per-item_code regardless of batch.
+
+        FG-only carve-out: a Manufacture entry with zero raw component
+        rows is allowed only when it belongs to a Work Order AND that
+        Work Order already has a submitted ``Material Consumption for
+        Manufacture`` entry — i.e. raw was consumed in a paired
+        consumption entry (WarehouseSuite continuous-manufacturing).
+        Without the paired consumption entry the BOM-completeness check
+        still fires below, so a stray empty Manufacture entry cannot
+        slip through.
         """
         expected_item_codes = self._get_expected_bom_item_codes()
         if not expected_item_codes:
@@ -84,6 +93,9 @@ class BNSStockEntry(StockEntry):
             for row in self.items
             if row.s_warehouse and not row.is_finished_item and not row.is_scrap_item
         ]
+
+        if not component_rows and self._has_paired_consumption_entry():
+            return
 
         present_item_codes = set()
         for row in component_rows:
@@ -126,6 +138,31 @@ class BNSStockEntry(StockEntry):
         fg_qty = self.fg_completed_qty or 1
         raw_materials = self.get_bom_raw_materials(fg_qty)
         return set(raw_materials.keys())
+
+    def _has_paired_consumption_entry(self):
+        """
+        True iff this entry is linked to a Work Order AND at least one
+        submitted ``Material Consumption for Manufacture`` Stock Entry
+        already exists against that same Work Order.
+
+        Excludes ``self.name`` so re-validation of an in-flight document
+        doesn't match itself (defensive — this method is called from a
+        Manufacture-purpose entry, not an MCM, so collision is unlikely
+        but cheap to guard).
+        """
+        if not self.work_order:
+            return False
+        return bool(
+            frappe.db.exists(
+                "Stock Entry",
+                {
+                    "work_order": self.work_order,
+                    "purpose": "Material Consumption for Manufacture",
+                    "docstatus": 1,
+                    "name": ("!=", self.name or ""),
+                },
+            )
+        )
     
     def validate_component_and_quantities(self):
         """
