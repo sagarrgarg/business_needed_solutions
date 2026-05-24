@@ -9,7 +9,9 @@
   "stock_in_transit_account",
   "column_break_accounts",
   "internal_sales_transfer_account",
+  "internal_sales_non_gst_account",
   "internal_purchase_transfer_account",
+  "internal_purchase_non_gst_account",
   "internal_transfer_account",
   "internal_branch_debtor_account",
   "internal_branch_creditor_account",
@@ -43,17 +45,31 @@
    "fieldtype": "Column Break"
   },
   {
-   "description": "DN uses this account for same-GSTIN internal transfer GL rewrite (sales side).",
+   "description": "SI uses this account for inter-state internal sales GL rewrite (GST-bearing, appears on GSTR-1).",
    "fieldname": "internal_sales_transfer_account",
    "fieldtype": "Link",
-   "label": "Internal Sales Transfer Account",
+   "label": "Internal Sales Transfer Account (GST / Inter-State)",
    "options": "Account"
   },
   {
-   "description": "PR uses this account for same-GSTIN internal transfer GL rewrite (purchase side).",
+   "description": "DN uses this account for same-GSTIN internal sales GL rewrite (non-GST, does not appear on GSTR-1). Leave blank to fall back to the GST/Inter-State account above.",
+   "fieldname": "internal_sales_non_gst_account",
+   "fieldtype": "Link",
+   "label": "Internal Sales Transfer Account (Non-GST / Same-GSTIN)",
+   "options": "Account"
+  },
+  {
+   "description": "PI uses this account for inter-state internal purchase GL rewrite (GST-bearing, appears on GSTR-2).",
    "fieldname": "internal_purchase_transfer_account",
    "fieldtype": "Link",
-   "label": "Internal Purchase Transfer Account",
+   "label": "Internal Purchase Transfer Account (GST / Inter-State)",
+   "options": "Account"
+  },
+  {
+   "description": "PR uses this account for same-GSTIN internal purchase GL rewrite (non-GST, does not appear on GSTR-2). Leave blank to fall back to the GST/Inter-State account above.",
+   "fieldname": "internal_purchase_non_gst_account",
+   "fieldtype": "Link",
+   "label": "Internal Purchase Transfer Account (Non-GST / Same-GSTIN)",
    "options": "Account"
   },
   {
@@ -151,7 +167,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-04-03 12:00:00.000000",
+ "modified": "2026-05-24 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "BNS Branch Accounting",
  "name": "BNS Branch Accounting Settings",

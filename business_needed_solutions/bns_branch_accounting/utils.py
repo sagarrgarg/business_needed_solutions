@@ -376,21 +376,37 @@ def _get_bns_branch_accounting_accounts() -> Dict[str, Any]:
     legacy_internal_transfer_account = (
         frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_transfer_account") or ""
     ).strip()
+    sales_transfer_account = (
+        frappe.db.get_single_value(
+            "BNS Branch Accounting Settings", "internal_sales_transfer_account"
+        )
+        or legacy_internal_transfer_account
+    )
+    purchase_transfer_account = (
+        frappe.db.get_single_value(
+            "BNS Branch Accounting Settings", "internal_purchase_transfer_account"
+        )
+        or legacy_internal_transfer_account
+    )
     settings = {
         "stock_in_transit_account": frappe.db.get_single_value(
             "BNS Branch Accounting Settings", "stock_in_transit_account"
         ),
-        "internal_sales_transfer_account": (
+        "internal_sales_transfer_account": sales_transfer_account,
+        "internal_purchase_transfer_account": purchase_transfer_account,
+        # Non-GST (DN/PR same-GSTIN) accounts fall back to the GST/Inter-State
+        # account so installs that haven't split the ledger keep working.
+        "internal_sales_non_gst_account": (
             frappe.db.get_single_value(
-                "BNS Branch Accounting Settings", "internal_sales_transfer_account"
+                "BNS Branch Accounting Settings", "internal_sales_non_gst_account"
             )
-            or legacy_internal_transfer_account
+            or sales_transfer_account
         ),
-        "internal_purchase_transfer_account": (
+        "internal_purchase_non_gst_account": (
             frappe.db.get_single_value(
-                "BNS Branch Accounting Settings", "internal_purchase_transfer_account"
+                "BNS Branch Accounting Settings", "internal_purchase_non_gst_account"
             )
-            or legacy_internal_transfer_account
+            or purchase_transfer_account
         ),
         # Keep legacy field readable during transition only.
         "internal_transfer_account": legacy_internal_transfer_account,
@@ -465,19 +481,26 @@ def validate_bns_internal_accounting_settings_for_dn_pr(
         or _diff_gstin_dn_pr_active_for_dn(doc)
     )
     if dn_routes_same_gstin:
-        required_fields["internal_sales_transfer_account"] = _("Internal Sales Transfer Account")
+        required_fields["internal_sales_non_gst_account"] = _("Internal Sales Transfer Account (Non-GST)")
     elif doc.doctype == "Purchase Receipt":
-        required_fields["internal_purchase_transfer_account"] = _("Internal Purchase Transfer Account")
+        required_fields["internal_purchase_non_gst_account"] = _("Internal Purchase Transfer Account (Non-GST)")
 
     configured = {
         fieldname: (frappe.db.get_single_value("BNS Branch Accounting Settings", fieldname) or "").strip()
         for fieldname in required_fields
     }
-    # Transition fallback: if new split fields are empty, allow legacy field value.
-    if "internal_sales_transfer_account" in configured and not configured["internal_sales_transfer_account"]:
-        configured["internal_sales_transfer_account"] = legacy_internal_transfer_account
-    if "internal_purchase_transfer_account" in configured and not configured["internal_purchase_transfer_account"]:
-        configured["internal_purchase_transfer_account"] = legacy_internal_transfer_account
+    # Transition fallback chain for DN/PR same-GSTIN accounts:
+    # non_gst field -> GST/Inter-State field -> legacy combined field.
+    if "internal_sales_non_gst_account" in configured and not configured["internal_sales_non_gst_account"]:
+        configured["internal_sales_non_gst_account"] = (
+            (frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_sales_transfer_account") or "").strip()
+            or legacy_internal_transfer_account
+        )
+    if "internal_purchase_non_gst_account" in configured and not configured["internal_purchase_non_gst_account"]:
+        configured["internal_purchase_non_gst_account"] = (
+            (frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_purchase_transfer_account") or "").strip()
+            or legacy_internal_transfer_account
+        )
     missing = [required_fields[f] for f, value in configured.items() if not value]
 
     invalid_messages = []
@@ -2222,8 +2245,8 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         return gl_entries
 
     if _is_same_gstin_internal_delivery_note(doc):
-        if not settings.get("internal_sales_transfer_account"):
-            logger.warning("Skipping DN GL rewrite for %s due to missing internal_sales_transfer_account", doc.name)
+        if not settings.get("internal_sales_non_gst_account"):
+            logger.warning("Skipping DN GL rewrite for %s due to missing internal_sales_non_gst_account", doc.name)
             return gl_entries
 
         transfer_amount, transfer_reason = _resolve_dn_transfer_amount(doc, force_mode=force_mode)
@@ -2236,9 +2259,9 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             return gl_entries
 
         rewritten = [
-            _make_bns_gl_entry(doc, settings["internal_branch_debtor_account"], debit=transfer_amount, against=settings["internal_sales_transfer_account"], template=template),
+            _make_bns_gl_entry(doc, settings["internal_branch_debtor_account"], debit=transfer_amount, against=settings["internal_sales_non_gst_account"], template=template),
             _make_bns_gl_entry(doc, settings["stock_in_transit_account"], debit=valuation_amount, against=stock_account, template=template),
-            _make_bns_gl_entry(doc, settings["internal_sales_transfer_account"], credit=transfer_amount, against=settings["internal_branch_debtor_account"], template=template),
+            _make_bns_gl_entry(doc, settings["internal_sales_non_gst_account"], credit=transfer_amount, against=settings["internal_branch_debtor_account"], template=template),
             _make_bns_gl_entry(doc, stock_account, credit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
         ]
     else:
@@ -2275,8 +2298,8 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     if not settings.get("stock_in_transit_account"):
         logger.warning("Skipping PR GL rewrite for %s due to missing stock_in_transit_account", doc.name)
         return gl_entries
-    if is_dn_same_gstin_scope and not settings.get("internal_purchase_transfer_account"):
-        logger.warning("Skipping PR GL rewrite for %s due to missing internal_purchase_transfer_account", doc.name)
+    if is_dn_same_gstin_scope and not settings.get("internal_purchase_non_gst_account"):
+        logger.warning("Skipping PR GL rewrite for %s due to missing internal_purchase_non_gst_account", doc.name)
         return gl_entries
 
     force_mode = bool(settings.get("force_bns_internal_gl_rewrite"))
@@ -2309,9 +2332,9 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             )
             return gl_entries
         rewritten = [
-            _make_bns_gl_entry(doc, settings["internal_purchase_transfer_account"], debit=transfer_amount, against=settings["internal_branch_creditor_account"], template=template),
+            _make_bns_gl_entry(doc, settings["internal_purchase_non_gst_account"], debit=transfer_amount, against=settings["internal_branch_creditor_account"], template=template),
             _make_bns_gl_entry(doc, stock_account, debit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
-            _make_bns_gl_entry(doc, settings["internal_branch_creditor_account"], credit=transfer_amount, against=settings["internal_purchase_transfer_account"], template=template),
+            _make_bns_gl_entry(doc, settings["internal_branch_creditor_account"], credit=transfer_amount, against=settings["internal_purchase_non_gst_account"], template=template),
             _make_bns_gl_entry(doc, settings["stock_in_transit_account"], credit=valuation_amount, against=stock_account, template=template),
         ]
     else:

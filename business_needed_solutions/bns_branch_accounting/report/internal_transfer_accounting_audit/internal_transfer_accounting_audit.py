@@ -93,17 +93,30 @@ def _get_bns_accounts():
 		frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_transfer_account") or ""
 	).strip()
 
+	sales_transfer = (
+		frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_sales_transfer_account")
+		or legacy
+	).strip()
+	purchase_transfer = (
+		frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_purchase_transfer_account")
+		or legacy
+	).strip()
+
 	settings = {
 		"stock_in_transit": (
 			frappe.db.get_single_value("BNS Branch Accounting Settings", "stock_in_transit_account") or ""
 		).strip(),
-		"internal_sales_transfer": (
-			frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_sales_transfer_account")
-			or legacy
+		"internal_sales_transfer": sales_transfer,
+		"internal_purchase_transfer": purchase_transfer,
+		# Non-GST (DN/PR same-GSTIN) accounts fall back to the GST/Inter-State
+		# account when the split field is blank.
+		"internal_sales_non_gst": (
+			frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_sales_non_gst_account")
+			or sales_transfer
 		).strip(),
-		"internal_purchase_transfer": (
-			frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_purchase_transfer_account")
-			or legacy
+		"internal_purchase_non_gst": (
+			frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_purchase_non_gst_account")
+			or purchase_transfer
 		).strip(),
 		"internal_branch_debtor": (
 			frappe.db.get_single_value("BNS Branch Accounting Settings", "internal_branch_debtor_account") or ""
@@ -271,7 +284,7 @@ def _expected_gl_for_dn(scope, settings, doc):
 		return {
 			(settings["internal_branch_debtor"], "debit"),
 			(settings["stock_in_transit"], "debit"),
-			(settings["internal_sales_transfer"], "credit"),
+			(settings["internal_sales_non_gst"], "credit"),
 			(stock_account, "credit") if stock_account else ("Stock In Hand", "credit"),
 		}
 	else:
@@ -311,7 +324,7 @@ def _expected_gl_for_pr(scope, settings, doc):
 
 	if scope == "dn_same_gstin":
 		return {
-			(settings["internal_purchase_transfer"], "debit"),
+			(settings["internal_purchase_non_gst"], "debit"),
 			(stock_account, "debit") if stock_account else ("Stock In Hand", "debit"),
 			(settings["internal_branch_creditor"], "credit"),
 			(settings["stock_in_transit"], "credit"),
@@ -954,6 +967,8 @@ def _audit_cross_document_consistency(filters, settings):
 		settings.get("internal_branch_creditor"),
 		settings.get("internal_sales_transfer"),
 		settings.get("internal_purchase_transfer"),
+		settings.get("internal_sales_non_gst"),
+		settings.get("internal_purchase_non_gst"),
 		settings.get("stock_in_transit"),
 	}
 	internal_accounts.discard(None)

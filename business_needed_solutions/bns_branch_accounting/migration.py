@@ -34,6 +34,7 @@ def after_migrate() -> None:
         disable_pi_update_stock_mandatory_script()
         initialize_bns_repost_tracking_state()
         migrate_split_internal_transfer_accounts()
+        migrate_non_gst_internal_transfer_accounts()
 
         logger.info("BNS Branch Accounting post-migration setup completed successfully")
 
@@ -67,6 +68,52 @@ def initialize_bns_repost_tracking_state() -> None:
             )
     except Exception as e:
         logger.warning("Could not initialize BNS Repost Tracking state: %s", str(e))
+
+
+def migrate_non_gst_internal_transfer_accounts() -> None:
+    """Backfill non-GST DN/PR transfer accounts from the GST/Inter-State field.
+
+    DN-driven (same-GSTIN) internal sales and PR-driven (same-GSTIN) internal
+    purchases now post to dedicated accounts so Trial Balance / GSTR
+    reconciliation can separate them from inter-state SI/PI postings. Sites
+    that haven't picked separate ledgers fall back to the GST/Inter-State
+    account so behavior matches today until the new fields are populated.
+    """
+    try:
+        settings_doctype = "BNS Branch Accounting Settings"
+        sales_gst_value = (
+            frappe.db.get_single_value(settings_doctype, "internal_sales_transfer_account") or ""
+        ).strip()
+        purchase_gst_value = (
+            frappe.db.get_single_value(settings_doctype, "internal_purchase_transfer_account") or ""
+        ).strip()
+
+        sales_non_gst_value = (
+            frappe.db.get_single_value(settings_doctype, "internal_sales_non_gst_account") or ""
+        ).strip()
+        purchase_non_gst_value = (
+            frappe.db.get_single_value(settings_doctype, "internal_purchase_non_gst_account") or ""
+        ).strip()
+
+        updates = {}
+        if not sales_non_gst_value and sales_gst_value:
+            updates["internal_sales_non_gst_account"] = sales_gst_value
+        if not purchase_non_gst_value and purchase_gst_value:
+            updates["internal_purchase_non_gst_account"] = purchase_gst_value
+
+        if not updates:
+            return
+
+        for fieldname, value in updates.items():
+            frappe.db.set_single_value(settings_doctype, fieldname, value)
+        frappe.db.commit()
+        logger.info(
+            "Backfilled non-GST internal transfer account settings from GST/Inter-State fields: %s",
+            ", ".join(sorted(updates.keys())),
+        )
+    except Exception as e:
+        logger.warning("Could not backfill non-GST internal transfer accounts: %s", str(e))
+        frappe.db.rollback()
 
 
 def migrate_split_internal_transfer_accounts() -> None:
