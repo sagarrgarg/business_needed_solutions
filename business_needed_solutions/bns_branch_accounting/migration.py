@@ -35,6 +35,7 @@ def after_migrate() -> None:
         initialize_bns_repost_tracking_state()
         migrate_split_internal_transfer_accounts()
         migrate_non_gst_internal_transfer_accounts()
+        backfill_diff_gstin_opt_in_for_legacy_internal_dns()
 
         logger.info("BNS Branch Accounting post-migration setup completed successfully")
 
@@ -68,6 +69,74 @@ def initialize_bns_repost_tracking_state() -> None:
             )
     except Exception as e:
         logger.warning("Could not initialize BNS Repost Tracking state: %s", str(e))
+
+
+def backfill_diff_gstin_opt_in_for_legacy_internal_dns() -> None:
+    """Backfill per-doc diff-GSTIN opt-in flag for legacy internal DNs.
+
+    Diff-GSTIN DNs in 'BNS Internally Transferred' status that don't
+    carry ``bns_allow_diff_gstin_dn_pr=1`` were converted under an
+    earlier code path that only required the org-level setting.
+    Today's gate at `_is_same_gstin_internal_delivery_note` (utils.py)
+    requires the per-doc flag, so without it the DN/PR GL rewrite
+    skips the sales/purchase side entirely (only stock-in-transit is
+    touched) — and the new internal_sales_non_gst_account /
+    internal_purchase_non_gst_account never get hit on repost.
+
+    Stamping the flag (with Administrator as the enabler) brings these
+    legacy DNs back into the same-GSTIN GL rewrite path. After this
+    runs, a 'Verify & Repost Internal Transfers' will route their GL
+    through the non-GST accounts.
+
+    Idempotent — re-runs find zero rows because of the
+    ``bns_allow_diff_gstin_dn_pr = 0`` filter.
+    """
+    try:
+        if not frappe.db.table_exists("Delivery Note"):
+            return
+
+        rows = frappe.db.sql(
+            """
+            SELECT name FROM `tabDelivery Note`
+            WHERE status = 'BNS Internally Transferred'
+              AND docstatus = 1
+              AND IFNULL(is_bns_internal_customer, 0) = 1
+              AND IFNULL(billing_address_gstin, '') != ''
+              AND IFNULL(company_gstin, '') != ''
+              AND billing_address_gstin != company_gstin
+              AND IFNULL(bns_allow_diff_gstin_dn_pr, 0) = 0
+            """,
+            as_dict=False,
+        ) or []
+
+        if not rows:
+            return
+
+        names = [r[0] for r in rows]
+        chunk_size = 500
+        for start in range(0, len(names), chunk_size):
+            chunk = names[start:start + chunk_size]
+            placeholders = ", ".join(["%s"] * len(chunk))
+            frappe.db.sql(
+                f"""
+                UPDATE `tabDelivery Note`
+                SET bns_allow_diff_gstin_dn_pr = 1,
+                    bns_diff_gstin_enabled_by = 'Administrator',
+                    bns_diff_gstin_enabled_on = NOW()
+                WHERE name IN ({placeholders})
+                """,
+                chunk,
+            )
+        frappe.db.commit()
+        sample = ", ".join(names[:5]) + (f" (+{len(names) - 5} more)" if len(names) > 5 else "")
+        logger.info(
+            "Backfilled bns_allow_diff_gstin_dn_pr=1 on %d legacy diff-GSTIN DNs: %s",
+            len(names),
+            sample,
+        )
+    except Exception as e:
+        logger.warning("Could not backfill diff-GSTIN opt-in for legacy DNs: %s", str(e))
+        frappe.db.rollback()
 
 
 def migrate_non_gst_internal_transfer_accounts() -> None:
