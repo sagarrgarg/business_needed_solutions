@@ -120,14 +120,13 @@ def backfill_auto_paid_supplier(
     the auto-paid policy.
 
     For each submitted PI in scope:
-      1. Cancel every linked Payment Entry that paid against the wrong
-         cash/bank account (only if the PE references this PI alone;
-         multi-PI PEs are reported and skipped — cancelling them would
-         un-pay other invoices).
-      2. Pay the resulting outstanding (original residual + amount freed
-         by cancellations) as ONE new Payment Entry on the correct account.
-
-    Returns a structured report; no direct GL Entry mutation.
+      1. Cancel every linked Payment Entry referencing this PI alone
+         (multi-PI PEs are reported as needs-manual — cancelling them
+         would un-pay other invoices).
+      2. Flip the PI's is_paid block (mode_of_payment, cash_bank_account,
+         paid_amount) to match the supplier master, then repost the PI's
+         GL so it posts directly to the control account. No new Payment
+         Entry is created.
 
     Sync vs enqueue: dry runs always return inline. Live runs with more
     than ``_BACKFILL_ENQUEUE_THRESHOLD`` PIs are enqueued to the long
@@ -331,47 +330,46 @@ def _linked_payment_entries(pi_name):
     return rows
 
 
-def _make_pe_paying_outstanding(pi_name, mop, account, posting_date, reference_no):
-    """Build (and save, not submit) a Payment Entry that pays the PI's
-    current full outstanding through the target MOP account.
+def _repost_pi_gl(pi_name):
+    """Reverse and re-make GL / payment ledger for a submitted PI.
 
-    Trusts ERPNext's ``get_payment_entry`` to size paid_amount /
-    received_amount / references / exchange rates correctly. We only
-    override the routing fields (MOP + cash/bank account) and the
-    reference metadata. No reference trimming, no allocated_amount
-    override — which is what caused the "Allocated Amount cannot be
-    greater than outstanding amount" validator error in the previous
-    per-PE recreate path.
+    Same shape as ``Repost Accounting Ledger.start_repost`` with
+    ``delete_cancelled_entries=True``: drop existing ledgers, then call
+    ``make_gl_entries`` on a freshly fetched doc so the new ``is_paid``
+    block is reflected.
     """
-    from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+    frappe.flags.through_repost_accounting_ledger = True
+    for table in ("GL Entry", "Payment Ledger Entry", "Advance Payment Ledger Entry"):
+        if frappe.db.exists("DocType", table):
+            frappe.db.delete(table, {
+                "voucher_type": "Purchase Invoice",
+                "voucher_no": pi_name,
+            })
 
-    pe = get_payment_entry("Purchase Invoice", pi_name)
-    pe.mode_of_payment = mop
-    # Pay vs Receive: paid_from is cash/bank for Pay, paid_to for Receive.
-    if pe.payment_type == "Receive":
-        pe.paid_to = account
-    else:
-        pe.paid_from = account
-    pe.reference_no = reference_no
-    pe.reference_date = posting_date
-    pe.posting_date = posting_date
-    pe.flags.ignore_permissions = True
-    pe.save()
-    return pe
+    doc = frappe.get_doc("Purchase Invoice", pi_name)
+    doc.flags.ignore_permissions = True
+    doc.force_set_against_expense_account()
+    doc.make_gl_entries()
 
 
 def _process_pi_for_backfill(pi, dry_run):
-    """Per-PI flow.
+    """Per-PI flow (update-in-place model).
 
-    1. Resolve supplier's MOP account; skip if misconfigured.
-    2. Inspect linked PEs. Any PE that paid through a different cash/bank
-       account is a wrong-account PE. Multi-PI PEs are reported as
-       needs-manual (cancelling would un-pay other invoices).
-    3. Cancel every wrong-account PE.
-    4. Pay the resulting full outstanding as ONE new PE.
+    Goal: make the PI itself carry the auto-paid block (``is_paid``,
+    ``mode_of_payment``, ``cash_bank_account``, ``paid_amount``) and let
+    the PI's own GL post against the supplier's control account. No
+    separate Payment Entry should exist for paying the PI.
+
+    Steps:
+      1. Resolve the supplier's MOP + company account. Skip on misconfig.
+      2. Inspect linked PEs.
+         - Multi-PI PE → needs-manual (cancelling would un-pay other PIs).
+         - Single-PI PE → will be cancelled.
+      3. If the PI already carries the correct is_paid block AND no PEs
+         need cancelling, mark ``ok``.
+      4. Live mode: cancel single-PI PEs → flip PI fields via
+         ``db.set_value`` → repost the PI's GL.
     """
-    from frappe.utils import flt
-
     supplier = frappe.get_cached_doc("Supplier", pi.supplier)
     mop = supplier.get("bns_auto_paid_mode_of_payment")
     target_account = _resolve_mop_account(mop, pi.company)
@@ -381,81 +379,97 @@ def _process_pi_for_backfill(pi, dry_run):
             "reason": "supplier missing MOP or company-account mapping",
         }
 
+    pi_state = frappe.db.get_value(
+        "Purchase Invoice", pi.name,
+        [
+            "is_paid", "mode_of_payment", "cash_bank_account",
+            "paid_amount", "rounded_total", "grand_total",
+            "base_rounded_total", "base_grand_total",
+        ],
+        as_dict=True,
+    )
+    target_paid = pi_state.rounded_total or pi_state.grand_total
+    target_base_paid = pi_state.base_rounded_total or pi_state.base_grand_total
+    already_correct = (
+        pi_state.is_paid == 1
+        and pi_state.mode_of_payment == mop
+        and pi_state.cash_bank_account == target_account
+        and abs((pi_state.paid_amount or 0) - target_paid) < 0.01
+    )
+
     linked = _linked_payment_entries(pi.name)
-    wrong_pes, multi_pi_pes = [], []
-    for pe in linked:
-        if len(pe["referenced_pis"]) > 1:
-            multi_pi_pes.append(pe)
-        elif pe["cash_bank_account"] != target_account:
-            wrong_pes.append(pe)
+    multi_pi_pes = [p for p in linked if len(p["referenced_pis"]) > 1]
+    single_pi_pes = [p for p in linked if len(p["referenced_pis"]) == 1]
 
     if multi_pi_pes:
-        # Cancelling a multi-PI PE would un-pay other invoices; never auto.
         return {
             "pi": pi.name, "status": "needs-manual",
             "reason": "linked Payment Entry references multiple PIs",
             "pes": [p["name"] for p in multi_pi_pes],
         }
 
+    if already_correct and not single_pi_pes:
+        return {"pi": pi.name, "status": "ok"}
+
     cancelled = []
-    cancelled_total = 0.0
-    if wrong_pes and dry_run:
-        for wrong in wrong_pes:
+    if dry_run:
+        for p in single_pi_pes:
             cancelled.append({
-                "old_pe": wrong["name"],
-                "amount": wrong["allocated_amount"],
-                "from_account": wrong["cash_bank_account"],
-                "to_account": target_account,
+                "old_pe": p["name"],
+                "amount": p["allocated_amount"],
+                "from_account": p["cash_bank_account"],
                 "action": "would cancel",
             })
-            cancelled_total += flt(wrong["allocated_amount"])
-    elif wrong_pes:
-        for wrong in wrong_pes:
-            old_doc = frappe.get_doc("Payment Entry", wrong["name"])
-            old_doc.flags.ignore_permissions = True
-            old_doc.cancel()
-            cancelled.append({
-                "old_pe": wrong["name"],
-                "amount": wrong["allocated_amount"],
-                "from_account": wrong["cash_bank_account"],
-                "to_account": target_account,
-                "action": "cancelled",
-            })
-
-    # Compute residual after (real or hypothetical) cancellations.
-    if dry_run:
-        # Approximate: cancelling a Pay PE adds its allocation back to
-        # PI outstanding. Live-run reads the actual post-cancel value.
-        residual = flt(pi.outstanding_amount) + cancelled_total
-    else:
-        residual = flt(frappe.db.get_value(
-            "Purchase Invoice", pi.name, "outstanding_amount"))
-
-    # Tolerate sub-paisa rounding noise.
-    if abs(residual) < 0.01:
         return {
-            "pi": pi.name, "status": "ok",
-            "cancelled": cancelled, "residual": 0,
-        }
-
-    if dry_run:
-        return {
-            "pi": pi.name, "status": "would-pay",
-            "amount": residual, "to_account": target_account,
+            "pi": pi.name, "status": "would-update",
+            "to_account": target_account,
+            "paid_amount": target_paid,
             "cancelled": cancelled,
+            "current": {
+                "is_paid": pi_state.is_paid,
+                "mode_of_payment": pi_state.mode_of_payment,
+                "cash_bank_account": pi_state.cash_bank_account,
+                "paid_amount": pi_state.paid_amount,
+            },
         }
 
-    posting_date = frappe.db.get_value(
-        "Purchase Invoice", pi.name, "posting_date")
-    new_pe = _make_pe_paying_outstanding(
-        pi.name, mop, target_account,
-        posting_date=posting_date,
-        reference_no=f"BNS-AUTOPAY-{pi.name}",
+    # Live: cancel single-PI PEs first.
+    for p in single_pi_pes:
+        old_doc = frappe.get_doc("Payment Entry", p["name"])
+        old_doc.flags.ignore_permissions = True
+        old_doc.cancel()
+        cancelled.append({
+            "old_pe": p["name"],
+            "amount": p["allocated_amount"],
+            "from_account": p["cash_bank_account"],
+            "action": "cancelled",
+        })
+
+    # Flip the PI's is_paid block in place. db.set_value (not doc.save)
+    # so we don't trigger the doctype's full validate cycle on a
+    # submitted document — the values are deliberately curated here.
+    frappe.db.set_value(
+        "Purchase Invoice", pi.name,
+        {
+            "is_paid": 1,
+            "mode_of_payment": mop,
+            "cash_bank_account": target_account,
+            "paid_amount": target_paid,
+            "base_paid_amount": target_base_paid,
+            "outstanding_amount": 0,
+            "status": "Paid" if target_paid >= 0 else "Return",
+        },
+        update_modified=False,
     )
-    new_pe.submit()
+
+    # Repost the PI's GL so the new is_paid block actually shows up
+    # in the ledger.
+    _repost_pi_gl(pi.name)
+
     return {
-        "pi": pi.name, "status": "paid",
-        "new_pe": new_pe.name, "amount": residual,
+        "pi": pi.name, "status": "updated",
+        "to_account": target_account,
+        "paid_amount": target_paid,
         "cancelled": cancelled,
     }
 
