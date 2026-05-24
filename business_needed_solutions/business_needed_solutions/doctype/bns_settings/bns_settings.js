@@ -1,3 +1,23 @@
+function _show_backfill_result(result) {
+    const status_lines = Object.entries(result.by_status || {})
+        .map(([k, v]) => `<li><b>${frappe.utils.escape_html(k)}</b>: ${v}</li>`)
+        .join('');
+    const summary_header = result.dry_run
+        ? __('<b>Dry run</b> — no Payment Entries were created or cancelled.')
+        : __('<b>Live run</b> — changes were applied.');
+    const rows_json = frappe.utils.escape_html(JSON.stringify(result.rows || [], null, 2));
+    const html = `
+        <p>${summary_header}</p>
+        <p>${__('Total Purchase Invoices in scope')}: <b>${result.total || 0}</b></p>
+        <ul>${status_lines || '<li>(none)</li>'}</ul>
+        <details>
+            <summary>${__('Detailed report')} (${(result.rows || []).length})</summary>
+            <pre style="max-height: 400px; overflow: auto; font-size: 11px;">${rows_json}</pre>
+        </details>
+    `;
+    frappe.msgprint({ title: __('Backfill Result'), message: html, wide: true });
+}
+
 frappe.ui.form.on('BNS Settings', {
     refresh: function(frm) {
         // Apply List View Settings button
@@ -28,6 +48,58 @@ frappe.ui.form.on('BNS Settings', {
                 company: frappe.defaults.get_user_default('Company') || undefined,
             };
             frappe.set_route(route);
+        }, __('Actions'));
+
+        // Backfill auto-paid supplier PIs (cancel + recreate wrong-account PEs,
+        // pay residuals against the supplier's configured MOP account)
+        frm.add_custom_button(__('Backfill Auto-Paid Supplier PIs'), function() {
+            const d = new frappe.ui.Dialog({
+                title: __('Backfill Auto-Paid Supplier PIs'),
+                fields: [
+                    {
+                        label: __('Supplier (optional)'),
+                        fieldname: 'supplier',
+                        fieldtype: 'Link',
+                        options: 'Supplier',
+                        get_query: function() {
+                            return { filters: { bns_auto_paid_supplier: 1 } };
+                        },
+                        description: __('Leave blank to process every auto-paid supplier.'),
+                    },
+                    {
+                        label: __('From Posting Date'),
+                        fieldname: 'from_date',
+                        fieldtype: 'Date',
+                    },
+                    {
+                        label: __('To Posting Date'),
+                        fieldname: 'to_date',
+                        fieldtype: 'Date',
+                    },
+                    {
+                        label: __('Dry Run (recommended first)'),
+                        fieldname: 'dry_run',
+                        fieldtype: 'Check',
+                        default: 1,
+                        description: __('When checked: plan without writing. Uncheck to actually cancel + recreate Payment Entries and pay residuals.'),
+                    },
+                ],
+                primary_action_label: __('Run'),
+                primary_action: function(values) {
+                    frappe.call({
+                        method: 'business_needed_solutions.business_needed_solutions.overrides.auto_paid_supplier.backfill_auto_paid_supplier',
+                        args: values,
+                        freeze: true,
+                        freeze_message: __('Running backfill…'),
+                        callback: function(r) {
+                            if (!r.message) return;
+                            d.hide();
+                            _show_backfill_result(r.message);
+                        },
+                    });
+                },
+            });
+            d.show();
         }, __('Actions'));
 
         // Backdate: Clear existing address preferred flags

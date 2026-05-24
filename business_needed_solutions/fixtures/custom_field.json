@@ -3086,5 +3086,31 @@
   "module": "Business Needed Solutions",
   "name": "Supplier-bns_skip_supplier_invoice_details",
   "description": "When checked, Purchase Invoice/Receipt submissions for this supplier do not require Supplier Invoice No or Date."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Supplier",
+  "fieldname": "bns_auto_paid_supplier",
+  "fieldtype": "Check",
+  "label": "Auto-Paid Supplier (Cash / Imprest)",
+  "default": "0",
+  "insert_after": "bns_skip_supplier_invoice_details",
+  "module": "Business Needed Solutions",
+  "name": "Supplier-bns_auto_paid_supplier",
+  "description": "When checked, every Purchase Invoice for this supplier is submitted as fully paid using the Mode of Payment below — no separate Payment Entry required. Suitable for cash / imprest / walk-in vendors."
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Supplier",
+  "fieldname": "bns_auto_paid_mode_of_payment",
+  "fieldtype": "Link",
+  "options": "Mode of Payment",
+  "label": "Auto-Paid Mode of Payment",
+  "insert_after": "bns_auto_paid_supplier",
+  "depends_on": "eval:doc.bns_auto_paid_supplier",
+  "mandatory_depends_on": "eval:doc.bns_auto_paid_supplier",
+  "module": "Business Needed Solutions",
+  "name": "Supplier-bns_auto_paid_mode_of_payment",
+  "description": "Mode of Payment used to auto-pay this supplier's Purchase Invoices. The cash/bank account is resolved from this Mode of Payment's company-wise Accounts table."
  }
 ]
