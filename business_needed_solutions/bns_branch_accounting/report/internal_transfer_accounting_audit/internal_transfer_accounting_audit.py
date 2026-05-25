@@ -155,6 +155,11 @@ def _classify_dn(doc):
 	billing_gstin = (doc.get("billing_address_gstin") or "").strip()
 	if company_gstin and billing_gstin and company_gstin == billing_gstin:
 		return "same_gstin"
+	# Diff-GSTIN DN with the per-doc opt-in flag routes through the same-GSTIN
+	# GL rewrite path (utils.py:_is_same_gstin_internal_delivery_note), so the
+	# audit must expect the same-GSTIN GL pattern for these documents.
+	if cint(doc.get("bns_allow_diff_gstin_dn_pr")):
+		return "same_gstin"
 	return "different_gstin"
 
 
@@ -201,12 +206,17 @@ def _classify_pr(doc):
 	if source_ref and frappe.db.exists("Delivery Note", {"name": source_ref, "docstatus": 1}):
 		dn_data = frappe.db.get_value(
 			"Delivery Note", source_ref,
-			["company_gstin", "billing_address_gstin"], as_dict=True
+			["company_gstin", "billing_address_gstin", "bns_allow_diff_gstin_dn_pr"], as_dict=True
 		)
 		if dn_data:
 			dn_co = (dn_data.get("company_gstin") or "").strip()
 			dn_bill = (dn_data.get("billing_address_gstin") or "").strip()
 			if dn_co and dn_bill and dn_co == dn_bill:
+				return "dn_same_gstin"
+			# Source DN carries the per-doc diff-GSTIN opt-in flag — PR routes
+			# through the same-GSTIN GL rewrite path
+			# (utils.py:_is_bns_internal_same_gstin_purchase_receipt).
+			if cint(dn_data.get("bns_allow_diff_gstin_dn_pr")):
 				return "dn_same_gstin"
 
 	if source_ref and frappe.db.exists("Sales Invoice", {"name": source_ref, "docstatus": 1}):
