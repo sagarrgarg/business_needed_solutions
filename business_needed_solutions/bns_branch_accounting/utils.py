@@ -10351,7 +10351,17 @@ def _repost_chain(chain: Dict[str, Any], allow_cross_fy_repost: bool = False) ->
     current_fy = get_fiscal_year(getdate(frappe.utils.nowdate()))
 
     def _repost_voucher(voucher_type: str, voucher_no: str):
-        """Create a Repost Item Valuation entry for a voucher."""
+        """Repost a voucher: SLE recalc via RIV + full GL regen via RAL.
+
+        RIV (`Repost Item Valuation`) handles stock ledger recalc and the
+        BNS-specific bns_transfer_rate sync. RAL (`Repost Accounting Ledger`)
+        unconditionally deletes and re-creates the voucher's full GL via
+        ``make_gl_entries`` — which goes through the BNS patched
+        ``get_gl_entries`` and emits any updated transfer-account routing
+        (e.g., switch to internal_sales_non_gst_account). RIV alone leaves
+        existing GL on the previously configured accounts when the new
+        expected GL has the same shape but different account names.
+        """
         try:
             doc = frappe.get_doc(voucher_type, voucher_no)
             if doc.docstatus != 1:
@@ -10378,6 +10388,36 @@ def _repost_chain(chain: Dict[str, Any], allow_cross_fy_repost: bool = False) ->
                 "company": doc.company,
                 "allow_zero_rate": 1,
             })
+
+            # RAL submit triggers start_repost which calls make_gl_entries
+            # synchronously (1 voucher ≤ 5 threshold). Per-voucher failure
+            # is logged and continues — don't abort the whole chain.
+            #
+            # CRITICAL: ensure the BNS GL rewrite monkey-patch is active
+            # before submitting RAL. Without it, start_repost would call
+            # the unpatched get_gl_entries and rebuild GL with the standard
+            # ERPNext pattern (COGS + Stock In Hand) — wiping out the BNS
+            # internal-transfer rewrite. The patch is normally applied by
+            # before_request/before_job hooks, but we apply defensively
+            # here in case this runs outside those flows.
+            try:
+                _apply_bns_internal_gl_rewrite_patch()
+                ral = frappe.new_doc("Repost Accounting Ledger")
+                ral.company = doc.company
+                ral.delete_cancelled_entries = 0
+                ral.append("vouchers", {
+                    "voucher_type": voucher_type,
+                    "voucher_no": voucher_no,
+                })
+                ral.flags.ignore_permissions = True
+                ral.save()
+                ral.submit()
+                logger.info("Bulk repost: submitted Repost Accounting Ledger for %s %s", voucher_type, voucher_no)
+            except Exception as ral_err:
+                ral_msg = f"RAL submit failed for {voucher_type} {voucher_no}: {str(ral_err)} (RIV still queued)"
+                errors.append(ral_msg)
+                logger.error(ral_msg)
+
             reposted.append(f"{voucher_type}:{voucher_no}")
             logger.info("Bulk repost: created Repost Item Valuation for %s %s", voucher_type, voucher_no)
         except Exception as e:
