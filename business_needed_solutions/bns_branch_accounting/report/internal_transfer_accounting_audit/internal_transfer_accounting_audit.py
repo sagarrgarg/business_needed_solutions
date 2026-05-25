@@ -1285,7 +1285,10 @@ def repost_sle_for_audit_documents(documents):
 	Enqueue SLE repost for a batch of audit-flagged documents.
 
 	Creates one Repost Item Valuation entry per document, queued through
-	ERPNext's standard repost pipeline.
+	ERPNext's standard repost pipeline. The user only needs write
+	permission on BNS Branch Accounting Settings — the actual RIV
+	creation runs with ignore_permissions because the admin gate has
+	already been cleared.
 
 	Args:
 		documents: JSON string of [{voucher_type, voucher_no}, ...].
@@ -1293,17 +1296,9 @@ def repost_sle_for_audit_documents(documents):
 	Returns:
 		dict with success count, error count, and per-document results.
 	"""
-	# Gate via Role Permission Manager — admins configure who can repost
-	# SLE by editing BNS Branch Accounting Settings role perms + Stock
-	# Ledger Entry write permission. No hardcoded role names.
 	if not frappe.has_permission("BNS Branch Accounting Settings", "write"):
 		frappe.throw(
 			_("BNS Branch Accounting Settings write permission required."),
-			frappe.PermissionError,
-		)
-	if not frappe.has_permission("Stock Ledger Entry", "write"):
-		frappe.throw(
-			_("Stock Ledger Entry write permission required to repost SLE."),
 			frappe.PermissionError,
 		)
 
@@ -1387,9 +1382,12 @@ def _process_sle_repost_batch(documents):
 @frappe.whitelist()
 def repost_gl_for_audit_documents(documents):
 	"""
-	Enqueue GL rebuild for a batch of audit-flagged documents.
+	Enqueue GL repost for a batch of audit-flagged documents.
 
-	Uses the existing bns_force_rebuild_gl_for_voucher from utils.py.
+	Uses the proper RIV + RAL repost pipeline (matches BNS Verify &
+	Repost), NOT direct GL writes. The user only needs write permission
+	on BNS Branch Accounting Settings — RIV and RAL submission run with
+	ignore_permissions because the admin gate has already been cleared.
 
 	Args:
 		documents: JSON string of [{voucher_type, voucher_no}, ...].
@@ -1397,17 +1395,9 @@ def repost_gl_for_audit_documents(documents):
 	Returns:
 		dict with enqueue confirmation.
 	"""
-	# Gate via Role Permission Manager — admins configure who can rebuild
-	# GL for vouchers by granting write on BNS Branch Accounting Settings
-	# and create on Journal Entry. No hardcoded role names.
 	if not frappe.has_permission("BNS Branch Accounting Settings", "write"):
 		frappe.throw(
 			_("BNS Branch Accounting Settings write permission required."),
-			frappe.PermissionError,
-		)
-	if not frappe.has_permission("GL Entry", "write"):
-		frappe.throw(
-			_("GL Entry write permission required to rebuild GL."),
 			frappe.PermissionError,
 		)
 
@@ -1436,13 +1426,25 @@ def repost_gl_for_audit_documents(documents):
 
 def _process_gl_repost_batch(documents):
 	"""
-	Background worker: force-rebuild GL entries for each document.
+	Background worker: repost each document via RIV + RAL.
+
+	RIV (Repost Item Valuation) recalculates SLE and triggers stock-side
+	GL regen. RAL (Repost Accounting Ledger) unconditionally deletes the
+	voucher's full GL and re-runs make_gl_entries() — which goes through
+	the BNS-patched get_gl_entries and emits the correct internal-transfer
+	accounts (incl. internal_sales_non_gst_account /
+	internal_purchase_non_gst_account where applicable).
+
+	Both submissions run with ignore_permissions=True because the caller
+	already passed the admin gate (BNS Branch Accounting Settings write).
 
 	Args:
 		documents: list of dicts [{voucher_type, voucher_no}, ...].
 	"""
+	from erpnext.controllers.stock_controller import create_repost_item_valuation_entry
+
 	from business_needed_solutions.bns_branch_accounting.utils import (
-		bns_force_rebuild_gl_for_voucher,
+		_apply_bns_internal_gl_rewrite_patch,
 	)
 
 	success = 0
@@ -1457,11 +1459,39 @@ def _process_gl_repost_batch(documents):
 			continue
 
 		try:
-			result = bns_force_rebuild_gl_for_voucher(voucher_type, voucher_no)
-			if result.get("ok"):
-				success += 1
-			else:
+			doc = frappe.get_doc(voucher_type, voucher_no)
+			if doc.docstatus != 1:
 				errors += 1
+				continue
+
+			# RIV — stock recalc + bns_transfer_rate sync.
+			create_repost_item_valuation_entry({
+				"based_on": "Transaction",
+				"voucher_type": voucher_type,
+				"voucher_no": voucher_no,
+				"posting_date": doc.posting_date,
+				"posting_time": getattr(doc, "posting_time", "00:00:00") or "00:00:00",
+				"company": doc.company,
+				"allow_zero_rate": 1,
+			})
+
+			# RAL — full GL regen. Must be preceded by patch application
+			# so start_repost's make_gl_entries call hits the BNS-rewritten
+			# get_gl_entries; otherwise the regen would wipe BNS GL back to
+			# standard ERPNext pattern.
+			_apply_bns_internal_gl_rewrite_patch()
+			ral = frappe.new_doc("Repost Accounting Ledger")
+			ral.company = doc.company
+			ral.delete_cancelled_entries = 0
+			ral.append("vouchers", {
+				"voucher_type": voucher_type,
+				"voucher_no": voucher_no,
+			})
+			ral.flags.ignore_permissions = True
+			ral.save()
+			ral.submit()
+
+			success += 1
 			frappe.db.commit()
 		except Exception:
 			errors += 1
