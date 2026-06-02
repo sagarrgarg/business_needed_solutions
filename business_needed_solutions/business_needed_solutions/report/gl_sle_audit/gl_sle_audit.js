@@ -24,6 +24,7 @@ frappe.query_reports["GL SLE Audit"] = {
                     { value: "Stock Reconciliation", description: "SLE always; GL if perpetual" },
                     { value: "Journal Entry", description: "GL only" },
                     { value: "Landed Cost Voucher", description: "GL only" },
+                    { value: "Payment Entry", description: "GL only" },
                 ];
             },
             default: [],

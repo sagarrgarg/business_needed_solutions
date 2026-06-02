@@ -135,6 +135,16 @@ AUDIT_SPEC: Dict[str, Dict[str, Any]] = {
         "item_doctype": None,
         "total_field": None,
     },
+    "Payment Entry": {
+        # PE always books GL: cash/bank dr + party account cr (or vice versa
+        # for receive/pay flips). No item table, no stock impact.
+        "expect_gl": "always",
+        "expect_sle": "never",
+        "posting_field": "posting_date",
+        "has_update_stock": False,
+        "item_doctype": None,
+        "total_field": "paid_amount",
+    },
 }
 
 STATUS_MISSING_GL = "Missing GL"
@@ -1122,3 +1132,108 @@ def get_audit_spec():
         ],
         "tolerance": GL_TOLERANCE,
     }
+
+
+def scheduled_auto_fix_missing_ledgers() -> None:
+    """Weekly scheduler — auto-fix vouchers with missing GL or SLE.
+
+    Gated by two BNS Branch Accounting Settings fields:
+      * enable_auto_fix_missing_ledgers (Check) — off by default
+      * auto_fix_lookback_days (Int, default 7)  — scan window
+
+    Behavior:
+      1. Run audit_gl_sle for the lookback window, statuses Missing-only
+         (imbalanced is NOT auto-fixed — that needs human review).
+      2. Repair each via repair_gl_sle(fix_missing=1, fix_imbalanced=0).
+         Repair uses doc.make_gl_entries / doc.update_stock_ledger
+         directly — never cancel + resubmit.
+      3. Result summary written to Error Log titled
+         'GL SLE Auto-Fix Weekly Run' for the admin to inspect.
+
+    No FY guard — the lookback window is the only safety boundary.
+    Wired in hooks.py:scheduler_events.weekly.
+    """
+    from datetime import timedelta
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    settings_doctype = "BNS Branch Accounting Settings"
+
+    if not cint(frappe.db.get_single_value(settings_doctype, "enable_auto_fix_missing_ledgers")):
+        return
+
+    lookback_days = cint(frappe.db.get_single_value(settings_doctype, "auto_fix_lookback_days")) or 7
+    cutoff_date = (getdate(frappe.utils.nowdate()) - timedelta(days=lookback_days))
+
+    try:
+        rows = audit_gl_sle(
+            cutoff_date=str(cutoff_date),
+            statuses=[STATUS_MISSING_GL, STATUS_MISSING_SLE, STATUS_MISSING_BOTH],
+            limit=10000,
+        )
+        candidates = [
+            {"doctype": r["doctype"], "name": r["name"], "status": r["status"]}
+            for r in rows
+            if r.get("name") and r.get("name") != "(audit failed)"
+            and not (r.get("status") or "").startswith("AUDIT ERROR")
+        ]
+        if not candidates:
+            logger.info(
+                "GL SLE Auto-Fix: no missing-ledger docs found (cutoff=%s, lookback=%dd)",
+                cutoff_date, lookback_days,
+            )
+            return
+
+        result = repair_gl_sle(
+            docs=candidates,
+            cutoff_date=str(cutoff_date),
+            fix_missing=1,
+            fix_imbalanced=0,
+            dry_run=0,
+            force_sync=1,
+        )
+
+        # Inline result (force_sync=1 keeps it synchronous). Build a
+        # human-readable summary and log it.
+        attempted = result.get("attempted", 0)
+        repaired_list = result.get("repaired", []) or []
+        skipped_list = result.get("skipped", []) or []
+        errors_list = result.get("errors", []) or []
+
+        actually_mutated = sum(
+            1
+            for row in repaired_list
+            if (row.get("details") or {}).get("actions_run")
+        )
+
+        summary_lines = [
+            "GL SLE Auto-Fix Weekly Run",
+            "",
+            f"Cutoff date: {cutoff_date} ({lookback_days} days back)",
+            f"Attempted:        {attempted}",
+            f"Mutated:          {actually_mutated}",
+            f"Already OK:       {len(repaired_list) - actually_mutated}",
+            f"Skipped by guard: {len(skipped_list)}",
+            f"Errors:           {len(errors_list)}",
+        ]
+        if errors_list:
+            summary_lines.append("")
+            summary_lines.append("First 5 errors:")
+            for err in errors_list[:5]:
+                summary_lines.append(
+                    f"  - {err.get('doctype')} {err.get('name')}: {err.get('error')}"
+                )
+        summary = "\n".join(summary_lines)
+
+        frappe.log_error(
+            title=f"GL SLE Auto-Fix: {actually_mutated} mutated, {len(errors_list)} errors",
+            message=summary,
+        )
+        logger.info(summary.replace("\n", " | "))
+    except Exception:
+        frappe.log_error(
+            title="GL SLE Auto-Fix scheduler crashed",
+            message=frappe.get_traceback(),
+        )

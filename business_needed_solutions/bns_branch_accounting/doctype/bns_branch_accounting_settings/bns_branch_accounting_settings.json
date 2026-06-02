@@ -25,7 +25,10 @@
   "si_pi_amount_tolerance",
   "allow_different_gstin_dn_to_pr",
   "tab_ewaybill",
-  "enable_internal_dn_ewaybill"
+  "enable_internal_dn_ewaybill",
+  "tab_auto_fix",
+  "enable_auto_fix_missing_ledgers",
+  "auto_fix_lookback_days"
  ],
  "fields": [
   {
@@ -162,12 +165,32 @@
    "fieldname": "enable_internal_dn_ewaybill",
    "fieldtype": "Check",
    "label": "Auto e-Waybill for Internal Customer DN"
+  },
+  {
+   "fieldname": "tab_auto_fix",
+   "fieldtype": "Tab Break",
+   "label": "Auto-Fix Missing Ledgers"
+  },
+  {
+   "default": "0",
+   "description": "When ON, the weekly scheduler scans recent SI/PI/PR/DN/SE/SR/LCV/JE/PE for missing GL or SLE rows and reposts them via the standard ERPNext repost pipeline (RIV + RAL or direct make_gl_entries — never cancel + resubmit).",
+   "fieldname": "enable_auto_fix_missing_ledgers",
+   "fieldtype": "Check",
+   "label": "Enable Weekly Auto-Fix of Missing Ledgers"
+  },
+  {
+   "default": "7",
+   "depends_on": "enable_auto_fix_missing_ledgers",
+   "description": "Number of days back from today the auto-fix scheduler scans for missing GL / SLE. Smaller window = faster, less aggressive. Set to 0 to scan the full Internal Transfer Cutoff window.",
+   "fieldname": "auto_fix_lookback_days",
+   "fieldtype": "Int",
+   "label": "Auto-Fix Lookback Days"
   }
  ],
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-05-24 12:00:00.000000",
+ "modified": "2026-06-02 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "BNS Branch Accounting",
  "name": "BNS Branch Accounting Settings",
