@@ -186,9 +186,72 @@ business_needed_solutions.DirectPrint = class DirectPrint {
      * @param {jQuery} $printButton - The print button element
      */
     _setup_sales_invoice_print(frm, $printButton) {
-        $printButton.addClass('dropdown-toggle');
-        $printButton.attr('data-toggle', 'dropdown');
-        this.create_dropdown_menu(frm, $printButton);
+        // Open the print-options dialog (copy selector + section checkboxes)
+        // instead of a plain dropdown, so e-waybill / GST table / payment
+        // terms / item code can be toggled per print.
+        $printButton.removeClass('dropdown-toggle');
+        $printButton.removeAttr('data-toggle');
+        $printButton.next('.dropdown-menu').remove();
+        $printButton.on('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this._show_si_print_dialog(frm);
+        });
+    }
+
+    /**
+     * Show the Sales Invoice print-options dialog.
+     * Checkbox defaults mirror the document / BNS Settings current values.
+     */
+    _show_si_print_dialog(frm) {
+        const copyOptions = (frm.fields_dict.invoice_copy.df.options || "")
+            .split('\n').filter(Boolean);
+        const has_ewaybill = !!frm.doc.ewaybill;
+        const settings = this.settings || {};
+        const item_code_default =
+            (frm.doc.bns_show_item_code || settings.show_item_code) ? 1 : 0;
+
+        const d = new frappe.ui.Dialog({
+            title: __('Print Options'),
+            fields: [
+                {
+                    fieldtype: 'Select', fieldname: 'invoice_copy', label: __('Copy'),
+                    options: copyOptions.join('\n'),
+                    default: copyOptions[0] || 'Original for Recipient',
+                },
+                { fieldtype: 'Section Break', label: __('Include Sections') },
+                {
+                    fieldtype: 'Check', fieldname: 'print_ewaybill', label: __('Print E-Waybill'),
+                    default: has_ewaybill ? 1 : 0,
+                    read_only: has_ewaybill ? 0 : 1,
+                    description: has_ewaybill ? '' : __('No e-Waybill on this document'),
+                },
+                {
+                    fieldtype: 'Check', fieldname: 'print_gst_table', label: __('Print GST Summary'),
+                    default: frm.doc.is_print_gst_table ? 1 : 0,
+                },
+                { fieldtype: 'Column Break' },
+                {
+                    fieldtype: 'Check', fieldname: 'print_payment_terms', label: __('Print Payment Terms'),
+                    default: frm.doc.is_print_payment_terms ? 1 : 0,
+                },
+                {
+                    fieldtype: 'Check', fieldname: 'show_item_code', label: __('Show Item Code'),
+                    default: item_code_default,
+                },
+            ],
+            primary_action_label: __('Print'),
+            primary_action: (values) => {
+                d.hide();
+                this.generate_pdf(frm, values.invoice_copy, {
+                    print_ewaybill: has_ewaybill ? (values.print_ewaybill ? 1 : 0) : 0,
+                    print_gst_table: values.print_gst_table ? 1 : 0,
+                    print_payment_terms: values.print_payment_terms ? 1 : 0,
+                    show_item_code: values.show_item_code ? 1 : 0,
+                });
+            },
+        });
+        d.show();
     }
 
     /**
@@ -256,8 +319,7 @@ business_needed_solutions.DirectPrint = class DirectPrint {
                 e.stopPropagation();
                 
                 if (this._is_sales_invoice_with_copy(frm)) {
-                    const defaultOption = frm.fields_dict.invoice_copy.df.options.split('\n')[0];
-                    this.print_with_option(frm, defaultOption);
+                    this._show_si_print_dialog(frm);
                 } else {
                     this.generate_pdf(frm);
                 }
@@ -281,23 +343,23 @@ business_needed_solutions.DirectPrint = class DirectPrint {
      * 
      * @param {Object} frm - The form object
      */
-    generate_pdf(frm, selectedOption = null) {
+    generate_pdf(frm, selectedOption = null, extraParams = null) {
         // Validate configuration
         if (!this._is_doctype_configured(frm.doc.doctype)) {
             this._show_configuration_error(frm.doc.doctype);
             return;
         }
-        
+
         // Get print format
         const formats = this.print_formats[frm.doc.doctype];
         if (!formats || formats.length === 0) {
             this._show_configuration_error(frm.doc.doctype);
             return;
         }
-        
+
         // Generate PDF URL
-        const pdf_url = this._build_pdf_url(frm, formats[0], selectedOption);
-        
+        const pdf_url = this._build_pdf_url(frm, formats[0], selectedOption, extraParams);
+
         // Open print window
         this._open_print_window(pdf_url);
     }
@@ -332,7 +394,7 @@ business_needed_solutions.DirectPrint = class DirectPrint {
      * @param {string} print_format - The print format to use
      * @returns {string} The PDF URL
      */
-    _build_pdf_url(frm, print_format, selectedOption = null) {
+    _build_pdf_url(frm, print_format, selectedOption = null, extraParams = null) {
         // Get the copy value first for Sales Invoice
         let copyValue = "1";
         if (frm.doc.doctype === 'Sales Invoice') {
@@ -365,6 +427,14 @@ business_needed_solutions.DirectPrint = class DirectPrint {
         // Add letterhead if present
         if (frm.doc.letter_head) {
             baseParams.letterhead = frm.doc.letter_head;
+        }
+
+        // Merge per-print section toggles from the dialog (print_ewaybill,
+        // print_gst_table, print_payment_terms, show_item_code).
+        if (extraParams && typeof extraParams === 'object') {
+            Object.keys(extraParams).forEach((k) => {
+                baseParams[k] = extraParams[k];
+            });
         }
 
         // Convert parameters to URLSearchParams

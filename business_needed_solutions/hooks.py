@@ -31,7 +31,7 @@ app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=
                   "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=49",
                   "/assets/business_needed_solutions/js/delivery_note.js?v=136",
                   "/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=38",
-                  "/assets/business_needed_solutions/js/direct_print.js?v=49",
+                  "/assets/business_needed_solutions/js/direct_print.js?v=50",
                   "/assets/business_needed_solutions/js/item.js",
                   "/assets/business_needed_solutions/js/pan_gstin_mismatch_banner.js?v=1",
                 ]
@@ -121,10 +121,11 @@ doctype_list_js = {
 # ----------
 
 # add methods and filters to jinja environment
-# jinja = {
-# 	"methods": "business_needed_solutions.utils.jinja_methods",
-# 	"filters": "business_needed_solutions.utils.jinja_filters"
-# }
+jinja = {
+    "methods": [
+        "business_needed_solutions.bns_branch_accounting.gst_integration.get_ewaybill_data_for_print"
+    ]
+}
 
 # Installation
 # ------------
