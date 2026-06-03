@@ -38,6 +38,16 @@ frappe.query_reports["BOM Reconciliation Engine"] = {
             description: __("e.g. 'M' to scope to the Murga (M-series) finished goods"),
         },
         {
+            fieldname: "negative_only",
+            label: __("Negative Stock Only"),
+            fieldtype: "Check",
+            default: 1,
+            description: __(
+                "Only show components whose stock actually went negative during the period " +
+                "(true negative-stock episodes), not every component with a demand/supply gap."
+            ),
+        },
+        {
             fieldname: "supplier_stock",
             label: __("Supplier Available Stock (JSON)"),
             fieldtype: "Small Text",

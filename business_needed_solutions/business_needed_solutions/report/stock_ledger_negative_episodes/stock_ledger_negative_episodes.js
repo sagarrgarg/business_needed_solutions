@@ -106,6 +106,17 @@ frappe.query_reports["Stock Ledger Negative Episodes"] = {
 			fieldtype: "Check",
 			default: 0,
 		},
+		{
+			fieldname: "include_stock_reco",
+			label: __("Include Stock Reco in Required Qty"),
+			fieldtype: "Check",
+			default: 0,
+			description: __(
+				"When an episode is closed by a Stock Reconciliation, raise Required Qty to " +
+				"abs(min balance) + reco target — so a real inflow can replace the reco and " +
+				"land on the reco's intended balance (e.g. deepest -100, reco target 50 => 150)."
+			),
+		},
 	],
 	formatter: function (value, row, column, data, default_formatter) {
 		value = default_formatter(value, row, column, data);

@@ -69,7 +69,7 @@ def execute(filters: Optional[Dict[str, Any]] = None):
             demand[comp] += cqty
 
     supplier_stock = _parse_supplier_stock(filters)
-    rows = _build_component_rows(filters, demand, supplier_stock)
+    rows = _build_component_rows(filters, demand, supplier_stock, filters.get("negative_only"))
     return _columns(bool(supplier_stock)), rows
 
 
@@ -264,18 +264,27 @@ def _parse_supplier_stock(filters) -> Dict[str, float]:
         frappe.throw(_("Supplier Stock must be valid JSON: {\"item_code\": qty, ...}"))
 
 
-def _build_component_rows(filters, demand, supplier_stock) -> List[Dict[str, Any]]:
+def _build_component_rows(filters, demand, supplier_stock, negative_only) -> List[Dict[str, Any]]:
     if not demand:
         return []
     items = list(demand.keys())
-    consume, supply, first_consume = _local_flows(filters, items)
+    consume, supply, first_consume, min_balance = _local_flows(filters, items)
     item_names = dict(
         frappe.get_all("Item", filters={"name": ["in", items]},
                        fields=["name", "item_name"], as_list=True, limit_page_length=0)
     )
 
+    from frappe.utils import cint
+    negative_only = True if negative_only in (None, "") else bool(cint(negative_only))
+
     rows = []
     for comp in sorted(demand, key=lambda x: -demand[x]):
+        mn = flt(min_balance.get(comp, 0.0))
+        # When negative_only, restrict to components whose stock actually went
+        # negative somewhere during the window (true negative-stock episodes),
+        # not merely components with a demand/supply gap.
+        if negative_only and mn >= 0:
+            continue
         dem = flt(demand[comp])
         cons = flt(consume.get(comp, 0.0))
         sup = flt(supply.get(comp, 0.0))
@@ -289,6 +298,7 @@ def _build_component_rows(filters, demand, supplier_stock) -> List[Dict[str, Any
             "bom_demand": round(dem, 2),
             "local_consumed": round(cons, 2),
             "local_supply": round(sup, 2),
+            "min_balance": round(mn, 2),
             "gap": round(gap, 2),
             "bom_vs_actual_var": round(cons - dem, 2),
             "supplier_available": round(avail, 2),
@@ -300,19 +310,23 @@ def _build_component_rows(filters, demand, supplier_stock) -> List[Dict[str, Any
     return rows
 
 
-def _local_flows(filters, items) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, Any]]:
-    """Per-item: total inflow, total outflow (consumption), and the first
-    consumption date in the window (the DN-must-precede anchor)."""
+def _local_flows(filters, items) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, Any], Dict[str, float]]:
+    """Per-item: total inflow, total outflow (consumption), the first
+    consumption date in the window (the DN-must-precede anchor), and the
+    minimum running balance reached during the window (negative => the item
+    had a real negative-stock episode). min balance uses qty_after_transaction
+    (the true per-warehouse running balance, opening stock included)."""
     consume = defaultdict(float)
     supply = defaultdict(float)
     first_consume: Dict[str, Any] = {}
+    min_balance: Dict[str, float] = {}
     # chunk the IN() to keep the query sane
     for i in range(0, len(items), 300):
         chunk = items[i:i + 300]
         placeholders = ", ".join(["%s"] * len(chunk))
         rows = frappe.db.sql(
             """
-            SELECT item_code, posting_date, actual_qty
+            SELECT item_code, posting_date, actual_qty, qty_after_transaction
             FROM `tabStock Ledger Entry`
             WHERE is_cancelled = 0
               AND company = %s
@@ -331,7 +345,10 @@ def _local_flows(filters, items) -> Tuple[Dict[str, float], Dict[str, float], Di
                 consume[r.item_code] += -q
                 if r.item_code not in first_consume:
                     first_consume[r.item_code] = r.posting_date
-    return consume, supply, first_consume
+            bal = flt(r.qty_after_transaction)
+            if r.item_code not in min_balance or bal < min_balance[r.item_code]:
+                min_balance[r.item_code] = bal
+    return consume, supply, first_consume, min_balance
 
 
 def _columns(has_supplier: bool) -> List[Dict[str, Any]]:
@@ -341,6 +358,7 @@ def _columns(has_supplier: bool) -> List[Dict[str, Any]]:
         {"label": _("BOM Demand"), "fieldname": "bom_demand", "fieldtype": "Float", "width": 120},
         {"label": _("Local Consumed"), "fieldname": "local_consumed", "fieldtype": "Float", "width": 120},
         {"label": _("Local Supply"), "fieldname": "local_supply", "fieldtype": "Float", "width": 120},
+        {"label": _("Min Balance (period)"), "fieldname": "min_balance", "fieldtype": "Float", "width": 130},
         {"label": _("Gap (need from supplier)"), "fieldname": "gap", "fieldtype": "Float", "width": 150},
         {"label": _("BOM vs Actual Var"), "fieldname": "bom_vs_actual_var", "fieldtype": "Float", "width": 130},
     ]

@@ -26,8 +26,11 @@ def execute(filters=None):
 		return [], []
 
 	group_by_batch = cint(filters.get("segregate_serial_batch_bundle")) if filters else 0
-	episodes = find_negative_episodes(stock_ledger_data, group_by_batch=group_by_batch)
-	columns = get_columns(group_by_batch=group_by_batch)
+	include_stock_reco = cint(filters.get("include_stock_reco")) if filters else 0
+	episodes = find_negative_episodes(
+		stock_ledger_data, group_by_batch=group_by_batch, include_stock_reco=include_stock_reco
+	)
+	columns = get_columns(group_by_batch=group_by_batch, include_stock_reco=include_stock_reco)
 	data = prepare_report_data(episodes)
 
 	return columns, data
@@ -113,7 +116,7 @@ def get_conditions(filters):
 	return " AND ".join(conditions)
 
 
-def find_negative_episodes(stock_ledger_data, group_by_batch=False):
+def find_negative_episodes(stock_ledger_data, group_by_batch=False, include_stock_reco=False):
 	"""
 	Find negative stock episodes from stock ledger data.
 
@@ -121,6 +124,10 @@ def find_negative_episodes(stock_ledger_data, group_by_batch=False):
 		stock_ledger_data: List of SLE dicts
 		group_by_batch: When True, group by (item_code, warehouse, batch_no)
 			to detect batch-level negative episodes
+		include_stock_reco: When True, if a negative episode is closed by a
+			Stock Reconciliation, the required quantity is raised to also
+			reach the reco's target balance (so a real inflow can replace the
+			reco). required = abs(min_balance) + reco_target_balance.
 	"""
 	episodes = []
 
@@ -135,12 +142,16 @@ def find_negative_episodes(stock_ledger_data, group_by_batch=False):
 		grouped_data[key].append(entry)
 
 	for (item_code, warehouse, batch_no), group in grouped_data.items():
-		episodes.extend(find_episodes_for_group(group, item_code, warehouse, batch_no))
+		episodes.extend(
+			find_episodes_for_group(
+				group, item_code, warehouse, batch_no, include_stock_reco=include_stock_reco
+			)
+		)
 
 	return episodes
 
 
-def find_episodes_for_group(group, item_code, warehouse, batch_no=""):
+def find_episodes_for_group(group, item_code, warehouse, batch_no="", include_stock_reco=False):
 	"""Find negative episodes for a specific item-warehouse(-batch) group."""
 	episodes = []
 
@@ -173,7 +184,21 @@ def find_episodes_for_group(group, item_code, warehouse, batch_no=""):
 				break
 
 		min_balance = min(entry.balance_qty for entry in group[start_idx:episode_end_idx + 1])
-		required_qty = max(0.0, -min_balance)
+		base_required_qty = max(0.0, -min_balance)
+
+		# If a Stock Reconciliation closed the episode, optionally raise the
+		# required qty to also reach the reco's target balance. Example:
+		# deepest -100, reco set balance to +50 -> a real inflow replacing the
+		# reco must deliver 150 (100 to clear the deficit + 50 to match the
+		# reco target), not just 100.
+		closing_row = group[episode_end_idx + 1] if episode_end_idx + 1 < len(group) else None
+		closed_by_reco = bool(closing_row and closing_row.voucher_type == "Stock Reconciliation")
+		reco_target = closing_row.balance_qty if closed_by_reco else None
+		reco_voucher = closing_row.voucher_no if closed_by_reco else None
+
+		required_qty = base_required_qty
+		if include_stock_reco and closed_by_reco and reco_target is not None and reco_target > 0:
+			required_qty = base_required_qty + reco_target
 
 		episode = {
 			"item_code": item_code,
@@ -183,6 +208,9 @@ def find_episodes_for_group(group, item_code, warehouse, batch_no=""):
 			"episode_end": group[episode_end_idx].posting_date,
 			"insert_at": group[insert_idx].posting_date if insert_idx > 0 else group[0].posting_date,
 			"required_qty": round(required_qty, 6),
+			"base_required_qty": round(base_required_qty, 6),
+			"reco_target": round(reco_target, 6) if reco_target is not None else None,
+			"reco_voucher": reco_voucher,
 			"avg_valuation_rate": avg_val_rate,
 			"stock_uom": group[0].stock_uom,
 			"episode_rows": episode_end_idx - insert_idx + 1,
@@ -203,7 +231,7 @@ def find_episodes_for_group(group, item_code, warehouse, batch_no=""):
 	return episodes
 
 
-def get_columns(group_by_batch=False):
+def get_columns(group_by_batch=False, include_stock_reco=False):
 	"""Define report columns."""
 	columns = [
 		{"fieldname": "item_code", "label": _("Item"), "fieldtype": "Link", "options": "Item", "width": 120},
@@ -219,6 +247,16 @@ def get_columns(group_by_batch=False):
 		{"fieldname": "episode_start", "label": _("Episode Start"), "fieldtype": "Date", "width": 100},
 		{"fieldname": "episode_end", "label": _("Episode End"), "fieldtype": "Date", "width": 100},
 		{"fieldname": "required_qty", "label": _("Required Qty"), "fieldtype": "Float", "width": 100},
+	])
+
+	if include_stock_reco:
+		columns.extend([
+			{"fieldname": "base_required_qty", "label": _("Required (excl. Reco)"), "fieldtype": "Float", "width": 130},
+			{"fieldname": "reco_target", "label": _("Reco Target Qty"), "fieldtype": "Float", "width": 110},
+			{"fieldname": "reco_voucher", "label": _("Closing Reco"), "fieldtype": "Data", "width": 130},
+		])
+
+	columns.extend([
 		{"fieldname": "stock_uom", "label": _("UOM"), "fieldtype": "Link", "options": "UOM", "width": 60},
 		{"fieldname": "avg_valuation_rate", "label": _("Avg Valuation Rate"), "fieldtype": "Currency", "width": 120},
 		{"fieldname": "min_balance", "label": _("Min Balance"), "fieldtype": "Float", "width": 100},
@@ -245,6 +283,9 @@ def prepare_report_data(episodes):
 			"episode_start": episode["episode_start"],
 			"episode_end": episode["episode_end"],
 			"required_qty": episode["required_qty"],
+			"base_required_qty": episode.get("base_required_qty"),
+			"reco_target": episode.get("reco_target"),
+			"reco_voucher": episode.get("reco_voucher"),
 			"stock_uom": episode["stock_uom"],
 			"avg_valuation_rate": episode["avg_valuation_rate"],
 			"min_balance": episode["min_balance"],
@@ -284,14 +325,18 @@ def export_fix_plan(filters):
 		return ""
 
 	group_by_batch = cint(filters.get("segregate_serial_batch_bundle")) if filters else 0
-	episodes = find_negative_episodes(stock_ledger_data, group_by_batch=group_by_batch)
+	include_stock_reco = cint(filters.get("include_stock_reco")) if filters else 0
+	episodes = find_negative_episodes(
+		stock_ledger_data, group_by_batch=group_by_batch, include_stock_reco=include_stock_reco
+	)
 
 	output = StringIO()
 	writer = csv.writer(output)
 
 	header = [
 		"Item Code", "Warehouse", "Batch No", "Episode Start", "Episode End",
-		"Required Qty", "Stock UOM", "Avg Valuation Rate", "Min Balance",
+		"Required Qty", "Required (excl. Reco)", "Reco Target Qty", "Closing Reco",
+		"Stock UOM", "Avg Valuation Rate", "Min Balance",
 		"Start Voucher", "End Voucher", "Insert Voucher Ref",
 		"Next IN Voucher", "Company",
 	]
@@ -305,6 +350,9 @@ def export_fix_plan(filters):
 			episode["episode_start"],
 			episode["episode_end"],
 			episode["required_qty"],
+			episode.get("base_required_qty", ""),
+			episode.get("reco_target", "") if episode.get("reco_target") is not None else "",
+			episode.get("reco_voucher", "") or "",
 			episode["stock_uom"],
 			episode["avg_valuation_rate"],
 			episode["min_balance"],
