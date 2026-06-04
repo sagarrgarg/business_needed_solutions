@@ -80,6 +80,22 @@ def validate_stock_update_or_reference(doc, method: Optional[str] = None) -> Non
             )
             return
 
+        # Invoice-discount credit note bypass: return SIs marked
+        # bns_is_invoice_discount_credit_note are post-billing price discounts.
+        # normalize_invoice_discount_credit_note has already cleared the DN/SO
+        # row refs so the source DN stays 100% billed, so the standard "stock
+        # item must reference a DN" check no longer applies.
+        if (
+            doc.doctype == "Sales Invoice"
+            and cint(doc.get("is_return"))
+            and cint(doc.get("bns_is_invoice_discount_credit_note"))
+        ):
+            logger.debug(
+                "Sales Invoice %s is an invoice-discount credit note, skipping reference validation",
+                doc.name,
+            )
+            return
+
         # If update_stock is enabled, no need to check references
         if doc.update_stock:
             logger.debug(f"Stock update enabled for {doc.doctype} {doc.name}, skipping reference validation")

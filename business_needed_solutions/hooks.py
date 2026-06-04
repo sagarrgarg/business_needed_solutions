@@ -26,7 +26,7 @@ app_license = "Commercial"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
-app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=121",
+app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=122",
                   "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=215",
                   "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=49",
                   "/assets/business_needed_solutions/js/delivery_note.js?v=136",
@@ -267,6 +267,7 @@ doc_events = {
     },
     "Sales Invoice": {
         "validate": [
+            "business_needed_solutions.business_needed_solutions.overrides.invoice_discount_credit_note.normalize_invoice_discount_credit_note",
             "business_needed_solutions.bns_branch_accounting.overrides.billing_location.set_customer_address_from_billing_location",
             "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_customer_return",

@@ -37,6 +37,28 @@ frappe.ui.form.on('Sales Invoice', {
         });
     },
 
+    bns_is_invoice_discount_credit_note: function(frm) {
+        if (!frm.doc.is_return || !frm.doc.bns_is_invoice_discount_credit_note) return;
+        if (frm.doc.docstatus !== 0) return;
+        let changed = false;
+        (frm.doc.items || []).forEach(function (row) {
+            ['delivery_note', 'dn_detail', 'sales_order', 'so_detail'].forEach(function (fld) {
+                if (row[fld]) {
+                    frappe.model.set_value(row.doctype, row.name, fld, null);
+                    changed = true;
+                }
+            });
+        });
+        if (frm.doc.update_stock) frm.set_value('update_stock', 0);
+        if (changed) frm.refresh_field('items');
+    },
+
+    is_return: function(frm) {
+        if (!frm.doc.is_return && frm.doc.bns_is_invoice_discount_credit_note) {
+            frm.set_value('bns_is_invoice_discount_credit_note', 0);
+        }
+    },
+
     refresh: function(frm) {
         // Value-only Credit Note shortcut: shown on draft return SIs. Flips
         // update_stock off and zeroes every item qty so the SI matches the
