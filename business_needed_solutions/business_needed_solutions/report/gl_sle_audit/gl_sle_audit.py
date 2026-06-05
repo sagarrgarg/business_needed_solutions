@@ -40,7 +40,13 @@ def execute(filters: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, An
 
 def _columns() -> List[Dict[str, Any]]:
     return [
-        {"label": _("Doctype"),       "fieldname": "doctype",      "fieldtype": "Link",         "options": "DocType", "width": 150},
+        # Plain Data column (not Link -> DocType): Link to "DocType" forces
+        # Frappe to resolve DocType meta when rendering, which is
+        # System-Manager-only and breaks the report for Accounts Manager /
+        # Accounts User. The Dynamic Link on "Name" below uses this value as
+        # its doctype target, so the row is still clickable through to the
+        # source document.
+        {"label": _("Doctype"),       "fieldname": "doctype",      "fieldtype": "Data",         "width": 150},
         {"label": _("Name"),          "fieldname": "name",         "fieldtype": "Dynamic Link", "options": "doctype", "width": 180},
         {"label": _("Posting Date"),  "fieldname": "posting_date", "fieldtype": "Date",         "width": 110},
         {"label": _("Company"),       "fieldname": "company",      "fieldtype": "Link",         "options": "Company", "width": 160},

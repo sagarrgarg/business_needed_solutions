@@ -16,7 +16,7 @@
  "name": "GL SLE Audit",
  "owner": "Administrator",
  "prepared_report": 0,
- "ref_doctype": "BNS Settings",
+ "ref_doctype": "GL Entry",
  "report_name": "GL SLE Audit",
  "report_type": "Script Report",
  "roles": [
