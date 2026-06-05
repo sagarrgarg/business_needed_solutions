@@ -10,25 +10,11 @@ frappe.query_reports["GL SLE Audit"] = {
             default: frappe.datetime.add_months(frappe.datetime.get_today(), -3),
             reqd: 0,
         },
-        {
-            fieldname: "doctypes",
-            label: __("Doctypes"),
-            fieldtype: "MultiSelectList",
-            get_data: function () {
-                return [
-                    { value: "Sales Invoice", description: "GL always; SLE if update_stock" },
-                    { value: "Purchase Invoice", description: "GL always; SLE if update_stock" },
-                    { value: "Delivery Note", description: "SLE always; GL if perpetual" },
-                    { value: "Purchase Receipt", description: "SLE always; GL if perpetual" },
-                    { value: "Stock Entry", description: "SLE always; GL if perpetual" },
-                    { value: "Stock Reconciliation", description: "SLE always; GL if perpetual" },
-                    { value: "Journal Entry", description: "GL only" },
-                    { value: "Landed Cost Voucher", description: "GL only" },
-                    { value: "Payment Entry", description: "GL only" },
-                ];
-            },
-            default: [],
-        },
+        // No Doctypes filter — the audit always scans every doctype in
+        // AUDIT_SPEC (SI, PI, DN, PR, Stock Entry, Stock Reconciliation,
+        // Journal Entry, Landed Cost Voucher, Payment Entry). When the JS
+        // sends an empty / undefined doctypes value, audit_gl_sle defaults
+        // to list(AUDIT_SPEC.keys()).
         {
             fieldname: "statuses",
             label: __("Statuses"),
