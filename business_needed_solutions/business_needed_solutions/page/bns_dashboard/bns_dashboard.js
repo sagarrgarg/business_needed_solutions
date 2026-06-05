@@ -1490,7 +1490,22 @@ class BNSDashboard {
 
 					self.show_fix_progress(data.total_invoices);
 				} catch (e) {
-					frappe.msgprint(__("Failed: {0}", [e.message || e]));
+					// Frappe's global handler already shows the server's real
+					// error message (e.g. PermissionError). Pull a readable
+					// string out of the call's _server_messages / exc fields so
+					// we never surface "[object Object]" to the user.
+					let msg = "";
+					try {
+						if (e && e._server_messages) {
+							const arr = JSON.parse(e._server_messages);
+							if (arr && arr.length) {
+								const first = JSON.parse(arr[0]);
+								msg = first.message || arr[0];
+							}
+						}
+					} catch (_) { /* fall through */ }
+					if (!msg) msg = (e && (e.message || e.statusText)) || "";
+					if (msg) frappe.show_alert({ message: __("Bulk fix failed: {0}", [msg]), indicator: "red" }, 8);
 					btn.prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix"));
 				}
 			}

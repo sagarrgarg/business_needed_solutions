@@ -270,8 +270,12 @@ def bulk_fix_pi_expense_accounts(items):
 	Returns:
 		dict with status and total_invoices (or validation_errors if any fail upfront)
 	"""
-	# Repost of accounting entries = GL-level write. Gate strictly.
-	_require_dashboard_write("Purchase Invoice", "GL Entry")
+	# Gate on Purchase Invoice write — repost_accounting_entries is a standard
+	# PI operation and handles the GL Entry writes internally with
+	# ignore_permissions=True. Requiring direct GL Entry write here would lock
+	# the action to System / Accounts Manager only, which is stricter than the
+	# underlying ERPNext flow needs.
+	_require_dashboard_write("Purchase Invoice")
 	import json
 	if isinstance(items, str):
 		items = json.loads(items)
