@@ -256,6 +256,11 @@ def get_data(filters=None):
 	asymmetric_data = get_asymmetric_reference_mismatches(filters)
 	data.extend(asymmetric_data)
 
+	# Detect legacy linkage glitches: duplicate claimants on one source,
+	# internal refs on non-internal-party docs, and conflicting DN back-refs.
+	legacy_glitch_data = get_duplicate_and_foreign_reference_mismatches(filters)
+	data.extend(legacy_glitch_data)
+
 	# Sort by posting date descending (handle None values)
 	if data:
 		data.sort(key=lambda x: x.get("posting_date") or today(), reverse=True)
@@ -512,6 +517,210 @@ def get_asymmetric_reference_mismatches(filters=None):
 			"location_mismatch": "",
 			"item_mismatch_details": "",
 		})
+
+	return data
+
+
+def _empty_mismatch_row(**overrides):
+	row = {
+		"posting_date": None,
+		"document_type": "",
+		"document_name": "",
+		"grand_total": 0.0,
+		"company_address_name": "",
+		"customer_address_name": "",
+		"missing_document": "",
+		"mismatch_reason": "",
+		"purchase_receipt": None,
+		"purchase_invoice": None,
+		"transfer_chain": "",
+		"source_location": "",
+		"purchase_location": "",
+		"location_mismatch": "",
+		"item_mismatch_details": "",
+	}
+	row.update(overrides)
+	return row
+
+
+def get_duplicate_and_foreign_reference_mismatches(filters=None):
+	"""Detect legacy linkage glitches in internal transfer references.
+
+	The bns_inter_company_reference link is strictly one-to-one, but older
+	documents predate both the field's no_copy flag (Duplicate / Amend used
+	to silently copy the ref) and the creation-flow duplicate guards. Three
+	resulting states, none caught by the other report sections (which all
+	filter on is_bns_internal_supplier = 1):
+
+	1. Duplicate claimants — two or more submitted PRs (or PIs) referencing
+	   the same source DN/SI.
+	2. Foreign-party reference — a PR/PI carrying an internal reference while
+	   its supplier is not flagged BNS internal (DN/SI counterpart: customer
+	   not flagged internal but back-reference set).
+	3. Conflicting claim — a PR references a DN whose own back-reference
+	   points at a different PR.
+	"""
+	filters = frappe._dict(filters or {})
+	data = []
+
+	def _conds(alias):
+		conds, vals = [], []
+		if filters.get("company"):
+			conds.append(f"{alias}.company = %s")
+			vals.append(filters.get("company"))
+		if filters.get("from_date"):
+			conds.append(f"{alias}.posting_date >= %s")
+			vals.append(filters.get("from_date"))
+		if filters.get("to_date"):
+			conds.append(f"{alias}.posting_date <= %s")
+			vals.append(filters.get("to_date"))
+		return conds, vals
+
+	def _resolve_source_doctype(name):
+		if frappe.db.exists("Delivery Note", name):
+			return "Delivery Note"
+		if frappe.db.exists("Sales Invoice", name):
+			return "Sales Invoice"
+		return None
+
+	# ── 1 + 2: claimant side (PR / PI) ─────────────────────────────────
+	for claim_dt in ("Purchase Receipt", "Purchase Invoice"):
+		conds, vals = _conds("d")
+		where = " AND ".join(
+			["d.docstatus = 1", "COALESCE(d.bns_inter_company_reference, '') != ''"] + conds
+		)
+
+		dup_groups = frappe.db.sql(
+			f"""
+			SELECT
+				d.bns_inter_company_reference AS source_ref,
+				COUNT(*) AS cnt,
+				GROUP_CONCAT(d.name ORDER BY d.name SEPARATOR ', ') AS claimants,
+				MAX(d.posting_date) AS posting_date,
+				SUM(d.grand_total) AS grand_total
+			FROM `tab{claim_dt}` d
+			WHERE {where}
+			GROUP BY d.bns_inter_company_reference
+			HAVING COUNT(*) > 1
+			""",
+			tuple(vals),
+			as_dict=True,
+		) or []
+
+		for g in dup_groups:
+			source_dt = _resolve_source_doctype(g.get("source_ref"))
+			data.append(_empty_mismatch_row(
+				posting_date=g.get("posting_date"),
+				document_type=source_dt or "Unknown Source",
+				document_name=g.get("source_ref"),
+				grand_total=flt(g.get("grand_total") or 0),
+				missing_document="Unique claimant (strict 1:1)",
+				mismatch_reason=(
+					f"{g.get('cnt')} submitted {claim_dt}s reference this source "
+					f"(link is strictly one-to-one): {g.get('claimants')}"
+				),
+				purchase_receipt=g.get("claimants") if claim_dt == "Purchase Receipt" else None,
+				purchase_invoice=g.get("claimants") if claim_dt == "Purchase Invoice" else None,
+				transfer_chain="Duplicate claimants",
+			))
+
+		foreign_rows = frappe.db.sql(
+			f"""
+			SELECT d.name, d.posting_date, d.grand_total,
+				d.bns_inter_company_reference AS source_ref
+			FROM `tab{claim_dt}` d
+			WHERE {where} AND COALESCE(d.is_bns_internal_supplier, 0) = 0
+			""",
+			tuple(vals),
+			as_dict=True,
+		) or []
+
+		for r in foreign_rows:
+			data.append(_empty_mismatch_row(
+				posting_date=r.get("posting_date"),
+				document_type=claim_dt,
+				document_name=r.get("name"),
+				grand_total=flt(r.get("grand_total") or 0),
+				missing_document="BNS Internal Supplier flag",
+				mismatch_reason=(
+					f"Carries internal reference {r.get('source_ref')} but supplier is not "
+					f"flagged BNS internal (likely a pre-no_copy Duplicate/Amend or import)"
+				),
+				purchase_receipt=r.get("name") if claim_dt == "Purchase Receipt" else None,
+				purchase_invoice=r.get("name") if claim_dt == "Purchase Invoice" else None,
+				transfer_chain="Foreign-party reference",
+			))
+
+	# ── 2b: source side (DN / SI) — back-ref set but customer not internal ─
+	for source_dt, backref_check in (
+		("Delivery Note", "COALESCE(d.bns_inter_company_reference, '') != ''"),
+		("Sales Invoice", "COALESCE(d.bns_inter_company_reference, '') != ''"),
+	):
+		conds, vals = _conds("d")
+		where = " AND ".join(
+			["d.docstatus = 1", backref_check, "COALESCE(d.is_bns_internal_customer, 0) = 0"] + conds
+		)
+		rows = frappe.db.sql(
+			f"""
+			SELECT d.name, d.posting_date, d.grand_total,
+				d.bns_inter_company_reference AS backref
+			FROM `tab{source_dt}` d
+			WHERE {where}
+			""",
+			tuple(vals),
+			as_dict=True,
+		) or []
+		for r in rows:
+			data.append(_empty_mismatch_row(
+				posting_date=r.get("posting_date"),
+				document_type=source_dt,
+				document_name=r.get("name"),
+				grand_total=flt(r.get("grand_total") or 0),
+				missing_document="BNS Internal Customer flag",
+				mismatch_reason=(
+					f"Has internal back-reference {r.get('backref')} but customer is not "
+					f"flagged BNS internal"
+				),
+				transfer_chain="Foreign-party reference",
+			))
+
+	# ── 3: conflicting claim — PR refs DN, DN back-refs a different PR ──
+	conds, vals = _conds("pr")
+	where = " AND ".join(
+		["pr.docstatus = 1", "COALESCE(pr.bns_inter_company_reference, '') != ''"] + conds
+	)
+	conflict_rows = frappe.db.sql(
+		f"""
+		SELECT
+			pr.name AS pr_name, pr.posting_date, pr.grand_total,
+			dn.name AS dn_name,
+			dn.bns_inter_company_reference AS dn_backref
+		FROM `tabPurchase Receipt` pr
+		JOIN `tabDelivery Note` dn
+			ON dn.name = pr.bns_inter_company_reference
+			AND dn.docstatus = 1
+		WHERE {where}
+			AND COALESCE(dn.bns_inter_company_reference, '') != ''
+			AND dn.bns_inter_company_reference != pr.name
+		""",
+		tuple(vals),
+		as_dict=True,
+	) or []
+
+	for r in conflict_rows:
+		data.append(_empty_mismatch_row(
+			posting_date=r.get("posting_date"),
+			document_type="Purchase Receipt",
+			document_name=r.get("pr_name"),
+			grand_total=flt(r.get("grand_total") or 0),
+			missing_document="Consistent DN back-reference",
+			mismatch_reason=(
+				f"PR claims DN {r.get('dn_name')}, but the DN back-references a "
+				f"different PR ({r.get('dn_backref')})"
+			),
+			purchase_receipt=r.get("pr_name"),
+			transfer_chain="Conflicting claim",
+		))
 
 	return data
 

@@ -979,6 +979,54 @@ def _is_bns_internal_different_gstin_purchase_invoice(doc) -> bool:
     return bool(company_gstin and billing_gstin and company_gstin != billing_gstin)
 
 
+def _validate_internal_ref_requires_internal_party(doc) -> None:
+    """A bns_inter_company_reference on a non-internal-party document is
+    always invalid state — historically produced by Duplicate/Amend before
+    the field was no_copy, or by data import. Throw a clear error instead
+    of letting GST-scope resolution emit a confusing linkage message."""
+    source_ref = (doc.get("bns_inter_company_reference") or "").strip()
+    if not source_ref:
+        return
+    if doc.doctype in ("Purchase Receipt", "Purchase Invoice") and not cint(
+        doc.get("is_bns_internal_supplier") or 0
+    ):
+        frappe.throw(
+            _(
+                "{0} carries internal transfer reference {1} but the supplier is not flagged "
+                "BNS Internal. Either mark the supplier as BNS internal or clear the reference — "
+                "a non-internal document must not claim an internal source."
+            ).format(_(doc.doctype), bold(source_ref)),
+            title=_("Internal Reference on Non-Internal Document"),
+        )
+
+
+def _validate_unique_internal_source_claim(doc) -> None:
+    """The internal transfer link is strictly one-to-one. Block save/submit
+    when another submitted document of the same doctype already claims the
+    same source (DN/SI). Creation flows already guard this; this closes the
+    remaining routes (copy, amend, data import, direct API)."""
+    source_ref = (doc.get("bns_inter_company_reference") or "").strip()
+    if not source_ref:
+        return
+    other = frappe.db.get_value(
+        doc.doctype,
+        {
+            "bns_inter_company_reference": source_ref,
+            "docstatus": 1,
+            "name": ("!=", doc.name or ""),
+        },
+        "name",
+    )
+    if other:
+        frappe.throw(
+            _(
+                "{0} {1} already references internal source {2}. The internal transfer link is "
+                "strictly one-to-one; cancel or unlink the other document before claiming this source."
+            ).format(_(doc.doctype), bold(other), bold(source_ref)),
+            title=_("Duplicate Internal Reference"),
+        )
+
+
 def validate_internal_purchase_receipt_linkage(doc, method: Optional[str] = None) -> None:
     """
     Enforce PR linkage rules after configured cutoff.
@@ -990,6 +1038,9 @@ def validate_internal_purchase_receipt_linkage(doc, method: Optional[str] = None
     if doc.doctype != "Purchase Receipt":
         return
     source_ref = (doc.get("bns_inter_company_reference") or "").strip()
+    if source_ref:
+        _validate_internal_ref_requires_internal_party(doc)
+        _validate_unique_internal_source_claim(doc)
     if not is_bns_internal_supplier(doc) and not source_ref:
         return
     if not is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc)) and not source_ref:
@@ -1197,6 +1248,12 @@ def validate_internal_purchase_invoice_linkage(doc, method: Optional[str] = None
     """Enforce interstate internal PI linkage after configured cutoff."""
     if doc.doctype != "Purchase Invoice":
         return
+    # These two guards must run before the is_bns_internal_supplier early
+    # return: a ref on a NON-internal PI is exactly the broken state the
+    # first guard exists to catch.
+    if (doc.get("bns_inter_company_reference") or "").strip():
+        _validate_internal_ref_requires_internal_party(doc)
+        _validate_unique_internal_source_claim(doc)
     if not is_bns_internal_supplier(doc):
         return
     if not is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc)):
