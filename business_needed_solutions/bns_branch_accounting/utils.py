@@ -10780,3 +10780,180 @@ def enqueue_verify_and_repost_internal_transfers(
         "success": True,
         "message": _("Bulk verification and repost job has been enqueued. Check Background Jobs for progress."),
     }
+
+# ── Internal reference glitch repair (Settings form button) ──────────────
+
+
+@frappe.whitelist()
+def repair_internal_reference_glitches(dry_run=1):
+    """Repair legacy bns_inter_company_reference glitches in one pass.
+
+    Handles the three states the Internal Transfer Receive Mismatch report
+    tags as Duplicate claimants / Foreign-party reference / Conflicting
+    claim (all produced before the ref field was no_copy and before the
+    validate-time guards existed):
+
+    - Foreign-party: PR/PI carrying a ref while the supplier is not BNS
+      internal (and DN/SI back-refs with a non-internal customer) -> clear
+      the ref. Skipped when the party MASTER is flagged internal — that
+      doc should be fixed via Bulk Convert to BNS Internal instead.
+    - Duplicate claimants: 2+ submitted PRs/PIs referencing one source ->
+      keep the claimant the source back-references, clear the others.
+      Skipped (manual decision) when the source back-references none.
+    - Conflicting claim: PR refs a DN that back-refs a different PR ->
+      same keeper rule.
+
+    Only bns_inter_company_reference values are touched (plus the source
+    back-ref when it points at a doc being cleared). No status, flags,
+    per_billed, GL or SLE mutation. Each change drops an audit Comment on
+    the document. dry_run=1 returns the plan without writing.
+    """
+    _bns_require_accounts_write()
+    dry_run = cint(dry_run)
+
+    actions = []   # {doctype, name, action, reason}
+    skipped = []   # {doctype, name, reason}
+    actioned = set()  # (doctype, name) already planned, to avoid double-clearing
+
+    def _plan(doctype, name, action, reason):
+        if (doctype, name) in actioned:
+            return
+        actioned.add((doctype, name))
+        actions.append({"doctype": doctype, "name": name, "action": action, "reason": reason})
+
+    def _source_doctype(name):
+        if frappe.db.exists("Delivery Note", name):
+            return "Delivery Note"
+        if frappe.db.exists("Sales Invoice", name):
+            return "Sales Invoice"
+        return None
+
+    # ── A. Foreign-party claimants (PR / PI; supplier not internal) ──
+    for dt in ("Purchase Receipt", "Purchase Invoice"):
+        rows = frappe.db.sql(
+            f"""
+            SELECT name, supplier, bns_inter_company_reference AS ref
+            FROM `tab{dt}`
+            WHERE docstatus = 1
+              AND COALESCE(bns_inter_company_reference, '') != ''
+              AND COALESCE(is_bns_internal_supplier, 0) = 0
+            """,
+            as_dict=True,
+        ) or []
+        for r in rows:
+            if cint(frappe.db.get_value("Supplier", r.supplier, "is_bns_internal_supplier") or 0):
+                skipped.append({
+                    "doctype": dt, "name": r.name,
+                    "reason": _("Supplier master IS flagged internal — fix the document flag via 'Bulk Convert to BNS Internal' instead of clearing the reference."),
+                })
+                continue
+            _plan(dt, r.name, f"clear ref -> {r.ref}", "Foreign-party reference")
+            # keep the pair symmetric: if the source back-refs this doc, clear that too
+            src_dt = _source_doctype(r.ref)
+            if src_dt:
+                backref = (frappe.db.get_value(src_dt, r.ref, "bns_inter_company_reference") or "").strip()
+                if backref == r.name:
+                    _plan(src_dt, r.ref, f"clear back-ref -> {r.name}", "Counterpart of foreign-party clear")
+
+    # ── A2. Foreign-party sources (DN / SI; customer not internal) ──
+    for dt in ("Delivery Note", "Sales Invoice"):
+        rows = frappe.db.sql(
+            f"""
+            SELECT name, customer, bns_inter_company_reference AS ref
+            FROM `tab{dt}`
+            WHERE docstatus = 1
+              AND COALESCE(bns_inter_company_reference, '') != ''
+              AND COALESCE(is_bns_internal_customer, 0) = 0
+            """,
+            as_dict=True,
+        ) or []
+        for r in rows:
+            if cint(frappe.db.get_value("Customer", r.customer, "is_bns_internal_customer") or 0):
+                skipped.append({
+                    "doctype": dt, "name": r.name,
+                    "reason": _("Customer master IS flagged internal — fix the document flag via 'Bulk Convert to BNS Internal' instead of clearing the reference."),
+                })
+                continue
+            _plan(dt, r.name, f"clear back-ref -> {r.ref}", "Foreign-party reference")
+
+    # ── B. Duplicate / conflicting claimants -> keeper rule ──
+    for claim_dt in ("Purchase Receipt", "Purchase Invoice"):
+        groups = frappe.db.sql(
+            f"""
+            SELECT bns_inter_company_reference AS source_ref,
+                   GROUP_CONCAT(name ORDER BY name SEPARATOR ',') AS claimants
+            FROM `tab{claim_dt}`
+            WHERE docstatus = 1
+              AND COALESCE(bns_inter_company_reference, '') != ''
+            GROUP BY bns_inter_company_reference
+            HAVING COUNT(*) > 1
+            """,
+            as_dict=True,
+        ) or []
+        for g in groups:
+            claimants = (g.claimants or "").split(",")
+            src_dt = _source_doctype(g.source_ref)
+            if not src_dt:
+                skipped.append({
+                    "doctype": claim_dt, "name": g.claimants,
+                    "reason": _("Source {0} does not exist — decide manually which claimant to keep.").format(g.source_ref),
+                })
+                continue
+            backref = (frappe.db.get_value(src_dt, g.source_ref, "bns_inter_company_reference") or "").strip()
+            if backref not in claimants:
+                skipped.append({
+                    "doctype": claim_dt, "name": g.claimants,
+                    "reason": _("{0} {1} back-references none of the claimants — decide manually which to keep.").format(src_dt, g.source_ref),
+                })
+                continue
+            for name in claimants:
+                if name != backref:
+                    _plan(claim_dt, name, f"clear ref -> {g.source_ref}",
+                          f"Duplicate claimant (keeper: {backref})")
+
+    # ── C. Single conflicting claim: PR refs DN, DN back-refs a different PR ──
+    conflict_rows = frappe.db.sql(
+        """
+        SELECT pr.name AS pr_name, pr.bns_inter_company_reference AS dn_name,
+               dn.bns_inter_company_reference AS dn_backref
+        FROM `tabPurchase Receipt` pr
+        JOIN `tabDelivery Note` dn
+            ON dn.name = pr.bns_inter_company_reference AND dn.docstatus = 1
+        WHERE pr.docstatus = 1
+          AND COALESCE(pr.bns_inter_company_reference, '') != ''
+          AND COALESCE(dn.bns_inter_company_reference, '') != ''
+          AND dn.bns_inter_company_reference != pr.name
+        """,
+        as_dict=True,
+    ) or []
+    for r in conflict_rows:
+        keeper_ref = (frappe.db.get_value("Purchase Receipt", r.dn_backref, "bns_inter_company_reference") or "").strip() \
+            if frappe.db.exists("Purchase Receipt", r.dn_backref) else ""
+        if keeper_ref == r.dn_name:
+            _plan("Purchase Receipt", r.pr_name, f"clear ref -> {r.dn_name}",
+                  f"Conflicting claim (DN back-references {r.dn_backref})")
+        else:
+            skipped.append({
+                "doctype": "Purchase Receipt", "name": r.pr_name,
+                "reason": _("DN {0} back-references {1}, which does not reference it back — chain is inconsistent, decide manually.").format(r.dn_name, r.dn_backref),
+            })
+
+    if not dry_run:
+        for a in actions:
+            frappe.db.set_value(a["doctype"], a["name"], "bns_inter_company_reference", None, update_modified=False)
+            frappe.get_doc({
+                "doctype": "Comment",
+                "comment_type": "Info",
+                "reference_doctype": a["doctype"],
+                "reference_name": a["name"],
+                "content": _("BNS repair: {0} ({1})").format(a["action"], a["reason"]),
+            }).insert(ignore_permissions=True)
+        frappe.db.commit()
+
+    return {
+        "dry_run": dry_run,
+        "total_planned": len(actions),
+        "total_skipped": len(skipped),
+        "actions": actions,
+        "skipped": skipped,
+    }

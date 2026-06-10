@@ -1,5 +1,85 @@
 frappe.ui.form.on('BNS Branch Accounting Settings', {
   refresh: function(frm) {
+    frm.add_custom_button(__('Repair Internal Reference Glitches'), function() {
+      const d = new frappe.ui.Dialog({
+        title: __('Repair Internal Reference Glitches'),
+        size: 'extra-large',
+        fields: [
+          {
+            fieldtype: 'HTML',
+            fieldname: 'info',
+            options:
+              '<div style="padding:8px 10px;background:#fff8e6;border:1px solid #f0d98c;border-radius:4px;margin-bottom:8px;font-size:12px">' +
+              __('Clears legacy <b>bns_inter_company_reference</b> glitches: refs on non-internal-party documents (pre-no_copy Duplicate/Amend artifacts), duplicate claimants on one DN/SI (keeps the one the source back-references), and conflicting claims. Only the reference fields are touched — no status, GL or stock changes. Ambiguous rows are skipped with a reason. Run Preview first.') +
+              '</div>'
+          },
+          { fieldtype: 'HTML', fieldname: 'results' }
+        ],
+        primary_action_label: __('Apply Repair'),
+        primary_action: function() {
+          frappe.confirm(
+            __('Clear the planned references? Each change is logged as a Comment on the document.'),
+            function() { run_repair(0); }
+          );
+        },
+        secondary_action_label: __('Preview (Dry Run)'),
+        secondary_action: function() { run_repair(1); }
+      });
+
+      function render_results(m) {
+        const esc = frappe.utils.escape_html;
+        let html =
+          '<p><b>' + (m.dry_run ? __('Preview') : __('Applied')) + '</b> · ' +
+          __('Planned') + ': <b>' + m.total_planned + '</b> · ' +
+          __('Skipped') + ': <b>' + m.total_skipped + '</b></p>';
+
+        if ((m.actions || []).length) {
+          html += '<p style="margin-bottom:4px"><b>' + __('Actions') + '</b></p>' +
+            '<div style="max-height:260px;overflow:auto"><table class="table table-condensed" style="font-size:11px">' +
+            '<thead><tr><th>' + __('Doctype') + '</th><th>' + __('Document') + '</th><th>' + __('Action') + '</th><th>' + __('Reason') + '</th></tr></thead><tbody>';
+          m.actions.forEach(function(a) {
+            html += '<tr><td>' + esc(a.doctype) + '</td><td>' + esc(a.name) + '</td><td>' +
+              esc(a.action) + '</td><td>' + esc(a.reason) + '</td></tr>';
+          });
+          html += '</tbody></table></div>';
+        }
+        if ((m.skipped || []).length) {
+          html += '<p style="margin:8px 0 4px"><b>' + __('Skipped (manual decision needed)') + '</b></p>' +
+            '<div style="max-height:200px;overflow:auto"><table class="table table-condensed" style="font-size:11px"><tbody>';
+          m.skipped.forEach(function(s) {
+            html += '<tr><td>' + esc(s.doctype) + '</td><td>' + esc(s.name) + '</td>' +
+              '<td style="color:#b45309">' + esc(s.reason) + '</td></tr>';
+          });
+          html += '</tbody></table></div>';
+        }
+        if (!(m.actions || []).length && !(m.skipped || []).length) {
+          html += '<p style="color:#16a34a">' + __('Nothing to repair — no glitch rows found.') + '</p>';
+        }
+        d.fields_dict.results.$wrapper.html(html);
+      }
+
+      function run_repair(dry_run) {
+        frappe.call({
+          method: 'business_needed_solutions.bns_branch_accounting.utils.repair_internal_reference_glitches',
+          args: { dry_run: dry_run },
+          freeze: true,
+          freeze_message: dry_run ? __('Scanning for glitches...') : __('Repairing references...'),
+          callback: function(r) {
+            if (!r.message) return;
+            render_results(r.message);
+            if (!dry_run && r.message.total_planned) {
+              frappe.show_alert({
+                message: __('Cleared {0} reference(s). Re-run the Internal Transfer Receive Mismatch report to verify.', [r.message.total_planned]),
+                indicator: 'green'
+              }, 8);
+            }
+          }
+        });
+      }
+
+      d.show();
+    }, __('Repair'));
+
     frm.add_custom_button(__('Bulk Convert to BNS Internal'), function() {
       let previewData = null;
 
