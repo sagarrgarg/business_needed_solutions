@@ -609,18 +609,26 @@ def get_duplicate_and_foreign_reference_mismatches(filters=None):
 
 		for g in dup_groups:
 			source_dt = _resolve_source_doctype(g.get("source_ref"))
+			first_claimant = (g.get("claimants") or "").split(", ")[0]
+			# purchase_receipt / purchase_invoice are Link columns — a
+			# comma-joined claimant list would render as a broken link, so
+			# point them at the first claimant; the full list is in the
+			# reason. When the source doc no longer exists, anchor the row
+			# on the first claimant too (document_name is a Dynamic Link
+			# and needs a real doctype).
 			data.append(_empty_mismatch_row(
 				posting_date=g.get("posting_date"),
-				document_type=source_dt or "Unknown Source",
-				document_name=g.get("source_ref"),
+				document_type=source_dt or claim_dt,
+				document_name=g.get("source_ref") if source_dt else first_claimant,
 				grand_total=flt(g.get("grand_total") or 0),
 				missing_document="Unique claimant (strict 1:1)",
 				mismatch_reason=(
-					f"{g.get('cnt')} submitted {claim_dt}s reference this source "
+					f"{g.get('cnt')} submitted {claim_dt}s reference "
+					f"{'this source' if source_dt else 'missing source ' + (g.get('source_ref') or '?')} "
 					f"(link is strictly one-to-one): {g.get('claimants')}"
 				),
-				purchase_receipt=g.get("claimants") if claim_dt == "Purchase Receipt" else None,
-				purchase_invoice=g.get("claimants") if claim_dt == "Purchase Invoice" else None,
+				purchase_receipt=first_claimant if claim_dt == "Purchase Receipt" else None,
+				purchase_invoice=first_claimant if claim_dt == "Purchase Invoice" else None,
 				transfer_chain="Duplicate claimants",
 			))
 

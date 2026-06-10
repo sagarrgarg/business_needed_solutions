@@ -10875,6 +10875,19 @@ def repair_internal_reference_glitches(dry_run=1):
                 })
                 continue
             _plan(dt, r.name, f"clear back-ref -> {r.ref}", "Foreign-party reference")
+            # symmetric clear (mirror of section A): any submitted PR/PI still
+            # claiming this source would otherwise resurface as an asymmetric
+            # back-ref row, which reads as "complete the link" — the opposite
+            # of what this repair just decided.
+            for claim_dt in ("Purchase Receipt", "Purchase Invoice"):
+                claimers = frappe.get_all(
+                    claim_dt,
+                    filters={"bns_inter_company_reference": r.name, "docstatus": 1},
+                    pluck="name",
+                ) or []
+                for claimer in claimers:
+                    _plan(claim_dt, claimer, f"clear ref -> {r.name}",
+                          "Counterpart of foreign-party clear")
 
     # ── B. Duplicate / conflicting claimants -> keeper rule ──
     for claim_dt in ("Purchase Receipt", "Purchase Invoice"):
