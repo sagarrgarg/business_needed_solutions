@@ -983,21 +983,32 @@ def _validate_internal_ref_requires_internal_party(doc) -> None:
     """A bns_inter_company_reference on a non-internal-party document is
     always invalid state — historically produced by Duplicate/Amend before
     the field was no_copy, or by data import. Throw a clear error instead
-    of letting GST-scope resolution emit a confusing linkage message."""
+    of letting GST-scope resolution emit a confusing linkage message.
+
+    When only the DOCUMENT flag is missing but the supplier master is
+    flagged internal, heal the doc flag instead of throwing — mapped-doc
+    creation flows (e.g. SI -> PR) set the ref on the draft before the flag
+    is stamped, and older docs predate flag stamping entirely."""
     source_ref = (doc.get("bns_inter_company_reference") or "").strip()
     if not source_ref:
         return
-    if doc.doctype in ("Purchase Receipt", "Purchase Invoice") and not cint(
-        doc.get("is_bns_internal_supplier") or 0
+    if doc.doctype not in ("Purchase Receipt", "Purchase Invoice"):
+        return
+    if cint(doc.get("is_bns_internal_supplier") or 0):
+        return
+    if doc.get("supplier") and cint(
+        frappe.db.get_value("Supplier", doc.supplier, "is_bns_internal_supplier") or 0
     ):
-        frappe.throw(
-            _(
-                "{0} carries internal transfer reference {1} but the supplier is not flagged "
-                "BNS Internal. Either mark the supplier as BNS internal or clear the reference — "
-                "a non-internal document must not claim an internal source."
-            ).format(_(doc.doctype), bold(source_ref)),
-            title=_("Internal Reference on Non-Internal Document"),
-        )
+        doc.is_bns_internal_supplier = 1
+        return
+    frappe.throw(
+        _(
+            "{0} carries internal transfer reference {1} but the supplier is not flagged "
+            "BNS Internal. Either mark the supplier as BNS internal or clear the reference — "
+            "a non-internal document must not claim an internal source."
+        ).format(_(doc.doctype), bold(source_ref)),
+        title=_("Internal Reference on Non-Internal Document"),
+    )
 
 
 def _validate_unique_internal_source_claim(doc) -> None:
