@@ -1505,7 +1505,9 @@ class BNSDashboard {
 						}
 					} catch (_) { /* fall through */ }
 					if (!msg) msg = (e && (e.message || e.statusText)) || "";
-					if (msg) frappe.show_alert({ message: __("Bulk fix failed: {0}", [msg]), indicator: "red" }, 8);
+					// show_alert renders message as HTML; escape the server-derived
+					// string so any markup in it can't inject into the toast.
+					if (msg) frappe.show_alert({ message: __("Bulk fix failed: {0}", [frappe.utils.escape_html(String(msg))]), indicator: "red" }, 8);
 					btn.prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix"));
 				}
 			}
