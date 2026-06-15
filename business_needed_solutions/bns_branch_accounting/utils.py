@@ -1313,13 +1313,29 @@ def validate_internal_purchase_invoice_linkage(doc, method: Optional[str] = None
     )
 
 
+def _is_internal_transfer_sales_invoice(si_name: str) -> bool:
+    """True only when the Sales Invoice exists AND is itself a BNS internal
+    transfer (is_bns_internal_customer = 1).
+
+    Guards the PI->SI resolution below: matching bill_no / ref against ANY
+    Sales Invoice misclassifies common-party PIs (the same outside party is
+    both customer and supplier, and bill_no is used to cross-link the sale
+    and purchase) and coincidental bill numbers as internal branch transfers.
+    """
+    if not si_name:
+        return False
+    return bool(frappe.db.get_value("Sales Invoice", si_name, "is_bns_internal_customer"))
+
+
 def _resolve_si_name_for_internal_pi(doc) -> Optional[str]:
-    """Resolve linked Sales Invoice name from PI header, bill_no, or PR chain."""
+    """Resolve the linked INTERNAL-TRANSFER Sales Invoice for a PI from its
+    header ref, bill_no, or PR chain. Only an internal-transfer SI qualifies —
+    see [[_is_internal_transfer_sales_invoice]]."""
     ref = (doc.get("bns_inter_company_reference") or "").strip()
-    if ref and frappe.db.exists("Sales Invoice", ref):
+    if ref and _is_internal_transfer_sales_invoice(ref):
         return ref
     bill = (doc.get("bill_no") or "").strip()
-    if bill and frappe.db.exists("Sales Invoice", bill):
+    if bill and _is_internal_transfer_sales_invoice(bill):
         return bill
     pr_names = sorted(
         {(row.get("purchase_receipt") or "").strip()
@@ -1328,7 +1344,7 @@ def _resolve_si_name_for_internal_pi(doc) -> Optional[str]:
     )
     for pr_name in pr_names:
         pr_ref = (frappe.db.get_value("Purchase Receipt", pr_name, "bns_inter_company_reference") or "").strip()
-        if pr_ref and frappe.db.exists("Sales Invoice", pr_ref):
+        if pr_ref and _is_internal_transfer_sales_invoice(pr_ref):
             return pr_ref
     return None
 
