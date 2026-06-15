@@ -2297,20 +2297,19 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
         gl_entries, side="credit", company=doc.company
     )
+    has_valuation = valuation_amount > 0 and bool(stock_account)
 
-    if valuation_amount <= 0 or not stock_account:
-        logger.warning(
-            "Skipping DN GL rewrite for %s due to valuation_reason=%s",
-            doc.name,
-            valuation_reason or "ok",
-        )
-        return gl_entries
-
-    template = next((row for row in gl_entries if row.get("account") == stock_account and flt(row.get("credit") or 0) > 0), None)
+    # Dimension template: prefer the stock GL row; fall back to any GL row,
+    # else {} — a zero-valuation internal DN emits no stock GL, but the
+    # revenue legs (debtor / non-GST internal sales) must still post.
+    # _make_bns_gl_entry builds cost-center / party / dimensions from the
+    # document when no template row is available.
+    template = None
+    if has_valuation:
+        template = next((row for row in gl_entries if row.get("account") == stock_account and flt(row.get("credit") or 0) > 0), None)
     if not template and gl_entries:
         template = gl_entries[0]
-    if not template:
-        return gl_entries
+    template = template or {}
 
     if _is_same_gstin_internal_delivery_note(doc):
         if not settings.get("internal_sales_non_gst_account"):
@@ -2318,22 +2317,29 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             return gl_entries
 
         transfer_amount, transfer_reason = _resolve_dn_transfer_amount(doc, force_mode=force_mode)
-        if transfer_amount <= 0:
-            logger.warning(
-                "Skipping DN GL rewrite for %s due to transfer_reason=%s",
-                doc.name,
-                transfer_reason or "ok",
-            )
-            return gl_entries
 
-        rewritten = [
-            _make_bns_gl_entry(doc, settings["internal_branch_debtor_account"], debit=transfer_amount, against=settings["internal_sales_non_gst_account"], template=template),
-            _make_bns_gl_entry(doc, settings["stock_in_transit_account"], debit=valuation_amount, against=stock_account, template=template),
-            _make_bns_gl_entry(doc, settings["internal_sales_non_gst_account"], credit=transfer_amount, against=settings["internal_branch_debtor_account"], template=template),
-            _make_bns_gl_entry(doc, stock_account, credit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
-        ]
+        # Revenue legs move on the transfer (billing) amount and are DECOUPLED
+        # from stock valuation: a same-GSTIN internal sale recognises the branch
+        # receivable + non-GST internal sales even when the goods left the source
+        # warehouse at zero cost. Valuation legs (stock-in-transit <-> stock)
+        # post only when there is stock value to relieve.
+        rewritten = []
+        if transfer_amount > 0:
+            rewritten.append(_make_bns_gl_entry(doc, settings["internal_branch_debtor_account"], debit=transfer_amount, against=settings["internal_sales_non_gst_account"], template=template))
+            rewritten.append(_make_bns_gl_entry(doc, settings["internal_sales_non_gst_account"], credit=transfer_amount, against=settings["internal_branch_debtor_account"], template=template))
+        if has_valuation:
+            rewritten.append(_make_bns_gl_entry(doc, settings["stock_in_transit_account"], debit=valuation_amount, against=stock_account, template=template))
+            rewritten.append(_make_bns_gl_entry(doc, stock_account, credit=valuation_amount, against=settings["stock_in_transit_account"], template=template))
+        if not rewritten:
+            logger.warning("Skipping DN GL rewrite for %s: no transfer amount (reason=%s) and no valuation (reason=%s)", doc.name, transfer_reason or "ok", valuation_reason or "ok")
+            return gl_entries
     else:
-        # Different GSTIN internal DN: keep billing flow unchanged, move valuation to stock-in-transit.
+        # Different-GSTIN internal DN: valuation-only — revenue and GST are
+        # recognised on the linked Sales Invoice, so this DN must NOT post
+        # sale/debtor legs (that would double-count). Zero valuation here
+        # correctly yields no GL.
+        if not has_valuation:
+            return gl_entries
         if not settings.get("stock_in_transit_account"):
             logger.warning("Skipping DN GL rewrite for %s due to missing stock_in_transit_account", doc.name)
             return gl_entries
@@ -2375,38 +2381,36 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
         gl_entries, side="debit", company=doc.company
     )
+    has_valuation = valuation_amount > 0 and bool(stock_account)
 
-    if valuation_amount <= 0 or not stock_account:
-        logger.warning(
-            "Skipping PR GL rewrite for %s due to transfer_reason=%s valuation_reason=%s",
-            doc.name,
-            transfer_reason or "ok",
-            valuation_reason or "ok",
-        )
-        return gl_entries
-
-    template = next((row for row in gl_entries if row.get("account") == stock_account and flt(row.get("debit") or 0) > 0), None)
+    template = None
+    if has_valuation:
+        template = next((row for row in gl_entries if row.get("account") == stock_account and flt(row.get("debit") or 0) > 0), None)
     if not template and gl_entries:
         template = gl_entries[0]
-    if not template:
-        return gl_entries
+    template = template or {}
 
     if is_dn_same_gstin_scope:
-        if transfer_amount <= 0:
-            logger.warning(
-                "Skipping PR GL rewrite for %s due to transfer_reason=%s",
-                doc.name,
-                transfer_reason or "ok",
-            )
+        # Party legs (creditor / non-GST internal purchase) move on the transfer
+        # amount, DECOUPLED from stock valuation: the receiving branch books its
+        # payable + internal purchase even if the goods arrived at zero cost.
+        # Valuation legs (stock <-> stock-in-transit) post only when there is
+        # stock value to record.
+        rewritten = []
+        if transfer_amount > 0:
+            rewritten.append(_make_bns_gl_entry(doc, settings["internal_purchase_non_gst_account"], debit=transfer_amount, against=settings["internal_branch_creditor_account"], template=template))
+            rewritten.append(_make_bns_gl_entry(doc, settings["internal_branch_creditor_account"], credit=transfer_amount, against=settings["internal_purchase_non_gst_account"], template=template))
+        if has_valuation:
+            rewritten.append(_make_bns_gl_entry(doc, stock_account, debit=valuation_amount, against=settings["stock_in_transit_account"], template=template))
+            rewritten.append(_make_bns_gl_entry(doc, settings["stock_in_transit_account"], credit=valuation_amount, against=stock_account, template=template))
+        if not rewritten:
+            logger.warning("Skipping PR GL rewrite for %s: no transfer amount (reason=%s) and no valuation (reason=%s)", doc.name, transfer_reason or "ok", valuation_reason or "ok")
             return gl_entries
-        rewritten = [
-            _make_bns_gl_entry(doc, settings["internal_purchase_non_gst_account"], debit=transfer_amount, against=settings["internal_branch_creditor_account"], template=template),
-            _make_bns_gl_entry(doc, stock_account, debit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
-            _make_bns_gl_entry(doc, settings["internal_branch_creditor_account"], credit=transfer_amount, against=settings["internal_purchase_non_gst_account"], template=template),
-            _make_bns_gl_entry(doc, settings["stock_in_transit_account"], credit=valuation_amount, against=stock_account, template=template),
-        ]
     else:
-        # SI->PR strict valuation leg: Stock In Hand Dr, Stock In Transit Cr.
+        # SI->PR: valuation-only — purchase and GST are recognised on the linked
+        # Purchase Invoice, so the PR must NOT post purchase/creditor legs.
+        if not has_valuation:
+            return gl_entries
         rewritten = [
             _make_bns_gl_entry(doc, stock_account, debit=valuation_amount, against=settings["stock_in_transit_account"], template=template),
             _make_bns_gl_entry(doc, settings["stock_in_transit_account"], credit=valuation_amount, against=stock_account, template=template),
@@ -2604,40 +2608,42 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
             gl_entries, side=stock_gl_side, company=doc.company
         )
-        if valuation_amount <= 0 or not stock_account:
+        # Stock legs are optional: when the PI received stock at zero valuation,
+        # skip them but KEEP the party legs (creditor / purchase-transfer / GST).
+        if valuation_amount > 0 and stock_account:
+            stock_template = next(
+                (
+                    row
+                    for row in (gl_entries or [])
+                    if row.get("account") == stock_account and flt(row.get(stock_gl_side) or 0) > 0
+                ),
+                creditor_template,
+            )
+            transit_side = "credit" if not is_return else "debit"
+            rewritten.append(
+                _make_bns_gl_entry(
+                    doc,
+                    stock_account,
+                    **{stock_gl_side: valuation_amount},
+                    against=settings["stock_in_transit_account"],
+                    template=stock_template,
+                )
+            )
+            rewritten.append(
+                _make_bns_gl_entry(
+                    doc,
+                    settings["stock_in_transit_account"],
+                    **{transit_side: valuation_amount},
+                    against=stock_account,
+                    template=stock_template,
+                )
+            )
+        else:
             logger.warning(
-                "Skipping PI stock-leg rewrite for %s due to valuation_reason=%s",
+                "PI %s has update_stock but zero stock valuation; posting party legs only (reason=%s)",
                 doc.name,
                 valuation_reason or "ok",
             )
-            return gl_entries
-        stock_template = next(
-            (
-                row
-                for row in (gl_entries or [])
-                if row.get("account") == stock_account and flt(row.get(stock_gl_side) or 0) > 0
-            ),
-            creditor_template,
-        )
-        transit_side = "credit" if not is_return else "debit"
-        rewritten.append(
-            _make_bns_gl_entry(
-                doc,
-                stock_account,
-                **{stock_gl_side: valuation_amount},
-                against=settings["stock_in_transit_account"],
-                template=stock_template,
-            )
-        )
-        rewritten.append(
-            _make_bns_gl_entry(
-                doc,
-                settings["stock_in_transit_account"],
-                **{transit_side: valuation_amount},
-                against=stock_account,
-                template=stock_template,
-            )
-        )
 
     debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
     credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
@@ -2781,40 +2787,43 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
             gl_entries, side=stock_gl_side, company=doc.company
         )
-        if valuation_amount <= 0 or not stock_account:
+        # Stock legs are optional: when the SI moved stock at zero valuation,
+        # skip them but KEEP the revenue legs (debtor / sales-transfer / GST),
+        # which are recognised on the transaction amount regardless of cost.
+        if valuation_amount > 0 and stock_account:
+            stock_template = next(
+                (
+                    row
+                    for row in (gl_entries or [])
+                    if row.get("account") == stock_account and flt(row.get(stock_gl_side) or 0) > 0
+                ),
+                debtor_template,
+            )
+            transit_side = "debit" if not is_return else "credit"
+            rewritten.append(
+                _make_bns_gl_entry(
+                    doc,
+                    settings["stock_in_transit_account"],
+                    **{transit_side: valuation_amount},
+                    against=stock_account,
+                    template=stock_template,
+                )
+            )
+            rewritten.append(
+                _make_bns_gl_entry(
+                    doc,
+                    stock_account,
+                    **{stock_gl_side: valuation_amount},
+                    against=settings["stock_in_transit_account"],
+                    template=stock_template,
+                )
+            )
+        else:
             logger.warning(
-                "Skipping SI stock-leg rewrite for %s due to valuation_reason=%s",
+                "SI %s has update_stock but zero stock valuation; posting revenue legs only (reason=%s)",
                 doc.name,
                 valuation_reason or "ok",
             )
-            return gl_entries
-        stock_template = next(
-            (
-                row
-                for row in (gl_entries or [])
-                if row.get("account") == stock_account and flt(row.get(stock_gl_side) or 0) > 0
-            ),
-            debtor_template,
-        )
-        transit_side = "debit" if not is_return else "credit"
-        rewritten.append(
-            _make_bns_gl_entry(
-                doc,
-                settings["stock_in_transit_account"],
-                **{transit_side: valuation_amount},
-                against=stock_account,
-                template=stock_template,
-            )
-        )
-        rewritten.append(
-            _make_bns_gl_entry(
-                doc,
-                stock_account,
-                **{stock_gl_side: valuation_amount},
-                against=settings["stock_in_transit_account"],
-                template=stock_template,
-            )
-        )
 
     debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
     credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
