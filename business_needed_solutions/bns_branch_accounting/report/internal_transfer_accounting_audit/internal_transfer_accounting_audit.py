@@ -767,6 +767,7 @@ def _audit_delivery_notes(filters, settings):
 
 def _audit_sales_invoices(filters, settings):
 	"""Audit GL entries for BNS internal Sales Invoices (including credit notes)."""
+	from business_needed_solutions.bns_branch_accounting.utils import _internal_stock_movement_uncaptured
 	conditions, values = _build_date_conditions(filters, alias="si")
 	conditions.append(
 		"(si.is_bns_internal_customer = 1"
@@ -815,6 +816,21 @@ def _audit_sales_invoices(filters, settings):
 				expected_accounts=expected,
 				missing_accounts=missing,
 				unexpected_accounts=unexpected,
+			))
+
+		# Stock-gap anomaly: stock items invoiced internally but no stock
+		# movement recorded anywhere (Update Stock off + no Delivery Note).
+		# Informational — neither repost button picks this up (no sle_issue);
+		# the fix is a DN or Update Stock correction, not a repost.
+		if _internal_stock_movement_uncaptured(doc):
+			results.append(_build_row(
+				row, scope, "Stock Not Captured",
+				details=(
+					"Internal SI has stock items but no stock movement is captured "
+					"(Update Stock off and no Delivery Note linked). GL may be valid, "
+					"but inventory was never moved — create from a Delivery Note (DN → SI) "
+					"or enable Update Stock."
+				),
 			))
 
 	return results
@@ -889,6 +905,7 @@ def _audit_purchase_receipts(filters, settings):
 
 def _audit_purchase_invoices(filters, settings):
 	"""Audit GL and SLE for BNS internal Purchase Invoices (including debit notes)."""
+	from business_needed_solutions.bns_branch_accounting.utils import _internal_stock_movement_uncaptured
 	conditions, values = _build_date_conditions(filters, alias="pi")
 	conditions.append(
 		"(pi.is_bns_internal_supplier = 1"
@@ -953,6 +970,19 @@ def _audit_purchase_invoices(filters, settings):
 				unexpected_accounts=unexpected_set,
 				sle_issue=sle_deviation,
 				details=details,
+			))
+
+		# Stock-gap anomaly: stock items invoiced internally but no stock
+		# movement recorded anywhere (Update Stock off + no Purchase Receipt).
+		if _internal_stock_movement_uncaptured(doc):
+			results.append(_build_row(
+				row, scope, "Stock Not Captured",
+				details=(
+					"Internal PI has stock items but no stock movement is captured "
+					"(Update Stock off and no Purchase Receipt linked). GL may be valid, "
+					"but inventory was never moved — link a Purchase Receipt (PR → PI) "
+					"or enable Update Stock."
+				),
 			))
 
 	return results
@@ -1445,10 +1475,12 @@ def _process_gl_repost_batch(documents):
 
 	from business_needed_solutions.bns_branch_accounting.utils import (
 		_apply_bns_internal_gl_rewrite_patch,
+		_voucher_owns_sle,
 	)
 
 	success = 0
 	errors = 0
+	failures = []
 
 	for entry in documents:
 		voucher_type = entry.get("voucher_type") or entry.get("document_type") or ""
@@ -1456,24 +1488,32 @@ def _process_gl_repost_batch(documents):
 
 		if voucher_type not in _VALID_REPOST_DOCTYPES or not voucher_no:
 			errors += 1
+			failures.append(f"{voucher_type or '?'} {voucher_no or '?'}: not a repostable doctype")
 			continue
 
 		try:
 			doc = frappe.get_doc(voucher_type, voucher_no)
 			if doc.docstatus != 1:
 				errors += 1
+				failures.append(f"{voucher_type} {voucher_no}: not submitted")
 				continue
 
-			# RIV — stock recalc + bns_transfer_rate sync.
-			create_repost_item_valuation_entry({
-				"based_on": "Transaction",
-				"voucher_type": voucher_type,
-				"voucher_no": voucher_no,
-				"posting_date": doc.posting_date,
-				"posting_time": getattr(doc, "posting_time", "00:00:00") or "00:00:00",
-				"company": doc.company,
-				"allow_zero_rate": 1,
-			})
+			# RIV (stock recalc + bns_transfer_rate sync) only for vouchers
+			# that own SLE: DN/PR always, SI/PI only when update_stock=1. For
+			# an update_stock=0 invoice the stock lives on the linked DN/PR
+			# (which is reposted on its own), so RIV would throw on ERPNext's
+			# validate_update_stock and has nothing to recompute — repost GL
+			# only via RAL.
+			if _voucher_owns_sle(voucher_type, doc):
+				create_repost_item_valuation_entry({
+					"based_on": "Transaction",
+					"voucher_type": voucher_type,
+					"voucher_no": voucher_no,
+					"posting_date": doc.posting_date,
+					"posting_time": getattr(doc, "posting_time", "00:00:00") or "00:00:00",
+					"company": doc.company,
+					"allow_zero_rate": 1,
+				})
 
 			# RAL — full GL regen. Must be preceded by patch application
 			# so start_repost's make_gl_entries call hits the BNS-rewritten
@@ -1493,17 +1533,26 @@ def _process_gl_repost_batch(documents):
 
 			success += 1
 			frappe.db.commit()
-		except Exception:
+		except Exception as e:
 			errors += 1
 			frappe.db.rollback()
+			failures.append(f"{voucher_type} {voucher_no}: {str(e)[:200]}")
 			frappe.log_error(
 				title=f"Audit GL Repost Error: {voucher_type} {voucher_no}",
 			)
 
+	message = _("GL repost complete: {0} succeeded, {1} failed.").format(success, errors)
+	if failures:
+		message += "<br><br>" + _("Failures:") + "<br>" + "<br>".join(
+			frappe.utils.escape_html(f) for f in failures[:20]
+		)
+		if len(failures) > 20:
+			message += "<br>" + _("(showing first 20 of {0})").format(len(failures))
+
 	frappe.publish_realtime(
 		"msgprint",
 		{
-			"message": _("GL repost complete: {0} succeeded, {1} failed.").format(success, errors),
+			"message": message,
 			"title": _("Audit GL Repost"),
 			"indicator": "green" if errors == 0 else "orange",
 		},

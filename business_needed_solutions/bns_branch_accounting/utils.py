@@ -3892,6 +3892,95 @@ def is_bns_internal_supplier(doc) -> bool:
     return False
 
 
+def _voucher_owns_sle(voucher_type, doc) -> bool:
+    """True when the voucher writes its OWN Stock Ledger Entries.
+
+    Delivery Note / Purchase Receipt always move stock. Sales Invoice /
+    Purchase Invoice move stock only when Update Stock is on — otherwise the
+    stock (and its SLE) lives on the linked DN/PR. This is exactly ERPNext's
+    Repost Item Valuation precondition (validate_update_stock), so it decides
+    whether an RIV can / should be created for the voucher. update_stock=0
+    invoices must be reposted GL-only (RAL); RIV would both throw and have
+    nothing to recompute.
+    """
+    if voucher_type in ("Delivery Note", "Purchase Receipt"):
+        return True
+    if voucher_type in ("Sales Invoice", "Purchase Invoice"):
+        return bool(cint(doc.get("update_stock")))
+    return False
+
+
+def _internal_stock_movement_uncaptured(doc) -> bool:
+    """True when an internal SI/PI carries stock items but records no stock
+    movement anywhere: Update Stock is off AND no source stock document is
+    linked on any row (Delivery Note for SI, Purchase Receipt for PI).
+
+    Such a document posts GL but leaves inventory unmoved — an inventory
+    hole. The correct shapes are DN -> SI (stock on the DN) or an SI with
+    Update Stock on (stock on the SI); likewise PR -> PI or PI with Update
+    Stock for purchases.
+    """
+    dt = doc.doctype
+    if dt == "Sales Invoice":
+        if not is_bns_internal_customer(doc):
+            return False
+        src_field = "delivery_note"
+    elif dt == "Purchase Invoice":
+        if not is_bns_internal_supplier(doc):
+            return False
+        src_field = "purchase_receipt"
+    else:
+        return False
+
+    if cint(doc.get("update_stock")):
+        return False
+
+    has_stock_item = False
+    for it in doc.get("items") or []:
+        if (it.get(src_field) or "").strip():
+            return False  # stock movement owned by the linked DN/PR
+        if not has_stock_item and cint(
+            frappe.get_cached_value("Item", it.get("item_code"), "is_stock_item")
+        ):
+            has_stock_item = True
+    return has_stock_item
+
+
+def validate_internal_stock_movement_captured(doc, method: Optional[str] = None) -> None:
+    """before_submit guard: an internal SI/PI with stock items must capture
+    stock movement — via the DN->SI / PR->PI flow or with Update Stock on.
+
+    Gated on the Phase-1 internal-transfer cutoff so historical amendments
+    are not retro-blocked; only current/forward internal documents are
+    enforced. See [[_internal_stock_movement_uncaptured]].
+    """
+    if doc.doctype not in ("Sales Invoice", "Purchase Invoice"):
+        return
+    if not is_after_internal_transfer_cutoff(doc.get("posting_date")):
+        return
+    if not _internal_stock_movement_uncaptured(doc):
+        return
+
+    if doc.doctype == "Sales Invoice":
+        frappe.throw(
+            _(
+                "This internal Sales Invoice has stock items but no stock movement is captured. "
+                "Create it from a Delivery Note (DN → SI) or enable 'Update Stock' so the goods "
+                "actually leave inventory."
+            ),
+            title=_("Stock Movement Not Captured"),
+        )
+    else:
+        frappe.throw(
+            _(
+                "This internal Purchase Invoice has stock items but no stock movement is captured. "
+                "Link a Purchase Receipt (PR → PI) or enable 'Update Stock' so the goods actually "
+                "enter inventory."
+            ),
+            title=_("Stock Movement Not Captured"),
+        )
+
+
 class BNSInternalTransferError(Exception):
     """Custom exception for BNS internal transfer operations."""
     pass
@@ -10447,15 +10536,21 @@ def _repost_chain(chain: Dict[str, Any], allow_cross_fy_repost: bool = False) ->
                     logger.warning(msg)
                     return
 
-            create_repost_item_valuation_entry({
-                "based_on": "Transaction",
-                "voucher_type": voucher_type,
-                "voucher_no": voucher_no,
-                "posting_date": doc.posting_date,
-                "posting_time": getattr(doc, "posting_time", "00:00:00") or "00:00:00",
-                "company": doc.company,
-                "allow_zero_rate": 1,
-            })
+            # RIV only for vouchers that own SLE (DN/PR, or update_stock=1
+            # SI/PI). For an update_stock=0 invoice the stock lives on the
+            # linked DN/PR (reposted via its own RIV in this same chain), so
+            # RIV here would both throw (ERPNext validate_update_stock) and
+            # have nothing to recompute — repost GL only via RAL.
+            if _voucher_owns_sle(voucher_type, doc):
+                create_repost_item_valuation_entry({
+                    "based_on": "Transaction",
+                    "voucher_type": voucher_type,
+                    "voucher_no": voucher_no,
+                    "posting_date": doc.posting_date,
+                    "posting_time": getattr(doc, "posting_time", "00:00:00") or "00:00:00",
+                    "company": doc.company,
+                    "allow_zero_rate": 1,
+                })
 
             # RAL submit triggers start_repost which calls make_gl_entries
             # synchronously (1 voucher ≤ 5 threshold). Per-voucher failure
