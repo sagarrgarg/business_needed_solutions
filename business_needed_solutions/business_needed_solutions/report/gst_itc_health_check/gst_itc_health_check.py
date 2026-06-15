@@ -10,18 +10,25 @@ Catches Purchase Invoice GST issues:
 
 import frappe
 from frappe import _
+from frappe.utils import flt
 
 
 ISSUE_POS_MISMATCH = "POS Mismatch"
 ISSUE_TAX_TYPE_MISMATCH = "Tax Type Mismatch"
 ISSUE_ITC_EXPENSED_POS = "ITC Expensed PoS"
 ISSUE_ITC_EXPENSED_175 = "ITC Expensed 17(5)"
+# Ground-truth: GST actually posted to the company's GST Expense account
+# (India Compliance ineligible-ITC capitalization). Catches Purchase
+# Receipts and Purchase Invoices regardless of whether ineligibility_reason
+# was persisted — the only reliable signal that ITC was made ineligible.
+ISSUE_ITC_EXPENSED_BOOKED = "ITC Expensed (Booked)"
 
 ALL_ISSUE_TYPES = [
     ISSUE_POS_MISMATCH,
     ISSUE_TAX_TYPE_MISMATCH,
     ISSUE_ITC_EXPENSED_POS,
     ISSUE_ITC_EXPENSED_175,
+    ISSUE_ITC_EXPENSED_BOOKED,
 ]
 
 
@@ -45,10 +52,16 @@ def validate_filters(filters):
 def get_columns():
     return [
         {
-            "label": _("Invoice"),
+            "label": _("Document Type"),
+            "fieldname": "document_type",
+            "fieldtype": "Data",
+            "width": 120,
+        },
+        {
+            "label": _("Document"),
             "fieldname": "name",
-            "fieldtype": "Link",
-            "options": "Purchase Invoice",
+            "fieldtype": "Dynamic Link",
+            "options": "document_type",
             "width": 160,
         },
         {
@@ -131,8 +144,95 @@ def get_data(filters):
             classify_invoice(inv, taxes_by_invoice.get(inv["name"], []), issue_filter)
         )
 
-    results.sort(key=lambda r: (r["posting_date"], r["name"]), reverse=True)
+    # Ground-truth pass: any PR/PI that actually booked GST to the company's
+    # GST Expense account. This is the only check that surfaces Purchase
+    # Receipts (where perpetual-inventory ineligible-ITC capitalization
+    # happens) and catches PoS-rule cases where ineligibility_reason was
+    # never persisted on the document.
+    if ISSUE_ITC_EXPENSED_BOOKED in issue_filter:
+        results.extend(fetch_gst_expensed_docs(filters))
+
+    results.sort(key=lambda r: (r["posting_date"] or "", r["name"]), reverse=True)
     return results
+
+
+def fetch_gst_expensed_docs(filters):
+    company = filters["company"]
+    gst_expense_account = frappe.get_cached_value(
+        "Company", company, "default_gst_expense_account"
+    )
+    if not gst_expense_account:
+        return []
+
+    conditions = [
+        "gle.account = %(acc)s",
+        "gle.company = %(company)s",
+        "gle.is_cancelled = 0",
+        "gle.voucher_type IN ('Purchase Receipt', 'Purchase Invoice')",
+        "gle.posting_date BETWEEN %(from_date)s AND %(to_date)s",
+    ]
+    params = {
+        "acc": gst_expense_account,
+        "company": company,
+        "from_date": filters["from_date"],
+        "to_date": filters["to_date"],
+    }
+
+    # net credit = GST expensed/capitalized (ITC made ineligible) and not yet
+    # reversed on that document. A doc whose debit (reversal) and credit
+    # (capitalization) net to zero is already cleared and is skipped.
+    rows = frappe.db.sql(
+        """
+        SELECT gle.voucher_type, gle.voucher_no,
+               SUM(gle.credit) - SUM(gle.debit) AS net_expensed
+        FROM `tabGL Entry` gle
+        WHERE {conditions}
+        GROUP BY gle.voucher_type, gle.voucher_no
+        HAVING ABS(SUM(gle.credit) - SUM(gle.debit)) > 0.01
+        """.format(conditions=" AND ".join(conditions)),
+        params,
+        as_dict=True,
+    )
+    if not rows:
+        return []
+
+    out = []
+    # GST fields (supplier_gstin / company_gstin / place_of_supply /
+    # ineligibility_reason) are India-Compliance custom fields and may be
+    # absent on Purchase Receipt in some installs — select only what exists.
+    field_cache = {}
+
+    def _fields_for(dt):
+        if dt not in field_cache:
+            # use actual DB columns (not meta.has_field) — IC custom fields can
+            # be defined in meta but missing as columns on some installs.
+            cols = set(frappe.db.get_table_columns(dt))
+            field_cache[dt] = [
+                f for f in (
+                    "posting_date", "supplier", "supplier_gstin", "company_gstin",
+                    "place_of_supply", "taxes_and_charges", "ineligibility_reason",
+                ) if f in cols
+            ]
+        return field_cache[dt]
+
+    for r in rows:
+        dt, dn = r["voucher_type"], r["voucher_no"]
+        meta = frappe.db.get_value(dt, dn, _fields_for(dt), as_dict=True) or {}
+        out.append({
+            "document_type": dt,
+            "name": dn,
+            "posting_date": meta.get("posting_date"),
+            "supplier": meta.get("supplier") or "",
+            "supplier_gstin": meta.get("supplier_gstin") or "",
+            "company_gstin": meta.get("company_gstin") or "",
+            "place_of_supply": meta.get("place_of_supply") or "",
+            "taxes_and_charges": meta.get("taxes_and_charges") or "",
+            "issue_type": ISSUE_ITC_EXPENSED_BOOKED,
+            "tax_amount": flt(r.get("net_expensed")),
+            "ineligibility_reason": meta.get("ineligibility_reason")
+                or _("GST booked to {0} (ITC treated ineligible)").format(gst_expense_account),
+        })
+    return out
 
 
 def fetch_invoices(filters):
@@ -234,6 +334,7 @@ def classify_invoice(inv, tax_rows, issue_filter):
 
 def _row(inv, issue_type, tax_amount):
     return {
+        "document_type": "Purchase Invoice",
         "name": inv["name"],
         "posting_date": inv["posting_date"],
         "supplier": inv["supplier"],
