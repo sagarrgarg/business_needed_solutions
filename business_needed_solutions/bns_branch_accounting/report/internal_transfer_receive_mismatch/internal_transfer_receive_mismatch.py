@@ -261,6 +261,13 @@ def get_data(filters=None):
 	legacy_glitch_data = get_duplicate_and_foreign_reference_mismatches(filters)
 	data.extend(legacy_glitch_data)
 
+	# Detect EXTERNAL parties treated as internal: a doc is flagged / statused
+	# internal (or posts internal GL) but its Customer/Supplier master is not
+	# flagged internal. Catches naming-collision cases (e.g. an external
+	# supplier whose bill_no matches our Sales Invoice series).
+	external_internal_data = get_external_party_internal_mismatches(filters)
+	data.extend(external_internal_data)
+
 	# Sort by posting date descending (handle None values)
 	if data:
 		data.sort(key=lambda x: x.get("posting_date") or today(), reverse=True)
@@ -729,6 +736,76 @@ def get_duplicate_and_foreign_reference_mismatches(filters=None):
 			purchase_receipt=r.get("pr_name"),
 			transfer_chain="Conflicting claim",
 		))
+
+	return data
+
+
+def get_external_party_internal_mismatches(filters=None):
+	"""Flag documents treated as INTERNAL while their party master is EXTERNAL.
+
+	A SI / DN / PI / PR is "treated internal" when its own internal flag is set
+	OR its status is 'BNS Internally Transferred' (set whenever BNS applies the
+	internal-transfer GL rewrite). If the linked Customer / Supplier master is
+	not flagged internal, the document was mis-classified and is posting
+	internal-transfer GL (Internal Debtor/Creditor/Sales/Purchase) it should
+	not — e.g. an external supplier whose bill_no collided with our Sales
+	Invoice naming series, or a flag copied via Duplicate/Amend.
+	"""
+	filters = frappe._dict(filters or {})
+	data = []
+
+	# (doctype, party_field, party_doctype, doc_flag_field, master_flag_field)
+	specs = [
+		("Sales Invoice", "customer", "Customer", "is_bns_internal_customer", "is_bns_internal_customer"),
+		("Delivery Note", "customer", "Customer", "is_bns_internal_customer", "is_bns_internal_customer"),
+		("Purchase Invoice", "supplier", "Supplier", "is_bns_internal_supplier", "is_bns_internal_supplier"),
+		("Purchase Receipt", "supplier", "Supplier", "is_bns_internal_supplier", "is_bns_internal_supplier"),
+	]
+
+	for dt, party_field, party_dt, doc_flag, master_flag in specs:
+		conds = [
+			"d.docstatus = 1",
+			f"(COALESCE(d.{doc_flag}, 0) = 1 OR d.status = 'BNS Internally Transferred')",
+			f"COALESCE(p.{master_flag}, 0) = 0",
+		]
+		vals = []
+		if filters.get("company"):
+			conds.append("d.company = %s")
+			vals.append(filters.get("company"))
+		if filters.get("from_date"):
+			conds.append("d.posting_date >= %s")
+			vals.append(filters.get("from_date"))
+		if filters.get("to_date"):
+			conds.append("d.posting_date <= %s")
+			vals.append(filters.get("to_date"))
+
+		rows = frappe.db.sql(
+			f"""
+			SELECT d.name, d.posting_date, d.grand_total, d.status,
+			       d.{party_field} AS party, COALESCE(d.{doc_flag}, 0) AS doc_flag
+			FROM `tab{dt}` d
+			JOIN `tab{party_dt}` p ON p.name = d.{party_field}
+			WHERE {" AND ".join(conds)}
+			""",
+			tuple(vals),
+			as_dict=True,
+		) or []
+
+		for r in rows:
+			data.append(_empty_mismatch_row(
+				posting_date=r.get("posting_date"),
+				document_type=dt,
+				document_name=r.get("name"),
+				grand_total=flt(r.get("grand_total") or 0),
+				missing_document=f"Internal flag on external {party_dt}",
+				mismatch_reason=(
+					f"{party_dt} {r.get('party')} is NOT flagged internal, but this {dt} "
+					f"is treated internal (doc flag={int(r.get('doc_flag') or 0)}, "
+					f"status='{r.get('status')}') — verify it is not an external party "
+					f"mis-classified as an internal transfer"
+				),
+				transfer_chain="External party treated as internal",
+			))
 
 	return data
 
