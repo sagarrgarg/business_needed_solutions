@@ -250,7 +250,8 @@ doc_events = {
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
-            "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments"
+            "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments",
+            "business_needed_solutions.business_needed_solutions.overrides.ineligible_itc_submission_control.restrict_ineligible_itc_submission"
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
@@ -289,6 +290,7 @@ doc_events = {
             "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_invoice_si_parity",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_stock_movement_captured",
+            "business_needed_solutions.business_needed_solutions.overrides.ineligible_itc_submission_control.restrict_ineligible_itc_submission",
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
