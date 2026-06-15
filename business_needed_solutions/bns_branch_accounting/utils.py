@@ -5993,6 +5993,7 @@ def refresh_pr_transfer_rate_after_repost(doc, method: Optional[str] = None) -> 
                 affected_prs.add(pr_name)
 
     # DN->SI->PR chain: once SI incoming_rate is synced from DN, propagate SI->PR transfer-rate.
+    affected_pis: Set[str] = set()
     for si_name in sorted(impacted_sis_from_dn):
         for pr_name in _get_submitted_prs_for_si(si_name):
             updated = _sync_pr_item_transfer_rate_from_si(si_name, pr_name=pr_name)
@@ -6001,10 +6002,25 @@ def refresh_pr_transfer_rate_after_repost(doc, method: Optional[str] = None) -> 
             total_mirrored += mirrored
             if updated or mirrored:
                 affected_prs.add(pr_name)
+        # DN->SI->PI chain: propagate SI->PI transfer-rate + valuation too, so a
+        # PI receiving stock directly (update_stock, no PR) tracks the finalised
+        # DN source cost. Without this, a DN repost leaves the PI's
+        # bns_transfer_rate at the value captured when the PI was created, and
+        # the difference strands in Stock-in-Transit (company-level inflation).
+        for pi_name in _get_submitted_pis_for_si(si_name):
+            updated = _sync_pi_item_transfer_rate_from_si(si_name, pi_name=pi_name)
+            mirrored = _mirror_pi_item_valuation_from_transfer_rate(pi_name)
+            total_updated += updated
+            total_mirrored += mirrored
+            if updated or mirrored:
+                affected_pis.add(pi_name)
 
     triggered_count = 0
     for pr_name in sorted(affected_prs):
         if _trigger_pr_repost_for_transfer_rate(pr_name, source_repost_name=doc.name):
+            triggered_count += 1
+    for pi_name in sorted(affected_pis):
+        if _trigger_pi_repost_for_transfer_rate(pi_name, source_repost_name=doc.name):
             triggered_count += 1
 
     if total_updated or total_mirrored or triggered_count:
