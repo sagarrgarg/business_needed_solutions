@@ -40,6 +40,12 @@ from business_needed_solutions.bns_branch_accounting.utils import (
 
 GL_TOLERANCE = 0.01
 
+# Hard safety cap on the per-doctype document SCAN (not the output). The
+# audit is scoped by the cutoff window; this only prevents a truly unbounded
+# scan when cutoff is None on a very large site. The user-facing `limit`
+# caps the returned (flagged) rows instead — see _audit_one_doctype.
+_SCAN_CAP = 1_000_000
+
 # If a repair batch is at or above this size, the request is enqueued as a
 # background job instead of running inline (avoids HTTP timeout, frees the
 # UI). Smaller batches run synchronously so the result popup is immediate.
@@ -296,7 +302,7 @@ def _audit_one_doctype(
         ) sle ON sle.voucher_no = p.name
         WHERE {where_sql}
         ORDER BY p.{posting_field} DESC, p.name DESC
-        LIMIT {int(limit)}
+        LIMIT {_SCAN_CAP}
     """
     params["doctype"] = doctype
 
@@ -346,7 +352,11 @@ def _audit_one_doctype(
             "status": status_label,
         })
 
-    return output
+    # `limit` caps the OUTPUT (flagged rows) — NOT the document scan. The scan
+    # is bounded only by the cutoff window (+ a large _SCAN_CAP safety), so
+    # every in-window document is examined and old issues are never silently
+    # hidden behind newer documents.
+    return output[: int(limit)] if limit else output
 
 
 def _resolve_expectations(

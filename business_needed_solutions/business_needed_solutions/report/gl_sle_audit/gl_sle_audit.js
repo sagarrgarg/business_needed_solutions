@@ -38,9 +38,10 @@ frappe.query_reports["GL SLE Audit"] = {
         },
         {
             fieldname: "limit",
-            label: __("Row Limit per Doctype"),
+            label: __("Max Flagged Rows per Doctype"),
             fieldtype: "Int",
             default: 50000,
+            description: __("Caps the number of flagged rows returned per doctype. The full document set within the Cutoff Date is always scanned — older documents are never hidden by this limit."),
         },
     ],
 
