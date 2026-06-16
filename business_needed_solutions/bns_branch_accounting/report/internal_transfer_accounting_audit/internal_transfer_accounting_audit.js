@@ -55,8 +55,50 @@ frappe.query_reports["Internal Transfer Accounting Audit"] = {
     report.page.add_inner_button(__("Repost GL"), function () {
       _triggerBulkRepost(report, "gl");
     }, __("Actions"));
+
+    report.page.add_inner_button(__("Fix Transfer Rate & Repost"), function () {
+      _triggerTransferRateFix(report);
+    }, __("Actions"));
   }
 };
+
+function _triggerTransferRateFix(report) {
+  var data = report.data || [];
+  if (!data.length) {
+    frappe.msgprint(__("No audit data available. Run the report first."));
+    return;
+  }
+
+  var documents = [];
+  for (var i = 0; i < data.length; i++) {
+    var row = data[i];
+    if (row.document_type && row.document_name && _hasTransferRateMissing(row)) {
+      documents.push({
+        voucher_type: row.document_type,
+        voucher_no: row.document_name
+      });
+    }
+  }
+
+  if (!documents.length) {
+    frappe.msgprint(__("No 'Transfer Rate Missing' rows found in current report data."));
+    return;
+  }
+
+  frappe.confirm(
+    __("This will backfill bns_transfer_rate from the source and repost (RIV + RAL) {0} document(s) as a background job. Continue?", [documents.length]),
+    function () {
+      frappe.xcall(
+        "business_needed_solutions.bns_branch_accounting.report.internal_transfer_accounting_audit.internal_transfer_accounting_audit.fix_transfer_rate_for_audit_documents",
+        { documents: documents }
+      ).then(function (r) {
+        if (r && r.message) {
+          frappe.msgprint(r.message);
+        }
+      });
+    }
+  );
+}
 
 function _triggerBulkRepost(report, repostType) {
   var data = report.data || [];
@@ -114,4 +156,8 @@ function _hasSleDeviation(row) {
 function _hasGlDeviation(row) {
   var dt = (row.deviation_type || "").toLowerCase();
   return dt === "gl mismatch" || dt === "gl missing" || dt === "both";
+}
+
+function _hasTransferRateMissing(row) {
+  return (row.deviation_type || "").toLowerCase() === "transfer rate missing";
 }
