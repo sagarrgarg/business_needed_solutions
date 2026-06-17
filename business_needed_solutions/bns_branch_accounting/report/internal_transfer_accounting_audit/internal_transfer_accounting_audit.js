@@ -155,7 +155,12 @@ function _hasSleDeviation(row) {
 
 function _hasGlDeviation(row) {
   var dt = (row.deviation_type || "").toLowerCase();
-  return dt === "gl mismatch" || dt === "gl missing" || dt === "both";
+  return (
+    dt === "gl mismatch" ||
+    dt === "gl missing" ||
+    dt === "both" ||
+    dt === "asset transfer unposted"
+  );
 }
 
 function _hasTransferRateMissing(row) {

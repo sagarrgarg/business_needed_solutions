@@ -981,6 +981,41 @@ def _build_date_conditions(filters, alias="doc"):
 # Per-doctype audit runners
 # ---------------------------------------------------------------------------
 
+_ASSET_TRANSFER_UNPOSTED_DETAILS = (
+	"Internal transfer carries fixed-asset item(s) but no Asset-in-Transit GL was "
+	"posted -- the asset-transfer legs are missing (typically pre-feature data, or "
+	"asset_in_transit_account / the asset link was not set). Repost GL to post the "
+	"NBV-based asset transfer; ensure asset_in_transit_account is configured and the "
+	"row's asset link (SI: asset / DN-PR-PI: bns_transferred_asset) is populated."
+)
+
+
+def _check_asset_transfer_unposted(doc):
+	"""Flag an internal doc that has fixed-asset rows but posted no Asset-in-Transit
+	GL -- i.e. its asset-transfer legs never posted (old data). Returns a detail
+	string or None.
+	"""
+	transit = (
+		frappe.db.get_single_value("BNS Branch Accounting Settings", "asset_in_transit_account") or ""
+	).strip()
+	if not transit:
+		return None
+	has_fixed_asset = any(
+		cint(it.get("is_fixed_asset"))
+		or (it.get("item_code") and cint(frappe.db.get_value("Item", it.get("item_code"), "is_fixed_asset")))
+		for it in (doc.get("items") or [])
+	)
+	if not has_fixed_asset:
+		return None
+	posted = frappe.db.exists(
+		"GL Entry",
+		{"voucher_type": doc.doctype, "voucher_no": doc.name, "account": transit, "is_cancelled": 0},
+	)
+	if posted:
+		return None
+	return _ASSET_TRANSFER_UNPOSTED_DETAILS
+
+
 def _audit_delivery_notes(filters, settings):
 	"""Audit GL entries for BNS internal Delivery Notes."""
 	conditions, values = _build_date_conditions(filters, alias="dn")
@@ -1007,6 +1042,9 @@ def _audit_delivery_notes(filters, settings):
 		doc = frappe.get_doc("Delivery Note", row.name)
 		if _is_zero_amount_document(doc):
 			continue
+		_asset_note = _check_asset_transfer_unposted(doc)
+		if _asset_note:
+			results.append(_build_row(row, scope, "Asset Transfer Unposted", details=_asset_note))
 		expected = _expected_gl_for_dn(scope, settings, doc)
 		gl_entries = _fetch_gl_entries("Delivery Note", row.name)
 
@@ -1056,6 +1094,9 @@ def _audit_sales_invoices(filters, settings):
 		doc = frappe.get_doc("Sales Invoice", row.name)
 		if _is_zero_amount_document(doc):
 			continue
+		_asset_note = _check_asset_transfer_unposted(doc)
+		if _asset_note:
+			results.append(_build_row(row, scope, "Asset Transfer Unposted", details=_asset_note))
 		if scope == "different_gstin_return":
 			expected = _expected_gl_for_si_return(scope, settings, doc)
 		else:
@@ -1133,6 +1174,9 @@ def _audit_purchase_receipts(filters, settings):
 		doc = frappe.get_doc("Purchase Receipt", row.name)
 		if _is_zero_amount_document(doc):
 			continue
+		_asset_note = _check_asset_transfer_unposted(doc)
+		if _asset_note:
+			results.append(_build_row(row, scope, "Asset Transfer Unposted", details=_asset_note))
 		expected = _expected_gl_for_pr(scope, settings, doc)
 		gl_entries = _fetch_gl_entries("Purchase Receipt", row.name)
 
@@ -1193,6 +1237,9 @@ def _audit_purchase_invoices(filters, settings):
 		doc = frappe.get_doc("Purchase Invoice", row.name)
 		if _is_zero_amount_document(doc):
 			continue
+		_asset_note = _check_asset_transfer_unposted(doc)
+		if _asset_note:
+			results.append(_build_row(row, scope, "Asset Transfer Unposted", details=_asset_note))
 		if scope == "si_linked_return":
 			expected = _expected_gl_for_pi_return(scope, settings, doc)
 		else:

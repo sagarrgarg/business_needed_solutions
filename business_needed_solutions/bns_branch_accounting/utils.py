@@ -2967,20 +2967,24 @@ def _apply_bns_internal_gl_rewrite_patch() -> None:
         def patched_stock_get_gl_entries(self, warehouse_account=None, default_expense_account=None, default_cost_center=None):
             gl_entries = original_stock_get_gl_entries(self, warehouse_account, default_expense_account, default_cost_center)
             if getattr(self, "doctype", None) == "Delivery Note":
-                return _rewrite_bns_internal_dn_gl_entries(self, gl_entries)
+                gl_entries = _rewrite_bns_internal_dn_gl_entries(self, gl_entries)
+                return append_asset_transfer_gl_entries(self, gl_entries)
             return gl_entries
 
         def patched_pr_get_gl_entries(self, warehouse_account=None, via_landed_cost_voucher=False):
             gl_entries = original_pr_get_gl_entries(self, warehouse_account, via_landed_cost_voucher)
-            return _rewrite_bns_internal_pr_gl_entries(self, gl_entries)
+            gl_entries = _rewrite_bns_internal_pr_gl_entries(self, gl_entries)
+            return append_asset_transfer_gl_entries(self, gl_entries)
 
         def patched_pi_get_gl_entries(self, warehouse_account=None):
             gl_entries = original_pi_get_gl_entries(self, warehouse_account)
-            return _rewrite_bns_internal_pi_gl_entries(self, gl_entries)
+            gl_entries = _rewrite_bns_internal_pi_gl_entries(self, gl_entries)
+            return append_asset_transfer_gl_entries(self, gl_entries)
 
         def patched_si_get_gl_entries(self, warehouse_account=None):
             gl_entries = original_si_get_gl_entries(self, warehouse_account)
-            return _rewrite_bns_internal_si_gl_entries(self, gl_entries)
+            gl_entries = _rewrite_bns_internal_si_gl_entries(self, gl_entries)
+            return append_asset_transfer_gl_entries(self, gl_entries)
 
         patched_stock_get_gl_entries._bns_internal_gl_rewrite_patched = True
         patched_pr_get_gl_entries._bns_internal_gl_rewrite_patched = True
@@ -3944,11 +3948,68 @@ def _suppress_repost_error_emails() -> None:
         logger.error("Failed to suppress repost error emails: %s", str(e))
 
 
+_BNS_ASSET_INTERNAL_PATCHED = False
+
+
+def _apply_bns_asset_internal_patches() -> None:
+    """Skip ERPNext's asset auto-creation and disposal for BNS internal transfers.
+
+    - BuyingController.process_fixed_asset: suppress auto_make_assets so a
+      receiving internal PR/PI does NOT mint a duplicate Asset.
+    - SalesInvoice.process_asset_depreciation: suppress the "Sold" status +
+      disposal_date + sale-depreciation so an internal SI keeps the same asset.
+
+    Gated by is_bns_internal_transfer (NOT ERPNext's is_internal_transfer), so
+    only BNS internal branch transfers are affected. The transfer GL is posted
+    by the get_gl_entries rewrite + append_asset_transfer_gl_entries; the SI GL
+    rewrite already replaces ERPNext's disposal GL with the branch pattern.
+    """
+    global _BNS_ASSET_INTERNAL_PATCHED
+    if _BNS_ASSET_INTERNAL_PATCHED:
+        return
+    try:
+        from erpnext.accounts.doctype.sales_invoice.sales_invoice import SalesInvoice
+        from erpnext.controllers.buying_controller import BuyingController
+
+        original_process_fixed_asset = BuyingController.process_fixed_asset
+        original_process_asset_depreciation = SalesInvoice.process_asset_depreciation
+
+        if getattr(original_process_fixed_asset, "_bns_asset_internal_patched", False):
+            _BNS_ASSET_INTERNAL_PATCHED = True
+            return
+
+        def patched_process_fixed_asset(self):
+            try:
+                if is_bns_internal_transfer(self):
+                    return
+            except Exception:
+                logger.exception("BNS asset: process_fixed_asset guard failed for %s", getattr(self, "name", "?"))
+            return original_process_fixed_asset(self)
+
+        def patched_process_asset_depreciation(self):
+            try:
+                if is_bns_internal_transfer(self):
+                    return
+            except Exception:
+                logger.exception("BNS asset: process_asset_depreciation guard failed for %s", getattr(self, "name", "?"))
+            return original_process_asset_depreciation(self)
+
+        patched_process_fixed_asset._bns_asset_internal_patched = True
+        patched_process_asset_depreciation._bns_asset_internal_patched = True
+        BuyingController.process_fixed_asset = patched_process_fixed_asset
+        SalesInvoice.process_asset_depreciation = patched_process_asset_depreciation
+        _BNS_ASSET_INTERNAL_PATCHED = True
+        logger.info("Applied BNS asset internal-transfer patches (no auto-asset, no disposal)")
+    except Exception as e:
+        logger.error("Failed to apply BNS asset internal-transfer patches: %s", str(e))
+
+
 # Best-effort eager patching on module import.
 _apply_bns_transfer_rate_stock_ledger_patch()
 _apply_bns_internal_gl_rewrite_patch()
 _apply_bns_repost_gl_failsafe_patch()
 _apply_bns_repost_accounting_ledger_patch()
+_apply_bns_asset_internal_patches()
 _suppress_repost_error_emails()
 
 
@@ -3961,6 +4022,7 @@ def apply_bns_runtime_patches() -> None:
     _apply_bns_internal_gl_rewrite_patch()
     _apply_bns_repost_gl_failsafe_patch()
     _apply_bns_repost_accounting_ledger_patch()
+    _apply_bns_asset_internal_patches()
     _suppress_repost_error_emails()
 
 
@@ -4044,6 +4106,277 @@ def _asset_net_book_value_on_date(asset_name, as_of_date, finance_book=None) -> 
         logger.exception("BNS: NBV-on-date fallback for asset %s as of %s", asset_name, as_of_date)
         return flt(asset.get("gross_purchase_amount") or 0) - flt(
             asset.get("opening_accumulated_depreciation") or 0
+        )
+
+
+# ---------------------------------------------------------------------------
+# Internal asset transfer — GL legs (asset analogue of the stock-in-transit move)
+# ---------------------------------------------------------------------------
+
+def _bns_asset_transfer_row_field(doctype: str) -> Optional[str]:
+    """Field on the item row that links the existing asset being transferred.
+
+    Sales Invoice uses ERPNext's native mandatory `asset`; DN/PR/PI use the BNS
+    custom `bns_transferred_asset` (so ERPNext's purchase asset linkage / cancel
+    guard never engages).
+    """
+    if doctype == "Sales Invoice":
+        return "asset"
+    if doctype in ("Delivery Note", "Purchase Receipt", "Purchase Invoice"):
+        return "bns_transferred_asset"
+    return None
+
+
+def _asset_category_account(asset_name: str, company: str, fieldname: str) -> Optional[str]:
+    """Resolve a company-scoped Asset Category Account (fixed_asset_account /
+    accumulated_depreciation_account) for the asset's category."""
+    if not asset_name or not company:
+        return None
+    category = frappe.db.get_value("Asset", asset_name, "asset_category")
+    if not category:
+        return None
+    return frappe.db.get_value(
+        "Asset Category Account",
+        {"parent": category, "company_name": company},
+        fieldname,
+    )
+
+
+def _bns_asset_transfer_rows(doc) -> List[Dict[str, Any]]:
+    """Return fixed-asset item rows of an internal transfer with their linked
+    asset and value snapshot (gross / accumulated depreciation / NBV) as of the
+    document posting date.
+    """
+    rows: List[Dict[str, Any]] = []
+    field = _bns_asset_transfer_row_field(doc.doctype)
+    if not field:
+        return rows
+    as_of = doc.get("posting_date")
+    for item in (doc.get("items") or []):
+        code = item.get("item_code")
+        is_fa = cint(item.get("is_fixed_asset")) or (
+            code and cint(frappe.db.get_value("Item", code, "is_fixed_asset"))
+        )
+        if not is_fa:
+            continue
+        asset_name = (item.get(field) or "").strip()
+        if not asset_name or not frappe.db.exists("Asset", asset_name):
+            continue
+        gross = flt(frappe.db.get_value("Asset", asset_name, "gross_purchase_amount") or 0)
+        nbv = _asset_net_book_value_on_date(asset_name, as_of)
+        accum = flt(gross - nbv)
+        if accum < 0:
+            accum = 0.0
+        rows.append({"item": item, "asset": asset_name, "gross": gross, "nbv": nbv, "accum": accum})
+    return rows
+
+
+def _build_asset_transfer_legs(doc, asset_rows, transit_account, template):
+    """Build the 3-leg asset movement per asset row (self-balanced):
+
+    Sender (DN/SI):  Cr Fixed Asset (gross) | Dr Accumulated Depreciation (accum) | Dr Asset-in-Transit (NBV)
+    Receiver (PR/PI): Dr Fixed Asset (gross) | Cr Accumulated Depreciation (accum) | Cr Asset-in-Transit (NBV)
+
+    is_return flips the direction. The Internal Debtor/Sales/Purchase/Creditor
+    billing pair is already posted by the stock rewrite on the transfer amount,
+    so it is NOT duplicated here.
+    """
+    legs = []
+    is_sender_doc = doc.doctype in ("Delivery Note", "Sales Invoice")
+    sender = is_sender_doc ^ bool(cint(doc.get("is_return")))
+    for ar in asset_rows:
+        gross, accum, nbv = flt(ar["gross"]), flt(ar["accum"]), flt(ar["nbv"])
+        if gross <= 0:
+            continue
+        fa_account = _asset_category_account(ar["asset"], doc.company, "fixed_asset_account")
+        accum_account = _asset_category_account(ar["asset"], doc.company, "accumulated_depreciation_account")
+        if not fa_account:
+            logger.warning("BNS asset transfer: no fixed_asset_account for asset %s (%s)", ar["asset"], doc.name)
+            continue
+        if accum > 0 and not accum_account:
+            logger.warning("BNS asset transfer: no accumulated_depreciation_account for asset %s (%s)", ar["asset"], doc.name)
+            continue
+        if sender:
+            legs.append(_make_bns_gl_entry(doc, fa_account, credit=gross, template=template))
+            if accum > 0:
+                legs.append(_make_bns_gl_entry(doc, accum_account, debit=accum, template=template))
+            legs.append(_make_bns_gl_entry(doc, transit_account, debit=nbv, template=template))
+        else:
+            legs.append(_make_bns_gl_entry(doc, fa_account, debit=gross, template=template))
+            if accum > 0:
+                legs.append(_make_bns_gl_entry(doc, accum_account, credit=accum, template=template))
+            legs.append(_make_bns_gl_entry(doc, transit_account, credit=nbv, template=template))
+    return legs
+
+
+def append_asset_transfer_gl_entries(doc, gl_entries):
+    """Append BNS internal asset-transfer GL legs for fixed-asset rows.
+
+    Posted through the get_gl_entries patch so they reverse with the rest on
+    cancel. No-op unless the doc is a BNS internal transfer, after the accounting
+    rewrite cutoff, and carries linked fixed-asset rows. Each asset row's legs
+    are internally balanced, so the overall GL stays balanced.
+    """
+    try:
+        if doc.doctype not in ("Delivery Note", "Sales Invoice", "Purchase Receipt", "Purchase Invoice"):
+            return gl_entries
+        if not is_bns_internal_transfer(doc):
+            return gl_entries
+        if not is_after_accounting_rewrite_cutoff(doc.get("posting_date")):
+            return gl_entries
+        asset_rows = _bns_asset_transfer_rows(doc)
+        if not asset_rows:
+            return gl_entries
+        transit_account = (
+            frappe.db.get_single_value("BNS Branch Accounting Settings", "asset_in_transit_account") or ""
+        ).strip()
+        if not transit_account:
+            logger.warning("BNS asset transfer: asset_in_transit_account not set; skipping %s", doc.name)
+            return gl_entries
+        template = (gl_entries[0] if gl_entries else {}) or {}
+        legs = _build_asset_transfer_legs(doc, asset_rows, transit_account, template)
+        if legs:
+            gl_entries = list(gl_entries or []) + legs
+    except Exception:
+        logger.exception("BNS: asset transfer GL append failed for %s", getattr(doc, "name", "?"))
+    return gl_entries
+
+
+def bns_apply_asset_transfer(doc, method: Optional[str] = None) -> None:
+    """On submit of a BNS internal RECEIVER (PR/PI), move the linked asset's
+    cost_center to the receiving branch so future depreciation posts there.
+    The prior cost_center is stored on the asset for an exact revert on cancel.
+
+    The same asset record is kept throughout (no new asset, no disposal) -- only
+    the branch dimension changes. The asset is NOT moved by the sender (DN/SI);
+    the value sits in Asset-in-Transit until the receiver posts.
+    """
+    if doc.doctype not in ("Purchase Receipt", "Purchase Invoice"):
+        return
+    if not is_bns_internal_transfer(doc):
+        return
+    if not is_after_accounting_rewrite_cutoff(doc.get("posting_date")):
+        return
+    if not frappe.get_meta("Asset").has_field("bns_pre_transfer_cost_center"):
+        return
+    for ar in _bns_asset_transfer_rows(doc):
+        asset_name = ar["asset"]
+        new_cc = doc.get("cost_center") or (ar["item"].get("cost_center") or "")
+        if not new_cc:
+            continue
+        cur_cc = frappe.db.get_value("Asset", asset_name, "cost_center")
+        if cur_cc == new_cc:
+            continue
+        frappe.db.set_value(
+            "Asset",
+            asset_name,
+            {"bns_pre_transfer_cost_center": cur_cc, "cost_center": new_cc},
+            update_modified=False,
+        )
+        logger.info(
+            "BNS asset transfer: %s cost_center %s -> %s via %s",
+            asset_name, cur_cc, new_cc, doc.name,
+        )
+
+
+def bns_revert_asset_transfer(doc, method: Optional[str] = None) -> None:
+    """On cancel of a BNS internal receiver, restore the asset's prior cost_center."""
+    if doc.doctype not in ("Purchase Receipt", "Purchase Invoice"):
+        return
+    if not frappe.get_meta("Asset").has_field("bns_pre_transfer_cost_center"):
+        return
+    for ar in _bns_asset_transfer_rows(doc):
+        asset_name = ar["asset"]
+        prev_cc = frappe.db.get_value("Asset", asset_name, "bns_pre_transfer_cost_center")
+        if prev_cc:
+            frappe.db.set_value(
+                "Asset",
+                asset_name,
+                {"cost_center": prev_cc, "bns_pre_transfer_cost_center": None},
+                update_modified=False,
+            )
+            logger.info(
+                "BNS asset transfer: reverted %s cost_center -> %s on cancel of %s",
+                asset_name, prev_cc, doc.name,
+            )
+
+
+def _bns_repost_voucher_gl(voucher_type: str, voucher_no: str) -> None:
+    """Repost a voucher's GL via Repost Accounting Ledger so the BNS-patched
+    get_gl_entries (incl. append_asset_transfer_gl_entries) re-runs with the
+    current NBV."""
+    doc = frappe.get_doc(voucher_type, voucher_no)
+    if doc.docstatus != 1:
+        return
+    _apply_bns_internal_gl_rewrite_patch()
+    ral = frappe.new_doc("Repost Accounting Ledger")
+    ral.company = doc.company
+    ral.delete_cancelled_entries = 0
+    ral.append("vouchers", {"voucher_type": voucher_type, "voucher_no": voucher_no})
+    ral.flags.ignore_permissions = True
+    ral.save()
+    ral.submit()
+
+
+def _bns_internal_transfer_docs_for_asset(asset_name: str) -> List[Tuple[str, str]]:
+    """Submitted BNS transfer documents that reference this asset (SI via native
+    `asset`; DN/PR/PI via bns_transferred_asset)."""
+    out: List[Tuple[str, str]] = []
+    if not asset_name:
+        return out
+    for dt, field in (
+        ("Sales Invoice", "asset"),
+        ("Delivery Note", "bns_transferred_asset"),
+        ("Purchase Receipt", "bns_transferred_asset"),
+        ("Purchase Invoice", "bns_transferred_asset"),
+    ):
+        child = dt + " Item"
+        try:
+            if not frappe.get_meta(child).has_field(field):
+                continue
+        except Exception:
+            continue
+        parents = frappe.get_all(child, filters={field: asset_name}, pluck="parent")
+        for parent in set(parents):
+            if frappe.db.get_value(dt, parent, "docstatus") == 1:
+                out.append((dt, parent))
+    return out
+
+
+def _bns_repost_transfers_for_asset(asset_name: str) -> None:
+    """Repost all submitted BNS internal transfers of an asset (background job)."""
+    for voucher_type, voucher_no in _bns_internal_transfer_docs_for_asset(asset_name):
+        try:
+            _bns_repost_voucher_gl(voucher_type, voucher_no)
+            frappe.db.commit()
+        except Exception:
+            frappe.db.rollback()
+            logger.exception("BNS asset NBV repost failed for %s %s", voucher_type, voucher_no)
+
+
+def bns_repost_asset_transfers_on_depreciation(doc, method: Optional[str] = None) -> None:
+    """When a depreciation Journal Entry (incl. back-dated) changes an asset's
+    NBV, repost any BNS internal transfers of that asset so their NBV-based GL
+    stays correct. ERPNext keeps value_after_depreciation as a date-blind running
+    balance with no asset-repost analog, so BNS reposts the dependent GL itself.
+    """
+    if getattr(doc, "doctype", None) != "Journal Entry":
+        return
+    if (doc.get("voucher_type") or "") != "Depreciation Entry":
+        return
+    asset_names = {
+        (acc.get("reference_name") or "").strip()
+        for acc in (doc.get("accounts") or [])
+        if (acc.get("reference_type") or "") == "Asset" and (acc.get("reference_name") or "").strip()
+    }
+    for asset_name in asset_names:
+        if not _bns_internal_transfer_docs_for_asset(asset_name):
+            continue
+        frappe.enqueue(
+            "business_needed_solutions.bns_branch_accounting.utils._bns_repost_transfers_for_asset",
+            queue="long",
+            timeout=1800,
+            asset_name=asset_name,
         )
 
 

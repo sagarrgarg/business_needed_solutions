@@ -2976,6 +2976,21 @@
  },
  {
   "doctype": "Custom Field",
+  "dt": "Asset",
+  "fieldname": "bns_pre_transfer_cost_center",
+  "fieldtype": "Link",
+  "options": "Cost Center",
+  "insert_after": "cost_center",
+  "label": "BNS Pre-Transfer Cost Center",
+  "module": "BNS Branch Accounting",
+  "name": "Asset-bns_pre_transfer_cost_center",
+  "no_copy": 1,
+  "read_only": 1,
+  "hidden": 1,
+  "description": "Internal use: the cost_center this asset held before a BNS internal branch transfer moved it, so cancelling the receiving PR/PI restores it exactly."
+ },
+ {
+  "doctype": "Custom Field",
   "dt": "Purchase Receipt",
   "fieldname": "bns_supplier_invoice_attachment",
   "fieldtype": "Attach",

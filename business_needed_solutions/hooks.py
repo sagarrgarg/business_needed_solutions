@@ -255,10 +255,14 @@ doc_events = {
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
-            "business_needed_solutions.bns_branch_accounting.utils.update_purchase_receipt_status_for_bns_internal"
+            "business_needed_solutions.bns_branch_accounting.utils.update_purchase_receipt_status_for_bns_internal",
+            "business_needed_solutions.bns_branch_accounting.utils.bns_apply_asset_transfer"
         ],
         "before_cancel": "business_needed_solutions.bns_branch_accounting.utils.ignore_parent_cancellation_links_for_bns_internal",
-        "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.unlink_references_on_purchase_cancel"
+        "on_cancel": [
+            "business_needed_solutions.bns_branch_accounting.utils.unlink_references_on_purchase_cancel",
+            "business_needed_solutions.bns_branch_accounting.utils.bns_revert_asset_transfer"
+        ]
     },
     "Stock Reconciliation": {
         "before_submit": [
@@ -294,7 +298,8 @@ doc_events = {
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
-            "business_needed_solutions.bns_branch_accounting.utils.update_purchase_invoice_status_for_bns_internal"
+            "business_needed_solutions.bns_branch_accounting.utils.update_purchase_invoice_status_for_bns_internal",
+            "business_needed_solutions.bns_branch_accounting.utils.bns_apply_asset_transfer"
         ],
         "validate": [
             "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference",
@@ -303,7 +308,10 @@ doc_events = {
             "business_needed_solutions.business_needed_solutions.overrides.auto_paid_supplier.auto_mark_paid"
         ],
         "before_cancel": "business_needed_solutions.bns_branch_accounting.utils.ignore_parent_cancellation_links_for_bns_internal",
-        "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.unlink_references_on_purchase_cancel"
+        "on_cancel": [
+            "business_needed_solutions.bns_branch_accounting.utils.unlink_references_on_purchase_cancel",
+            "business_needed_solutions.bns_branch_accounting.utils.bns_revert_asset_transfer"
+        ]
     },
     "Repost Item Valuation": {
         "on_change": [
@@ -313,7 +321,11 @@ doc_events = {
         ]
     },
     "Journal Entry": {
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
+        "on_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
+            "business_needed_solutions.bns_branch_accounting.utils.bns_repost_asset_transfers_on_depreciation"
+        ],
+        "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.bns_repost_asset_transfers_on_depreciation"
     },
     "Payment Entry": {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
