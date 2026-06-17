@@ -563,16 +563,11 @@ def _missing_only_stock(missing, stock_accounts):
 	return all(acc in stock_accounts for acc, _side in missing)
 
 
-_ZERO_VALUATION_DETAILS = (
-	"Stock-side GL is absent because the item valuation rate is 0 "
-	"(stock_value_difference = 0). This is a genuine item-valuation gap, not a "
-	"missing internal-transfer GL leg -- set the item's valuation / incoming cost "
-	"and repost. Reposting alone will not create stock GL while the value is 0."
-)
-
-
 def _finalize_gl_deviation_row(doc_row, scope, settings, doc, expected, missing, unexpected, sle_issue=None):
-	"""Build a GL Mismatch row, downgrading stock-only gaps at zero valuation."""
+	"""Build a GL Mismatch row. Returns None for the stock-only zero-valuation
+	case: the absent stock GL is correct given a 0 item valuation, so it is not
+	an internal-transfer deviation and is suppressed from the audit.
+	"""
 	stock_accounts = _stock_side_accounts(settings, doc)
 	if (
 		missing
@@ -580,11 +575,9 @@ def _finalize_gl_deviation_row(doc_row, scope, settings, doc, expected, missing,
 		and _missing_only_stock(missing, stock_accounts)
 		and _is_zero_stock_value(doc.doctype, doc.name)
 	):
-		return _build_row(
-			doc_row, scope, "Zero Stock Valuation",
-			details=_ZERO_VALUATION_DETAILS,
-			sle_issue=sle_issue,
-		)
+		if sle_issue:
+			return _build_row(doc_row, scope, "SLE Mismatch", sle_issue=sle_issue)
+		return None
 	return _build_row(
 		doc_row, scope, "GL Mismatch",
 		expected_accounts=expected,
@@ -595,7 +588,9 @@ def _finalize_gl_deviation_row(doc_row, scope, settings, doc, expected, missing,
 
 
 def _finalize_gl_missing_row(doc_row, scope, settings, doc, expected, default_details):
-	"""Build a GL Missing row, downgrading the stock-only zero-valuation case."""
+	"""Build a GL Missing row. Returns None for the stock-only zero-valuation
+	case (no stock GL is expected when the item valuation is 0).
+	"""
 	stock_accounts = _stock_side_accounts(settings, doc)
 	expected_accounts = {acc for acc, _side in expected}
 	if (
@@ -603,10 +598,7 @@ def _finalize_gl_missing_row(doc_row, scope, settings, doc, expected, default_de
 		and expected_accounts.issubset(stock_accounts)
 		and _is_zero_stock_value(doc.doctype, doc.name)
 	):
-		return _build_row(
-			doc_row, scope, "Zero Stock Valuation",
-			details=_ZERO_VALUATION_DETAILS,
-		)
+		return None
 	return _build_row(
 		doc_row, scope, "GL Missing",
 		expected_accounts=expected,
@@ -632,11 +624,11 @@ def _build_combined_gl_sle_row(
 		)
 	)
 	if zero_val_stock_gap:
-		return _build_row(
-			doc_row, scope, "Zero Stock Valuation",
-			details=_ZERO_VALUATION_DETAILS,
-			sle_issue=sle_deviation,
-		)
+		# Absent stock GL is correct at 0 valuation -- suppress unless there is an
+		# independent SLE issue worth surfacing.
+		if sle_deviation:
+			return _build_row(doc_row, scope, "SLE Mismatch", sle_issue=sle_deviation)
+		return None
 
 	gl_dev = "GL Missing" if gl_missing else ("GL Mismatch" if (missing_set or unexpected_set) else None)
 	deviation_type = "Both" if (gl_dev and sle_deviation) else (gl_dev or "SLE Mismatch")
@@ -655,30 +647,48 @@ def _build_combined_gl_sle_row(
 # ---------------------------------------------------------------------------
 
 _TRANSFER_RATE_MISSING_DETAILS = (
-	"Receiving document undervalues stock: bns_transfer_rate is 0 while the source "
-	"(linked DN/SI) carries a positive incoming_rate. Stock-in-Transit / Internal COGS "
-	"will not net to zero until the rate is populated and the document is reposted. "
-	"Use the 'Repost GL' action -- it backfills the transfer rate from the source "
-	"before reposting."
+	"Receiver's bns_transfer_rate does not match the source cost: it is either 0 "
+	"(undervalued receive) or STALE -- the source (linked DN/SI) incoming_rate has "
+	"since changed, e.g. after a back-dated stock entry repost that did not cascade "
+	"to this receiver. Stock-in-Transit / Internal COGS will not net to zero until "
+	"the rate is re-synced and the document is reposted. Use 'Fix Transfer Rate & "
+	"Repost' -- it re-syncs the rate from the source, then RIV + RAL."
 )
+
+# Per-row rupee impact above which a rate drift is worth flagging (ignores float noise).
+_TRANSFER_RATE_IMPACT_THRESHOLD = 1.0
 
 
 def _transfer_rate_missing_issues(doc, rate_by_code):
-	"""Return per-row issue strings for stock items with a missing transfer rate."""
+	"""Return per-row issue strings for stock items whose bns_transfer_rate is
+	missing (0) OR stale (differs from the current source incoming_rate by more
+	than a rupee of valuation impact). The stale case catches receivers that did
+	not cascade after a back-dated stock entry / source repost.
+	"""
 	issues = []
 	for item in (doc.get("items") or []):
-		if flt(item.get("qty") or 0) <= 0:
-			continue
-		if flt(item.get("bns_transfer_rate") or 0) > 0:
+		qty = flt(item.get("qty") or 0)
+		if qty <= 0:
 			continue
 		code = item.get("item_code")
 		if not code or not cint(frappe.db.get_value("Item", code, "is_stock_item")):
 			continue
 		expected = flt(rate_by_code.get(code) or 0)
-		if expected > 0:
+		if expected <= 0:
+			continue
+		stored = flt(item.get("bns_transfer_rate") or 0)
+		stock_qty = flt(item.get("stock_qty") or qty)
+		impact = abs(expected - stored) * stock_qty
+		idx = cint(item.get("idx") or 0) or "?"
+		if stored <= 0:
 			issues.append(
-				f"#{cint(item.get('idx') or 0) or '?'} {code}: "
-				f"bns_transfer_rate=0, source incoming_rate={round(expected, 4)}"
+				f"#{idx} {code}: bns_transfer_rate=0, source={round(expected, 4)} "
+				f"(impact ~{round(impact, 2)})"
+			)
+		elif impact > _TRANSFER_RATE_IMPACT_THRESHOLD:
+			issues.append(
+				f"#{idx} {code}: bns_transfer_rate={round(stored, 4)} STALE vs "
+				f"source={round(expected, 4)} (impact ~{round(impact, 2)})"
 			)
 	return issues
 
@@ -962,7 +972,7 @@ def _audit_delivery_notes(filters, settings):
 		gl_entries = _fetch_gl_entries("Delivery Note", row.name)
 
 		if not gl_entries:
-			results.append(_finalize_gl_missing_row(
+			_append_if(results, _finalize_gl_missing_row(
 				row, scope, settings, doc, expected,
 				"No GL entries found for submitted internal DN.",
 			))
@@ -972,7 +982,7 @@ def _audit_delivery_notes(filters, settings):
 		missing, unexpected = _compare_gl(expected, actual, company=doc.company)
 
 		if missing or unexpected:
-			results.append(_finalize_gl_deviation_row(
+			_append_if(results, _finalize_gl_deviation_row(
 				row, scope, settings, doc, expected, missing, unexpected,
 			))
 
@@ -1014,7 +1024,7 @@ def _audit_sales_invoices(filters, settings):
 		gl_entries = _fetch_gl_entries("Sales Invoice", row.name)
 
 		if not gl_entries:
-			results.append(_finalize_gl_missing_row(
+			_append_if(results, _finalize_gl_missing_row(
 				row, scope, settings, doc, expected,
 				"No GL entries found for submitted internal SI.",
 			))
@@ -1024,7 +1034,7 @@ def _audit_sales_invoices(filters, settings):
 		missing, unexpected = _compare_gl(expected, actual, company=doc.company)
 
 		if missing or unexpected:
-			results.append(_finalize_gl_deviation_row(
+			_append_if(results, _finalize_gl_deviation_row(
 				row, scope, settings, doc, expected, missing, unexpected,
 			))
 
@@ -1087,7 +1097,7 @@ def _audit_purchase_receipts(filters, settings):
 		sle_deviation = "; ".join(sle_issues) if sle_issues else None
 
 		if gl_missing or gl_mismatch or sle_deviation:
-			results.append(_build_combined_gl_sle_row(
+			_append_if(results, _build_combined_gl_sle_row(
 				row, scope, settings, doc, expected, gl_missing,
 				missing_set, unexpected_set, sle_deviation,
 				"No GL entries found for submitted internal PR.",
@@ -1096,7 +1106,7 @@ def _audit_purchase_receipts(filters, settings):
 		tr_missing = _check_transfer_rate_missing_for_pr(doc)
 		if tr_missing:
 			results.append(_build_row(
-				row, scope, "Transfer Rate Missing",
+				row, scope, "Transfer Rate Mismatch",
 				sle_issue="; ".join(tr_missing),
 				details=_TRANSFER_RATE_MISSING_DETAILS,
 			))
@@ -1150,7 +1160,7 @@ def _audit_purchase_invoices(filters, settings):
 		sle_deviation = "; ".join(sle_issues) if sle_issues else None
 
 		if gl_missing or gl_mismatch or sle_deviation:
-			results.append(_build_combined_gl_sle_row(
+			_append_if(results, _build_combined_gl_sle_row(
 				row, scope, settings, doc, expected, gl_missing,
 				missing_set, unexpected_set, sle_deviation,
 				"No GL entries found for submitted internal PI.",
@@ -1159,7 +1169,7 @@ def _audit_purchase_invoices(filters, settings):
 		tr_missing = _check_transfer_rate_missing_for_pi(doc)
 		if tr_missing:
 			results.append(_build_row(
-				row, scope, "Transfer Rate Missing",
+				row, scope, "Transfer Rate Mismatch",
 				sle_issue="; ".join(tr_missing),
 				details=_TRANSFER_RATE_MISSING_DETAILS,
 			))
@@ -1421,6 +1431,12 @@ def _audit_cross_document_consistency(filters, settings):
 # Row builder
 # ---------------------------------------------------------------------------
 
+def _append_if(results, row):
+	"""Append a built row to results unless it is None (suppressed row)."""
+	if row:
+		results.append(row)
+
+
 def _format_account_set(account_set):
 	"""Format a set of (account, side) tuples into a readable string."""
 	if not account_set:
@@ -1680,7 +1696,7 @@ def repost_gl_for_audit_documents(documents):
 def fix_transfer_rate_for_audit_documents(documents):
 	"""
 	Backfill bns_transfer_rate from the source, then repost (RIV + RAL) for the
-	given receiver documents. Targets the audit's "Transfer Rate Missing" rows
+	given receiver documents. Targets the audit's "Transfer Rate Mismatch" rows
 	(internal PR/PI undervalued because the transfer rate was never populated).
 
 	Reuses the GL repost worker, which already runs

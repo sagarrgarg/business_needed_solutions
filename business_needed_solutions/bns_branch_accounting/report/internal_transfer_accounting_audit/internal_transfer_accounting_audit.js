@@ -81,7 +81,7 @@ function _triggerTransferRateFix(report) {
   }
 
   if (!documents.length) {
-    frappe.msgprint(__("No 'Transfer Rate Missing' rows found in current report data."));
+    frappe.msgprint(__("No 'Transfer Rate Mismatch' rows found in current report data."));
     return;
   }
 
@@ -159,5 +159,5 @@ function _hasGlDeviation(row) {
 }
 
 function _hasTransferRateMissing(row) {
-  return (row.deviation_type || "").toLowerCase() === "transfer rate missing";
+  return (row.deviation_type || "").toLowerCase() === "transfer rate mismatch";
 }
