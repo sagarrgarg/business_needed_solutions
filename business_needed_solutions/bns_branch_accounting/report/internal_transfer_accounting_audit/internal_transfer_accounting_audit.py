@@ -1623,25 +1623,104 @@ def _audit_internal_pair_balance(filters, settings):
 			_emit("Delivery Note", dn, "Purchase Receipt", pr.name, pr.posting_date, "dn_same_gstin",
 			      settings.get("internal_sales_non_gst"), settings.get("internal_purchase_non_gst"))
 
-	# SI -> PI (different GSTIN): PI references the Sales Invoice.
-	for pi in frappe.db.sql(
-		f"""SELECT name, bns_inter_company_reference AS si_ref, bill_no, posting_date
-		   FROM `tabPurchase Invoice`
-		   WHERE docstatus=1 AND is_bns_internal_supplier=1
-		     AND posting_date BETWEEN %s AND %s {company_cond}""",
+	# Different-GSTIN chains anchored at the internal Sales Invoice. Summing the
+	# internal-account legs across the WHOLE chain (SI + source DNs + PIs + PRs)
+	# reconciles every variant -- SI->PI, DN->SI->PI, SI->PR->PI,
+	# DN->SI->PR->PI -- regardless of which doc carries stock vs the invoice.
+	internal_accounts = [
+		a for a in (
+			debtor, creditor, transit,
+			settings.get("internal_sales_transfer"),
+			settings.get("internal_purchase_transfer"),
+		) if a
+	]
+	for si in frappe.db.sql(
+		f"""SELECT name, posting_date FROM `tabSales Invoice`
+		   WHERE docstatus=1 AND is_bns_internal_customer=1
+		     AND posting_date BETWEEN %s AND %s {company_cond}
+		     AND IFNULL(company_gstin,'') != '' AND IFNULL(billing_address_gstin,'') != ''
+		     AND company_gstin != billing_address_gstin""",
 		(date_from, date_to, *company_vals), as_dict=True,
 	):
-		si = (pi.si_ref or "").strip()
-		if not si or not frappe.db.exists("Sales Invoice", {"name": si, "docstatus": 1}):
-			si = (pi.bill_no or "").strip()
-			# bill_no may collide with a supplier's own number; only use it when it
-			# resolves to a genuinely internal Sales Invoice.
-			if not (si and frappe.db.get_value("Sales Invoice", si, "is_bns_internal_customer")):
-				continue
-		_emit("Sales Invoice", si, "Purchase Invoice", pi.name, pi.posting_date, "si_linked",
-		      settings.get("internal_sales_transfer"), settings.get("internal_purchase_transfer"))
+		chain = _chain_vouchers_for_si(si.name)
+		# Only reconcile complete chains (a receiving PI exists); an SI/DN with no
+		# PI yet is open/in-transit and handled by the No-Counter-Document check.
+		if not any(vt == "Purchase Invoice" for vt, _vn in chain):
+			continue
+		sums = _sum_internal_accounts([vn for _vt, vn in chain], internal_accounts)
+		pairs = []
+		dr_debtor = sums.get(debtor, (0.0, 0.0))[0]
+		cr_creditor = sums.get(creditor, (0.0, 0.0))[1]
+		if abs(dr_debtor - cr_creditor) > _INTERNAL_PAIR_TOLERANCE:
+			pairs.append(f"Internal Debtor {round(dr_debtor, 2)} != Internal Creditor {round(cr_creditor, 2)} (Δ {round(dr_debtor - cr_creditor, 2)})")
+		cr_sales = sums.get(settings.get("internal_sales_transfer"), (0.0, 0.0))[1]
+		dr_purch = sums.get(settings.get("internal_purchase_transfer"), (0.0, 0.0))[0]
+		if abs(cr_sales - dr_purch) > _INTERNAL_PAIR_TOLERANCE:
+			pairs.append(f"Internal Sales {round(cr_sales, 2)} != Internal Purchase {round(dr_purch, 2)} (Δ {round(cr_sales - dr_purch, 2)})")
+		t_dr, t_cr = sums.get(transit, (0.0, 0.0))
+		if abs(t_dr - t_cr) > _INTERNAL_PAIR_TOLERANCE:
+			pairs.append(f"Stock-in-Transit Dr {round(t_dr, 2)} != Cr {round(t_cr, 2)} (Δ {round(t_dr - t_cr, 2)})")
+		if pairs:
+			results.append(_build_row(
+				{"name": si.name, "posting_date": si.posting_date},
+				"si_linked", "Internal Pair Imbalance",
+				details=f"Chain [{', '.join(sorted(vn for _vt, vn in chain))}]: " + "; ".join(pairs),
+			))
 
 	return results
+
+
+def _chain_vouchers_for_si(si_name):
+	"""All vouchers in the different-GSTIN chain anchored at an internal SI:
+	the SI, its source Delivery Note(s) (DN->SI), its Purchase Invoice(s)
+	(PI.ref=SI), and its Purchase Receipt(s) (PR.ref=SI or via PI items)."""
+	vouchers = {("Sales Invoice", si_name)}
+	for dn in frappe.get_all("Sales Invoice Item", filters={"parent": si_name}, pluck="delivery_note"):
+		dn = (dn or "").strip()
+		if dn and frappe.db.get_value("Delivery Note", dn, "docstatus") == 1:
+			vouchers.add(("Delivery Note", dn))
+	pi_names = frappe.get_all(
+		"Purchase Invoice",
+		filters={"bns_inter_company_reference": si_name, "docstatus": 1},
+		pluck="name",
+	)
+	for pi in pi_names:
+		vouchers.add(("Purchase Invoice", pi))
+	for pr in frappe.get_all(
+		"Purchase Receipt",
+		filters={"bns_inter_company_reference": si_name, "docstatus": 1},
+		pluck="name",
+	):
+		vouchers.add(("Purchase Receipt", pr))
+	if pi_names:
+		for pr in frappe.get_all(
+			"Purchase Invoice Item",
+			filters={"parent": ("in", pi_names), "purchase_receipt": ("is", "set")},
+			pluck="purchase_receipt",
+		):
+			pr = (pr or "").strip()
+			if pr and frappe.db.get_value("Purchase Receipt", pr, "docstatus") == 1:
+				vouchers.add(("Purchase Receipt", pr))
+	return vouchers
+
+
+def _sum_internal_accounts(voucher_nos, accounts):
+	"""One-query sum of debit/credit per account across a set of vouchers.
+	Returns {account: (debit_total, credit_total)}.
+	"""
+	if not voucher_nos or not accounts:
+		return {}
+	v_ph = ", ".join(["%s"] * len(voucher_nos))
+	a_ph = ", ".join(["%s"] * len(accounts))
+	rows = frappe.db.sql(
+		f"""SELECT account, COALESCE(SUM(debit), 0) AS d, COALESCE(SUM(credit), 0) AS c
+		   FROM `tabGL Entry`
+		   WHERE voucher_no IN ({v_ph}) AND account IN ({a_ph}) AND is_cancelled = 0
+		   GROUP BY account""",
+		(*voucher_nos, *accounts),
+		as_dict=True,
+	)
+	return {r.account: (flt(r.d), flt(r.c)) for r in rows}
 
 
 def _format_account_set(account_set):
