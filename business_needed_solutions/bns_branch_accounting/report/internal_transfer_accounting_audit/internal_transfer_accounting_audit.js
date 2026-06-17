@@ -77,7 +77,8 @@ function _isFixable(row) {
     dt === "sle mismatch" ||
     dt === "transfer rate mismatch" ||
     dt === "incoming rate mismatch" ||
-    dt === "asset transfer unposted"
+    dt === "asset transfer unposted" ||
+    dt === "internal pair imbalance"
   );
 }
 
