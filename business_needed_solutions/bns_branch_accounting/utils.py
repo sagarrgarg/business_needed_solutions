@@ -201,39 +201,52 @@ def _duplicate_serial_and_batch_bundle(
             )
 
 
-def _get_bns_transfer_rate_for_pr_sle(sle) -> float:
+def _source_incoming_rate_for_pr_item(pr_item, is_dn_linked):
+    """Authoritative source rate for a PR item: the linked Delivery Note Item
+    incoming_rate (including a genuine 0). Returns None when no source item link
+    resolves, so the caller can tell "genuine zero" from "unresolved".
     """
-    Resolve bns_transfer_rate for a Purchase Receipt SLE row.
+    if not is_dn_linked:
+        return None
+    dn_item = (pr_item.get("delivery_note_item") or "").strip()
+    if dn_item and frappe.db.exists("Delivery Note Item", dn_item):
+        return flt(frappe.db.get_value("Delivery Note Item", dn_item, "incoming_rate") or 0)
+    return None
 
-    Scope:
-    - Purchase Receipt only
-    - Submitted PR only
-    - BNS internal supplier only
-    - DN-linked (same GSTIN DN->PR flow)
+
+def _get_bns_transfer_rate_for_pr_sle(sle):
+    """
+    Resolve the forced incoming_rate for a Purchase Receipt SLE row.
+
+    Returns a float (INCLUDING 0.0) to force that incoming_rate, or None to
+    leave ERPNext's own valuation untouched.
+
+    Scope: submitted, BNS internal supplier, DN/SI-linked, after the accounting
+    rewrite cutoff. A stored bns_transfer_rate of 0 is ambiguous (a genuine
+    zero-cost transfer vs an unresolved rate), so on 0 we consult the SOURCE
+    Delivery Note Item incoming_rate: if that source item resolves, its value
+    (0 or positive) is authoritative; only when no source resolves is the row
+    left alone.
     """
     if not sle or getattr(sle, "voucher_type", None) != "Purchase Receipt":
-        return 0.0
+        return None
     if not getattr(sle, "voucher_detail_no", None):
-        return 0.0
+        return None
     if flt(getattr(sle, "actual_qty", 0)) <= 0:
-        return 0.0
+        return None
 
     pri_meta = frappe.get_meta("Purchase Receipt Item")
     if not pri_meta.has_field("bns_transfer_rate"):
-        return 0.0
+        return None
 
     pr_item = frappe.db.get_value(
         "Purchase Receipt Item",
         sle.voucher_detail_no,
-        ["parent", "bns_transfer_rate"],
+        ["parent", "bns_transfer_rate", "delivery_note_item"],
         as_dict=True,
     )
     if not pr_item:
-        return 0.0
-
-    transfer_rate = flt(pr_item.get("bns_transfer_rate") or 0)
-    if transfer_rate <= 0:
-        return 0.0
+        return None
 
     pr = frappe.db.get_value(
         "Purchase Receipt",
@@ -242,10 +255,10 @@ def _get_bns_transfer_rate_for_pr_sle(sle) -> float:
         as_dict=True,
     )
     if not pr or pr.docstatus != 1:
-        return 0.0
+        return None
     source_ref = (pr.get("bns_inter_company_reference") or "").strip()
     if not source_ref:
-        return 0.0
+        return None
 
     source_posting_date = None
     for dt in ("Delivery Note", "Sales Invoice"):
@@ -254,49 +267,78 @@ def _get_bns_transfer_rate_for_pr_sle(sle) -> float:
             source_posting_date = sd
             break
     if not is_after_accounting_rewrite_cutoff(source_posting_date or pr.get("posting_date")):
-        return 0.0
+        return None
 
     is_dn_linked = bool(pr.get("is_bns_internal_supplier") and frappe.db.exists("Delivery Note", source_ref))
     is_si_linked = frappe.db.exists("Sales Invoice", source_ref)
     if not (is_dn_linked or is_si_linked):
-        return 0.0
+        return None
 
-    return transfer_rate
+    transfer_rate = flt(pr_item.get("bns_transfer_rate") or 0)
+    if transfer_rate > 0:
+        return transfer_rate
+
+    # Stored rate is 0 -> consult the source DN item to disambiguate genuine
+    # zero-cost from unresolved.
+    source_rate = _source_incoming_rate_for_pr_item(pr_item, is_dn_linked)
+    if source_rate is not None:
+        return source_rate
+    return None
 
 
-def _get_bns_transfer_rate_for_pi_sle(sle) -> float:
+def _source_incoming_rate_for_pi_item(pi_item):
+    """Authoritative source rate for a PI item: the linked Sales Invoice Item
+    incoming_rate, chasing the Delivery Note behind it when the SI rate is 0.
+    Returns None when no source SI item link resolves (so the caller can tell a
+    genuine zero from an unresolved rate).
     """
-    Resolve bns_transfer_rate for a Purchase Invoice SLE row.
+    si_item = (pi_item.get("sales_invoice_item") or "").strip()
+    if not si_item:
+        return None
+    row = frappe.db.get_value(
+        "Sales Invoice Item", si_item,
+        ["incoming_rate", "dn_detail"], as_dict=True,
+    )
+    if not row:
+        return None
+    rate = flt(row.get("incoming_rate") or 0)
+    if rate > 0:
+        return rate
+    # SI rate is itself 0 -> chase the DN behind it for the authoritative cost.
+    dn_detail = (row.get("dn_detail") or "").strip()
+    if dn_detail and frappe.db.exists("Delivery Note Item", dn_detail):
+        return flt(frappe.db.get_value("Delivery Note Item", dn_detail, "incoming_rate") or 0)
+    return rate  # SI item resolves but values to 0 everywhere -> genuine 0
 
-    Scope:
-    - Purchase Invoice only
-    - Submitted PI only
-    - BNS internal supplier only
-    - SI-linked (different GSTIN SI->PI flow)
+
+def _get_bns_transfer_rate_for_pi_sle(sle):
+    """
+    Resolve the forced incoming_rate for a Purchase Invoice SLE row.
+
+    Returns a float (INCLUDING 0.0) to force that incoming_rate, or None to
+    leave ERPNext's own valuation untouched. On a stored rate of 0 we consult
+    the SOURCE Sales Invoice Item incoming_rate (chasing its DN) so a genuine
+    zero-cost transfer books at 0 while a truly unresolved row is left alone.
     """
     if not sle or getattr(sle, "voucher_type", None) != "Purchase Invoice":
-        return 0.0
+        return None
     if not getattr(sle, "voucher_detail_no", None):
-        return 0.0
+        return None
     if flt(getattr(sle, "actual_qty", 0)) <= 0:
-        return 0.0
+        return None
 
     pii_meta = frappe.get_meta("Purchase Invoice Item")
     if not pii_meta.has_field("bns_transfer_rate"):
-        return 0.0
+        return None
 
     pi_item = frappe.db.get_value(
         "Purchase Invoice Item",
         sle.voucher_detail_no,
-        ["parent", "bns_transfer_rate"],
+        ["parent", "bns_transfer_rate", "sales_invoice_item"],
         as_dict=True,
     )
     if not pi_item:
-        return 0.0
-
-    transfer_rate = flt(pi_item.get("bns_transfer_rate") or 0)
-    if transfer_rate <= 0:
-        return 0.0
+        return None
 
     pi = frappe.db.get_value(
         "Purchase Invoice",
@@ -311,24 +353,37 @@ def _get_bns_transfer_rate_for_pi_sle(sle) -> float:
         as_dict=True,
     )
     if not pi or pi.docstatus != 1:
-        return 0.0
+        return None
     if not cint(pi.get("update_stock")):
-        return 0.0
+        return None
     if not pi.get("is_bns_internal_supplier"):
-        return 0.0
+        return None
     source_ref = (pi.get("bns_inter_company_reference") or "").strip()
     if not source_ref or not frappe.db.exists("Sales Invoice", source_ref):
-        return 0.0
+        return None
     source_posting_date = frappe.db.get_value("Sales Invoice", source_ref, "posting_date")
     if not is_after_accounting_rewrite_cutoff(source_posting_date or pi.get("posting_date")):
-        return 0.0
+        return None
 
-    return transfer_rate
+    transfer_rate = flt(pi_item.get("bns_transfer_rate") or 0)
+    if transfer_rate > 0:
+        return transfer_rate
+
+    source_rate = _source_incoming_rate_for_pi_item(pi_item)
+    if source_rate is not None:
+        return source_rate
+    return None
 
 
-def _get_bns_transfer_rate_for_sle(sle) -> float:
-    """Resolve transfer-rate override for PR/PI SLE rows."""
-    return _get_bns_transfer_rate_for_pr_sle(sle) or _get_bns_transfer_rate_for_pi_sle(sle)
+def _get_bns_transfer_rate_for_sle(sle):
+    """Resolve the forced incoming_rate override for PR/PI SLE rows.
+
+    Returns a float (incl 0.0) to force, or None to leave ERPNext's valuation.
+    """
+    rate = _get_bns_transfer_rate_for_pr_sle(sle)
+    if rate is not None:
+        return rate
+    return _get_bns_transfer_rate_for_pi_sle(sle)
 
 
 def _apply_bns_transfer_rate_stock_ledger_patch() -> None:
@@ -349,14 +404,14 @@ def _apply_bns_transfer_rate_stock_ledger_patch() -> None:
         def patched_get_incoming_outgoing_rate_from_transaction(self, sle):
             rate = original_method(self, sle)
             transfer_rate = _get_bns_transfer_rate_for_sle(sle)
-            if transfer_rate > 0:
+            if transfer_rate is not None:
                 sle.incoming_rate = transfer_rate
                 return transfer_rate
             return rate
 
         def patched_process_sle(self, sle):
             transfer_rate = _get_bns_transfer_rate_for_sle(sle)
-            if transfer_rate > 0:
+            if transfer_rate is not None:
                 sle.incoming_rate = transfer_rate
                 sle.recalculate_rate = 1
             return original_process_sle(self, sle)
@@ -5732,18 +5787,24 @@ def _sync_pi_item_transfer_rate_from_si(si_name: str, pi_name: Optional[str] = N
 
         for item in pi_items:
             source_rate = None
+            # A direct Sales Invoice Item link gives the authoritative source
+            # rate INCLUDING a genuine 0 (zero-cost / sample transfer): that 0
+            # must be copied so the receiver books the stock at 0 and the chain
+            # nets. Only a truly unresolved row (no source link) is skipped.
+            source_confirmed = False
             source_si_item = (item.get("sales_invoice_item") or "").strip()
-            if source_si_item:
-                source_rate = si_rate_by_item.get(source_si_item)
+            if source_si_item and source_si_item in si_rate_by_item:
+                source_rate = flt(si_rate_by_item.get(source_si_item) or 0)
+                source_confirmed = True
 
             # For SI->PR->PI chain, keep PI transfer-rate aligned from PR item linkage.
             # PR owns stock SLE/GL legs, but PI transfer-rate should remain consistent.
-            if source_rate is None or flt(source_rate) <= 0:
+            if not source_confirmed and (source_rate is None or flt(source_rate) <= 0):
                 pr_detail = (item.get("pr_detail") or "").strip()
                 if pr_detail:
                     source_rate = pr_item_rates.get(pr_detail)
 
-            if source_rate is None or flt(source_rate) <= 0:
+            if not source_confirmed and (source_rate is None or flt(source_rate) <= 0):
                 rate2, link2 = _resolve_pi_item_transfer_rate_extras(
                     item, si_name, si_rate_by_item, pr_item_rates, si_item_buckets,
                     si_dn_map=si_dn_map,
@@ -5762,14 +5823,19 @@ def _sync_pi_item_transfer_rate_from_si(si_name: str, pi_name: Optional[str] = N
                                 update_modified=False,
                             )
 
-            if source_rate is None or flt(source_rate) <= 0:
+            if source_confirmed:
+                rate_to_set = flt(source_rate or 0)
+            elif source_rate is None or flt(source_rate) <= 0:
                 continue
-            if flt(item.get("bns_transfer_rate") or 0) != flt(source_rate):
+            else:
+                rate_to_set = flt(source_rate)
+
+            if flt(item.get("bns_transfer_rate") or 0) != rate_to_set:
                 frappe.db.set_value(
                     "Purchase Invoice Item",
                     item.get("name"),
                     "bns_transfer_rate",
-                    flt(source_rate),
+                    rate_to_set,
                     update_modified=False,
                 )
                 updated_count += 1
