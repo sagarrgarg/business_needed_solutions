@@ -3998,6 +3998,55 @@ def is_bns_internal_supplier(doc) -> bool:
     return False
 
 
+def is_bns_internal_transfer(doc) -> bool:
+    """BNS analogue of accounts_controller.is_internal_transfer().
+
+    True when the document is a BNS internal branch transfer (by BNS flags). Used
+    ONLY to gate BNS asset-transfer handling -- ERPNext's native
+    is_internal_transfer() (which drives 40+ inter-company code paths) is left
+    untouched, so existing stock flows are unaffected.
+    """
+    dt = getattr(doc, "doctype", None)
+    if dt in ("Sales Invoice", "Delivery Note", "Sales Order"):
+        return is_bns_internal_customer(doc)
+    if dt in ("Purchase Invoice", "Purchase Receipt", "Purchase Order"):
+        return is_bns_internal_supplier(doc)
+    return False
+
+
+def _asset_net_book_value_on_date(asset_name, as_of_date, finance_book=None) -> float:
+    """Net book value (gross - accumulated depreciation) of an asset as of a date.
+
+    Delegates to ERPNext's date-aware helper
+    (get_value_after_depreciation_on_disposal_date), which returns
+    value_after_depreciation when no depreciation is scheduled and the
+    schedule-derived NBV otherwise. Falls back to gross - opening accumulated
+    depreciation on any failure (e.g. transfer date before available_for_use).
+    Returns 0.0 when the asset is missing.
+    """
+    if not asset_name:
+        return 0.0
+    asset = frappe.db.get_value(
+        "Asset",
+        asset_name,
+        ["gross_purchase_amount", "opening_accumulated_depreciation"],
+        as_dict=True,
+    )
+    if not asset:
+        return 0.0
+    try:
+        from erpnext.assets.doctype.asset.depreciation import (
+            get_value_after_depreciation_on_disposal_date,
+        )
+
+        return flt(get_value_after_depreciation_on_disposal_date(asset_name, as_of_date, finance_book))
+    except Exception:
+        logger.exception("BNS: NBV-on-date fallback for asset %s as of %s", asset_name, as_of_date)
+        return flt(asset.get("gross_purchase_amount") or 0) - flt(
+            asset.get("opening_accumulated_depreciation") or 0
+        )
+
+
 def _voucher_owns_sle(voucher_type, doc) -> bool:
     """True when the voucher writes its OWN Stock Ledger Entries.
 

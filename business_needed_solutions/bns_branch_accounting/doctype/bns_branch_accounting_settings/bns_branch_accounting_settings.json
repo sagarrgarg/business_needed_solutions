@@ -7,6 +7,7 @@
  "field_order": [
   "accounts_section",
   "stock_in_transit_account",
+  "asset_in_transit_account",
   "column_break_accounts",
   "internal_sales_transfer_account",
   "internal_sales_non_gst_account",
@@ -41,6 +42,13 @@
    "fieldname": "stock_in_transit_account",
    "fieldtype": "Link",
    "label": "Stock in Transit Account",
+   "options": "Account"
+  },
+  {
+   "description": "Asset analogue of Stock in Transit. Sender (DN/SI) debits this with the asset net book value; receiver (PR/PI) credits it. Used for BNS internal transfer of fixed-asset items.",
+   "fieldname": "asset_in_transit_account",
+   "fieldtype": "Link",
+   "label": "Asset in Transit Account",
    "options": "Account"
   },
   {
