@@ -658,6 +658,45 @@ _TRANSFER_RATE_MISSING_DETAILS = (
 # Per-row rupee impact above which a rate drift is worth flagging (ignores float noise).
 _TRANSFER_RATE_IMPACT_THRESHOLD = 1.0
 
+_INCOMING_RATE_STALE_DETAILS = (
+	"Sales Invoice incoming_rate is stale: it no longer matches the source "
+	"Delivery Note Item incoming_rate (the DN cost changed after a back-dated "
+	"stock entry / repost but the DN->SI sync did not cascade). This stale rate "
+	"propagates into every downstream PI/PR transfer rate. Use 'Fix Transfer Rate "
+	"& Repost' -- it re-syncs the SI from the DN, then re-syncs and reposts the "
+	"downstream receivers."
+)
+
+
+def _check_incoming_rate_stale_for_si(doc):
+	"""Flag internal SI rows whose incoming_rate is stale versus the linked
+	Delivery Note Item incoming_rate (DN cost changed but did not cascade to SI).
+	"""
+	si_meta = frappe.get_meta("Sales Invoice Item")
+	if not si_meta.has_field("incoming_rate") or not si_meta.has_field("dn_detail"):
+		return []
+	issues = []
+	for item in (doc.get("items") or []):
+		qty = flt(item.get("qty") or 0)
+		if qty <= 0:
+			continue
+		dn_detail = (item.get("dn_detail") or "").strip()
+		if not dn_detail:
+			continue
+		dn_rate = flt(frappe.db.get_value("Delivery Note Item", dn_detail, "incoming_rate") or 0)
+		if dn_rate <= 0:
+			continue
+		si_rate = flt(item.get("incoming_rate") or 0)
+		stock_qty = flt(item.get("stock_qty") or qty)
+		impact = abs(dn_rate - si_rate) * stock_qty
+		if impact > _TRANSFER_RATE_IMPACT_THRESHOLD:
+			issues.append(
+				f"#{cint(item.get('idx') or 0) or '?'} {item.get('item_code')}: "
+				f"SI incoming_rate={round(si_rate, 4)} STALE vs DN={round(dn_rate, 4)} "
+				f"(impact ~{round(impact, 2)})"
+			)
+	return issues
+
 
 def _transfer_rate_missing_issues(doc, rate_by_code):
 	"""Return per-row issue strings for stock items whose bns_transfer_rate is
@@ -1051,6 +1090,18 @@ def _audit_sales_invoices(filters, settings):
 					"but inventory was never moved — create from a Delivery Note (DN → SI) "
 					"or enable Update Stock."
 				),
+			))
+
+		# Stale source rate: SI incoming_rate no longer matches its source DN
+		# (e.g. DN was reposted by a back-dated stock entry but the DN->SI sync
+		# did not cascade). Left unfixed it propagates a stale rate into every
+		# downstream PI/PR.
+		ir_stale = _check_incoming_rate_stale_for_si(doc)
+		if ir_stale:
+			results.append(_build_row(
+				row, scope, "Incoming Rate Mismatch",
+				sle_issue="; ".join(ir_stale),
+				details=_INCOMING_RATE_STALE_DETAILS,
 			))
 
 	return results
@@ -1564,20 +1615,32 @@ def repost_sle_for_audit_documents(documents):
 
 
 def _populate_transfer_rate_before_repost(voucher_type, doc):
-	"""Backfill a receiver's bns_transfer_rate from its source before repost so
-	the repost values stock at source cost (closes Stock-in-Transit / Internal
-	COGS). No-op for senders (DN/SI) and rows that already carry a rate.
+	"""Backfill source rates before repost so stock values at source cost (closes
+	Stock-in-Transit / Internal COGS).
+
+	- Purchase Invoice / Purchase Receipt: re-sync bns_transfer_rate from the
+	  source SI/DN.
+	- Sales Invoice: re-sync the SI's incoming_rate from its source DN, then
+	  re-sync the downstream PI/PR transfer rates from the corrected SI.
+
+	Returns a list of EXTRA (voucher_type, voucher_no) docs that also need a
+	repost (the SI's downstream receivers); empty for PR/PI.
 	"""
+	extras = []
 	try:
 		from business_needed_solutions.bns_branch_accounting.utils import (
 			apply_internal_pi_transfer_rates_from_si,
 			_sync_pr_item_transfer_rate_from_dn,
 			_sync_pr_item_transfer_rate_from_si,
+			_sync_pi_item_transfer_rate_from_si,
+			_sync_si_item_incoming_rate_from_dn,
 			_mirror_pr_item_valuation_from_transfer_rate,
 			_mirror_pi_item_valuation_from_transfer_rate,
+			_get_submitted_pis_for_si,
+			_get_submitted_prs_for_si,
 		)
 	except Exception:
-		return
+		return extras
 
 	if voucher_type == "Purchase Invoice":
 		apply_internal_pi_transfer_rates_from_si(doc)
@@ -1589,6 +1652,26 @@ def _populate_transfer_rate_before_repost(voucher_type, doc):
 		elif ref and frappe.db.exists("Sales Invoice", ref):
 			_sync_pr_item_transfer_rate_from_si(ref, pr_name=doc.name)
 		_mirror_pr_item_valuation_from_transfer_rate(doc.name)
+	elif voucher_type == "Sales Invoice":
+		# Re-sync SI incoming_rate from its source DN(s).
+		dns = sorted({
+			(it.get("delivery_note") or "").strip()
+			for it in (doc.get("items") or [])
+			if (it.get("delivery_note") or "").strip()
+		})
+		for dn in dns:
+			_sync_si_item_incoming_rate_from_dn(dn, si_name=doc.name)
+		# Cascade the corrected SI rate to downstream receivers and repost them.
+		for pi_name in _get_submitted_pis_for_si(doc.name):
+			if _sync_pi_item_transfer_rate_from_si(doc.name, pi_name=pi_name):
+				_mirror_pi_item_valuation_from_transfer_rate(pi_name)
+				extras.append(("Purchase Invoice", pi_name))
+		for pr_name in _get_submitted_prs_for_si(doc.name):
+			if _sync_pr_item_transfer_rate_from_si(doc.name, pr_name=pr_name):
+				_mirror_pr_item_valuation_from_transfer_rate(pr_name)
+				extras.append(("Purchase Receipt", pr_name))
+
+	return extras
 
 
 def _process_sle_repost_batch(documents):
@@ -1599,6 +1682,23 @@ def _process_sle_repost_batch(documents):
 		documents: list of dicts [{voucher_type, voucher_no}, ...].
 	"""
 	from erpnext.controllers.stock_controller import create_repost_item_valuation_entry
+	from business_needed_solutions.bns_branch_accounting.utils import _voucher_owns_sle
+
+	def _riv(vt, vn, vdoc):
+		# Only vouchers that own SLE can be reposted via RIV; an update_stock=0
+		# invoice (e.g. a Sales Invoice) owns no SLE -- skip it here (its stock,
+		# and any downstream receivers, are reposted on their own).
+		if not _voucher_owns_sle(vt, vdoc):
+			return
+		create_repost_item_valuation_entry({
+			"based_on": "Transaction",
+			"voucher_type": vt,
+			"voucher_no": vn,
+			"posting_date": vdoc.posting_date,
+			"posting_time": getattr(vdoc, "posting_time", "00:00:00") or "00:00:00",
+			"company": vdoc.company,
+			"allow_zero_rate": 1,
+		})
 
 	success = 0
 	errors = 0
@@ -1617,17 +1717,14 @@ def _process_sle_repost_batch(documents):
 				errors += 1
 				continue
 
-			_populate_transfer_rate_before_repost(voucher_type, doc)
+			extras = _populate_transfer_rate_before_repost(voucher_type, doc)
 
-			create_repost_item_valuation_entry({
-				"based_on": "Transaction",
-				"voucher_type": voucher_type,
-				"voucher_no": voucher_no,
-				"posting_date": doc.posting_date,
-				"posting_time": getattr(doc, "posting_time", "00:00:00") or "00:00:00",
-				"company": doc.company,
-				"allow_zero_rate": 1,
-			})
+			_riv(voucher_type, voucher_no, doc)
+			for extra_type, extra_no in extras:
+				extra_doc = frappe.get_doc(extra_type, extra_no)
+				if extra_doc.docstatus == 1:
+					_riv(extra_type, extra_no, extra_doc)
+
 			success += 1
 			frappe.db.commit()
 		except Exception:
@@ -1741,6 +1838,40 @@ def fix_transfer_rate_for_audit_documents(documents):
 	}
 
 
+def _repost_one_voucher(voucher_type, voucher_no, doc):
+	"""Repost a single voucher via RIV (when it owns SLE) + RAL.
+
+	RIV recalculates SLE and stock-side GL using the (already populated) transfer
+	rate; RAL deletes and regenerates the full GL through the BNS-patched
+	get_gl_entries. update_stock=0 invoices own no SLE, so they are GL-only (RAL).
+	"""
+	from erpnext.controllers.stock_controller import create_repost_item_valuation_entry
+	from business_needed_solutions.bns_branch_accounting.utils import (
+		_apply_bns_internal_gl_rewrite_patch,
+		_voucher_owns_sle,
+	)
+
+	if _voucher_owns_sle(voucher_type, doc):
+		create_repost_item_valuation_entry({
+			"based_on": "Transaction",
+			"voucher_type": voucher_type,
+			"voucher_no": voucher_no,
+			"posting_date": doc.posting_date,
+			"posting_time": getattr(doc, "posting_time", "00:00:00") or "00:00:00",
+			"company": doc.company,
+			"allow_zero_rate": 1,
+		})
+
+	_apply_bns_internal_gl_rewrite_patch()
+	ral = frappe.new_doc("Repost Accounting Ledger")
+	ral.company = doc.company
+	ral.delete_cancelled_entries = 0
+	ral.append("vouchers", {"voucher_type": voucher_type, "voucher_no": voucher_no})
+	ral.flags.ignore_permissions = True
+	ral.save()
+	ral.submit()
+
+
 def _process_gl_repost_batch(documents):
 	"""
 	Background worker: repost each document via RIV + RAL.
@@ -1758,13 +1889,6 @@ def _process_gl_repost_batch(documents):
 	Args:
 		documents: list of dicts [{voucher_type, voucher_no}, ...].
 	"""
-	from erpnext.controllers.stock_controller import create_repost_item_valuation_entry
-
-	from business_needed_solutions.bns_branch_accounting.utils import (
-		_apply_bns_internal_gl_rewrite_patch,
-		_voucher_owns_sle,
-	)
-
 	success = 0
 	errors = 0
 	failures = []
@@ -1785,43 +1909,18 @@ def _process_gl_repost_batch(documents):
 				failures.append(f"{voucher_type} {voucher_no}: not submitted")
 				continue
 
-			# Backfill a missing transfer rate from the source before reposting,
-			# so an undervalued receive (bns_transfer_rate=0) is corrected to
-			# source cost instead of being re-posted at the wrong valuation.
-			_populate_transfer_rate_before_repost(voucher_type, doc)
+			# Backfill the source rate before reposting so an undervalued/stale
+			# receive is corrected to source cost. For a Sales Invoice this also
+			# re-syncs SI incoming_rate from the DN and returns the downstream
+			# PI/PR receivers (extras) that must be reposted too.
+			extras = _populate_transfer_rate_before_repost(voucher_type, doc)
 
-			# RIV (stock recalc + bns_transfer_rate sync) only for vouchers
-			# that own SLE: DN/PR always, SI/PI only when update_stock=1. For
-			# an update_stock=0 invoice the stock lives on the linked DN/PR
-			# (which is reposted on its own), so RIV would throw on ERPNext's
-			# validate_update_stock and has nothing to recompute — repost GL
-			# only via RAL.
-			if _voucher_owns_sle(voucher_type, doc):
-				create_repost_item_valuation_entry({
-					"based_on": "Transaction",
-					"voucher_type": voucher_type,
-					"voucher_no": voucher_no,
-					"posting_date": doc.posting_date,
-					"posting_time": getattr(doc, "posting_time", "00:00:00") or "00:00:00",
-					"company": doc.company,
-					"allow_zero_rate": 1,
-				})
+			_repost_one_voucher(voucher_type, voucher_no, doc)
 
-			# RAL — full GL regen. Must be preceded by patch application
-			# so start_repost's make_gl_entries call hits the BNS-rewritten
-			# get_gl_entries; otherwise the regen would wipe BNS GL back to
-			# standard ERPNext pattern.
-			_apply_bns_internal_gl_rewrite_patch()
-			ral = frappe.new_doc("Repost Accounting Ledger")
-			ral.company = doc.company
-			ral.delete_cancelled_entries = 0
-			ral.append("vouchers", {
-				"voucher_type": voucher_type,
-				"voucher_no": voucher_no,
-			})
-			ral.flags.ignore_permissions = True
-			ral.save()
-			ral.submit()
+			for extra_type, extra_no in extras:
+				extra_doc = frappe.get_doc(extra_type, extra_no)
+				if extra_doc.docstatus == 1:
+					_repost_one_voucher(extra_type, extra_no, extra_doc)
 
 			success += 1
 			frappe.db.commit()

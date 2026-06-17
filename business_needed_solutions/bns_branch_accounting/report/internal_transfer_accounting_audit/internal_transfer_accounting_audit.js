@@ -159,5 +159,6 @@ function _hasGlDeviation(row) {
 }
 
 function _hasTransferRateMissing(row) {
-  return (row.deviation_type || "").toLowerCase() === "transfer rate mismatch";
+  var dt = (row.deviation_type || "").toLowerCase();
+  return dt === "transfer rate mismatch" || dt === "incoming rate mismatch";
 }
