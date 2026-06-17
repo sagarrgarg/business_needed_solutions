@@ -959,6 +959,7 @@ def _get_data(filters):
 		data.extend(_audit_purchase_invoices(filters, settings))
 
 	data.extend(_audit_cross_document_consistency(filters, settings))
+	data.extend(_audit_internal_pair_balance(filters, settings))
 
 	data.sort(key=lambda r: r.get("posting_date") or "0000-00-00", reverse=True)
 	return data
@@ -1549,6 +1550,98 @@ def _append_if(results, row):
 	"""Append a built row to results unless it is None (suppressed row)."""
 	if row:
 		results.append(row)
+
+
+# Tolerance (Rs) above which a matched internal-account pair counts as imbalanced.
+_INTERNAL_PAIR_TOLERANCE = 1.0
+
+
+def _gl_amount(voucher_type, voucher_no, account, side):
+	"""Sum of debit/credit on one account for a voucher (non-cancelled)."""
+	if not account:
+		return 0.0
+	row = frappe.db.sql(
+		f"""SELECT COALESCE(SUM({side}), 0) FROM `tabGL Entry`
+		   WHERE voucher_type=%s AND voucher_no=%s AND account=%s AND is_cancelled=0""",
+		(voucher_type, voucher_no, account),
+	)
+	return flt(row[0][0]) if row else 0.0
+
+
+def _audit_internal_pair_balance(filters, settings):
+	"""Reconcile the internal-account legs across each matched transfer chain so a
+	chain that does not net is flagged (currently invisible to the per-doc checks).
+
+	For DN<->PR (same GSTIN) and SI<->PI (different GSTIN), each pair must net:
+	  Internal Debtor (sender Dr)            == Internal Creditor (receiver Cr)
+	  Internal [Non-GST] Sales (sender Cr)   == Internal [Non-GST] Purchase (receiver Dr)
+	  Stock-in-Transit (sender Dr)           == Stock-in-Transit (receiver Cr)
+	"""
+	results = []
+	date_from = filters.get("from_date") or "2000-01-01"
+	date_to = filters.get("to_date") or "2099-12-31"
+	company = filters.get("company") or ""
+	company_cond = "AND company = %s" if company else ""
+	company_vals = (company,) if company else ()
+
+	debtor = settings.get("internal_branch_debtor")
+	creditor = settings.get("internal_branch_creditor")
+	transit = settings.get("stock_in_transit")
+
+	def _emit(sender_dt, sender_no, recv_dt, recv_no, posting_date, scope, sales_acct, purch_acct):
+		pairs = []
+		d = _gl_amount(sender_dt, sender_no, debtor, "debit")
+		c = _gl_amount(recv_dt, recv_no, creditor, "credit")
+		if abs(d - c) > _INTERNAL_PAIR_TOLERANCE:
+			pairs.append(f"Internal Debtor {round(d, 2)} != Internal Creditor {round(c, 2)} (Δ {round(d - c, 2)})")
+		s = _gl_amount(sender_dt, sender_no, sales_acct, "credit")
+		p = _gl_amount(recv_dt, recv_no, purch_acct, "debit")
+		if abs(s - p) > _INTERNAL_PAIR_TOLERANCE:
+			pairs.append(f"Internal Sales {round(s, 2)} != Internal Purchase {round(p, 2)} (Δ {round(s - p, 2)})")
+		td = _gl_amount(sender_dt, sender_no, transit, "debit")
+		tc = _gl_amount(recv_dt, recv_no, transit, "credit")
+		if abs(td - tc) > _INTERNAL_PAIR_TOLERANCE:
+			pairs.append(f"Stock-in-Transit Dr {round(td, 2)} != Cr {round(tc, 2)} (Δ {round(td - tc, 2)})")
+		if pairs:
+			results.append(_build_row(
+				{"name": recv_no, "posting_date": posting_date},
+				scope, "Internal Pair Imbalance",
+				details=f"{sender_dt} {sender_no} <-> {recv_dt} {recv_no}: " + "; ".join(pairs),
+			))
+
+	# DN -> PR (same GSTIN): PR.bns_inter_company_reference is a Delivery Note.
+	for pr in frappe.db.sql(
+		f"""SELECT name, bns_inter_company_reference AS dn, posting_date
+		   FROM `tabPurchase Receipt`
+		   WHERE docstatus=1 AND is_bns_internal_supplier=1
+		     AND posting_date BETWEEN %s AND %s {company_cond}
+		     AND IFNULL(bns_inter_company_reference,'') != ''""",
+		(date_from, date_to, *company_vals), as_dict=True,
+	):
+		dn = (pr.dn or "").strip()
+		if dn and frappe.db.exists("Delivery Note", {"name": dn, "docstatus": 1}):
+			_emit("Delivery Note", dn, "Purchase Receipt", pr.name, pr.posting_date, "dn_same_gstin",
+			      settings.get("internal_sales_non_gst"), settings.get("internal_purchase_non_gst"))
+
+	# SI -> PI (different GSTIN): PI references the Sales Invoice.
+	for pi in frappe.db.sql(
+		f"""SELECT name, bns_inter_company_reference AS si_ref, bill_no, posting_date
+		   FROM `tabPurchase Invoice`
+		   WHERE docstatus=1 AND is_bns_internal_supplier=1
+		     AND posting_date BETWEEN %s AND %s {company_cond}""",
+		(date_from, date_to, *company_vals), as_dict=True,
+	):
+		si = (pi.si_ref or "").strip()
+		if not si or not frappe.db.exists("Sales Invoice", {"name": si, "docstatus": 1}):
+			si = (pi.bill_no or "").strip()
+			# bill_no may collide with a supplier's own number; only use it when it
+			# resolves to a genuinely internal Sales Invoice.
+			if not (si and frappe.db.get_value("Sales Invoice", si, "is_bns_internal_customer")):
+				continue
+		_emit("Sales Invoice", si, "Purchase Invoice", pi.name, pi.posting_date, "si_linked",
+		      settings.get("internal_sales_transfer"), settings.get("internal_purchase_transfer"))
+
+	return results
 
 
 def _format_account_set(account_set):
