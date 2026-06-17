@@ -72,6 +72,52 @@ frappe.query_reports["Internal Transfer Receive Mismatch"] = {
 				}
 			}
 		}
+
+		report.page.add_inner_button(__("Fix External-Party Rows"), function() {
+			_fixExternalPartyRows(report);
+		}, __("Actions"));
 	}
 };
+
+function _isExternalPartyRow(row) {
+	return (row.transfer_chain || "") === "External party treated as internal";
+}
+
+function _fixExternalPartyRows(report) {
+	var data = (report.data || []);
+	if (!data.length) {
+		frappe.msgprint(__("No report data available. Run the report first."));
+		return;
+	}
+
+	var documents = [];
+	for (var i = 0; i < data.length; i++) {
+		var row = data[i];
+		if (row.document_type && row.document_name && _isExternalPartyRow(row)) {
+			documents.push({
+				voucher_type: row.document_type,
+				voucher_no: row.document_name
+			});
+		}
+	}
+
+	if (!documents.length) {
+		frappe.msgprint(__("No 'External party treated as internal' rows found in current report data."));
+		return;
+	}
+
+	frappe.confirm(
+		__("This clears the internal flag / status / reference on {0} document(s) whose party master is external, and reposts their GL to the normal external pattern. Documents whose party is actually internal are skipped. Continue?", [documents.length]),
+		function() {
+			frappe.xcall(
+				"business_needed_solutions.bns_branch_accounting.report.internal_transfer_receive_mismatch.internal_transfer_receive_mismatch.fix_external_party_internal_documents",
+				{ documents: documents }
+			).then(function(r) {
+				if (r && r.message) {
+					frappe.msgprint(r.message);
+				}
+			});
+		}
+	);
+}
 

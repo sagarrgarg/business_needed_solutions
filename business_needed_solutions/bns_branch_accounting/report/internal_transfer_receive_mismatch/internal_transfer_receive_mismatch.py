@@ -20,6 +20,8 @@ Matching Logic:
 
 """
 
+import json
+
 import frappe
 from frappe import _
 from frappe.utils import today, flt, getdate
@@ -1713,5 +1715,158 @@ def check_si_pi_mismatch(si_name, si_items, si_doc, amount_tolerance=0):
 		}
 
 	return None
+
+
+# ---------------------------------------------------------------------------
+# Bulk repair: external party mis-classified as internal
+# ---------------------------------------------------------------------------
+
+# (doctype, party_field, party_doctype, doc_flag_field)
+_EXTERNAL_PARTY_FIX_SPEC = {
+	"Sales Invoice": ("customer", "Customer", "is_bns_internal_customer"),
+	"Delivery Note": ("customer", "Customer", "is_bns_internal_customer"),
+	"Purchase Invoice": ("supplier", "Supplier", "is_bns_internal_supplier"),
+	"Purchase Receipt": ("supplier", "Supplier", "is_bns_internal_supplier"),
+}
+
+
+@frappe.whitelist()
+def fix_external_party_internal_documents(documents):
+	"""Clear the internal markers on documents whose party master is EXTERNAL,
+	then repost so GL reverts from internal-transfer accounts to the standard
+	external pattern.
+
+	Targets the report's "External party treated as internal" rows. For each doc
+	it re-verifies the party master is genuinely external (safety), then clears
+	the internal flag, bns_internal_status and bns_inter_company_reference, resets
+	a 'BNS Internally Transferred' status to the standard computed status, and
+	reposts the GL via Repost Accounting Ledger (the BNS GL rewrite then skips,
+	emitting normal external GL).
+
+	Gated by BNS Branch Accounting Settings write; the actual mutations run with
+	ignore_permissions because that admin gate is already cleared.
+
+	Args:
+		documents: JSON string of [{voucher_type|document_type, voucher_no|document_name}, ...].
+	"""
+	if not frappe.has_permission("BNS Branch Accounting Settings", "write"):
+		frappe.throw(
+			_("BNS Branch Accounting Settings write permission required."),
+			frappe.PermissionError,
+		)
+
+	if isinstance(documents, str):
+		documents = json.loads(documents)
+
+	if not documents:
+		frappe.throw(_("No documents provided for external-party fix."))
+
+	frappe.enqueue(
+		"business_needed_solutions.bns_branch_accounting.report"
+		".internal_transfer_receive_mismatch.internal_transfer_receive_mismatch"
+		"._process_external_party_fix_batch",
+		queue="long",
+		timeout=1800,
+		documents=documents,
+	)
+
+	return {
+		"success": True,
+		"message": _(
+			"External-party fix + repost enqueued for {0} document(s). "
+			"Check Background Jobs for progress."
+		).format(len(documents)),
+	}
+
+
+def _process_external_party_fix_batch(documents):
+	"""Worker: clear internal markers on external-party docs and repost GL.
+
+	Re-verifies the party master is external before touching each doc, so a row
+	that is actually internal (master flag set) is skipped rather than corrupted.
+	"""
+	from business_needed_solutions.bns_branch_accounting.utils import (
+		_apply_bns_internal_gl_rewrite_patch,
+	)
+
+	success = 0
+	errors = 0
+	skipped = 0
+	failures = []
+
+	for entry in documents:
+		voucher_type = entry.get("voucher_type") or entry.get("document_type") or ""
+		voucher_no = entry.get("voucher_no") or entry.get("document_name") or ""
+
+		spec = _EXTERNAL_PARTY_FIX_SPEC.get(voucher_type)
+		if not spec or not voucher_no:
+			errors += 1
+			failures.append(f"{voucher_type or '?'} {voucher_no or '?'}: unsupported doctype")
+			continue
+
+		party_field, party_dt, doc_flag = spec
+		try:
+			doc = frappe.get_doc(voucher_type, voucher_no)
+			if doc.docstatus != 1:
+				errors += 1
+				failures.append(f"{voucher_type} {voucher_no}: not submitted")
+				continue
+
+			# Safety: only proceed when the party master is genuinely external.
+			party = doc.get(party_field)
+			if party and frappe.db.get_value(party_dt, party, doc_flag):
+				skipped += 1
+				failures.append(f"{voucher_type} {voucher_no}: {party_dt} {party} IS internal — skipped")
+				continue
+
+			meta = frappe.get_meta(voucher_type)
+			frappe.db.set_value(voucher_type, voucher_no, doc_flag, 0, update_modified=False)
+			if meta.has_field("bns_internal_status"):
+				frappe.db.set_value(voucher_type, voucher_no, "bns_internal_status", None, update_modified=False)
+			if meta.has_field("bns_inter_company_reference"):
+				frappe.db.set_value(voucher_type, voucher_no, "bns_inter_company_reference", None, update_modified=False)
+
+			# Reset the custom status back to the standard computed status.
+			if (doc.get("status") or "") == "BNS Internally Transferred":
+				fresh = frappe.get_doc(voucher_type, voucher_no)
+				fresh.set_status(update=True)
+
+			# Repost GL: with the internal flag cleared, the BNS rewrite skips and
+			# make_gl_entries emits the standard external pattern.
+			_apply_bns_internal_gl_rewrite_patch()
+			ral = frappe.new_doc("Repost Accounting Ledger")
+			ral.company = doc.company
+			ral.delete_cancelled_entries = 0
+			ral.append("vouchers", {"voucher_type": voucher_type, "voucher_no": voucher_no})
+			ral.flags.ignore_permissions = True
+			ral.save()
+			ral.submit()
+
+			success += 1
+			frappe.db.commit()
+		except Exception as e:
+			errors += 1
+			frappe.db.rollback()
+			failures.append(f"{voucher_type} {voucher_no}: {str(e)[:200]}")
+			frappe.log_error(title=f"External-party fix error: {voucher_type} {voucher_no}")
+
+	message = _("External-party fix complete: {0} fixed, {1} skipped (actually internal), {2} failed.").format(
+		success, skipped, errors
+	)
+	if failures:
+		message += "<br><br>" + _("Details:") + "<br>" + "<br>".join(
+			frappe.utils.escape_html(f) for f in failures[:25]
+		)
+		if len(failures) > 25:
+			message += "<br>" + _("(showing first 25 of {0})").format(len(failures))
+
+	frappe.publish_realtime(
+		"msgprint",
+		{
+			"message": message,
+			"title": _("External-Party Fix"),
+			"indicator": "green" if errors == 0 else "orange",
+		},
+	)
 
 
