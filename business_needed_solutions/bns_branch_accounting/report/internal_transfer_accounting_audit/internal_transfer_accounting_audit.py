@@ -699,10 +699,17 @@ def _check_incoming_rate_stale_for_si(doc):
 
 
 def _transfer_rate_missing_issues(doc, rate_by_code):
-	"""Return per-row issue strings for stock items whose bns_transfer_rate is
-	missing (0) OR stale (differs from the current source incoming_rate by more
-	than a rupee of valuation impact). The stale case catches receivers that did
-	not cascade after a back-dated stock entry / source repost.
+	"""Return per-row issue strings for stock items whose bns_transfer_rate does
+	not match the CONFIRMED source rate by more than a rupee of valuation impact.
+
+	rate_by_code holds every item_code present on the source document (the value
+	is its source rate, which may legitimately be 0). A row whose item_code is
+	absent from that map is unresolved and skipped -- it is NOT a mismatch. A row
+	present in the map is flagged whenever the stored rate differs from the source
+	rate, covering all three cases:
+	  - missing:  stored 0, source > 0  (undervalued receive)
+	  - stale:    stored > 0, source different  (back-dated / un-cascaded)
+	  - over-valued: stored > 0, source 0  (receiver values a zero-cost source)
 	"""
 	issues = []
 	for item in (doc.get("items") or []):
@@ -712,21 +719,24 @@ def _transfer_rate_missing_issues(doc, rate_by_code):
 		code = item.get("item_code")
 		if not code or not cint(frappe.db.get_value("Item", code, "is_stock_item")):
 			continue
-		expected = flt(rate_by_code.get(code) or 0)
-		if expected <= 0:
+		# Only confirmed-source rows (present on the source doc) are actionable.
+		if code not in rate_by_code:
 			continue
+		expected = flt(rate_by_code.get(code) or 0)
 		stored = flt(item.get("bns_transfer_rate") or 0)
 		stock_qty = flt(item.get("stock_qty") or qty)
 		impact = abs(expected - stored) * stock_qty
+		if impact <= _TRANSFER_RATE_IMPACT_THRESHOLD:
+			continue
 		idx = cint(item.get("idx") or 0) or "?"
 		if stored <= 0:
 			issues.append(
 				f"#{idx} {code}: bns_transfer_rate=0, source={round(expected, 4)} "
 				f"(impact ~{round(impact, 2)})"
 			)
-		elif impact > _TRANSFER_RATE_IMPACT_THRESHOLD:
+		else:
 			issues.append(
-				f"#{idx} {code}: bns_transfer_rate={round(stored, 4)} STALE vs "
+				f"#{idx} {code}: bns_transfer_rate={round(stored, 4)} != "
 				f"source={round(expected, 4)} (impact ~{round(impact, 2)})"
 			)
 	return issues
@@ -752,9 +762,12 @@ def _check_transfer_rate_missing_for_pi(doc):
 	rate_by_code = {}
 	for sr in si_rows:
 		code = sr.get("item_code")
+		if not code:
+			continue
 		rate = flt(si_rate_by_item.get(sr.get("name")) or 0)
-		if code and rate > rate_by_code.get(code, 0):
-			rate_by_code[code] = rate
+		# Record every source item_code (incl rate 0) so a confirmed-zero source
+		# is comparable; keep the max when an item appears on multiple rows.
+		rate_by_code[code] = max(rate_by_code.get(code, 0.0), rate)
 	return _transfer_rate_missing_issues(doc, rate_by_code)
 
 
@@ -783,9 +796,12 @@ def _check_transfer_rate_missing_for_pr(doc):
 	rate_by_code = {}
 	for sr in src_rows:
 		code = sr.get("item_code")
+		if not code:
+			continue
 		rate = flt(sr.get("incoming_rate") or 0)
-		if code and rate > rate_by_code.get(code, 0):
-			rate_by_code[code] = rate
+		# Record every source item_code (incl rate 0) so a confirmed-zero source
+		# is comparable; keep the max when an item appears on multiple rows.
+		rate_by_code[code] = max(rate_by_code.get(code, 0.0), rate)
 	return _transfer_rate_missing_issues(doc, rate_by_code)
 
 

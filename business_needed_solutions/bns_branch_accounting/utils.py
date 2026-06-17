@@ -1698,8 +1698,6 @@ def apply_internal_pi_transfer_rates_from_si(doc, si_name: Optional[str] = None)
     for item in pi_items_list:
         if flt(item.get("qty") or 0) <= 0:
             continue
-        if flt(item.get("bns_transfer_rate") or 0) > 0:
-            continue
         if item.get("item_code") and not cint(
             frappe.db.get_value("Item", item.get("item_code"), "is_stock_item")
         ):
@@ -1709,22 +1707,31 @@ def apply_internal_pi_transfer_rates_from_si(doc, si_name: Optional[str] = None)
             item, resolved_si, si_rate_by_item, pr_item_rates, si_item_buckets,
             si_dn_map=si_dn_map,
         )
-        if rate < 0:
+        # Only write when the source is CONFIRMED: a resolved source link (which
+        # may legitimately carry a genuine 0) or a positive rate. An unresolved
+        # row (no link, non-positive rate) must NOT clobber an existing rate.
+        # Deliberately do NOT skip rows that already have a positive
+        # bns_transfer_rate -- a STALE positive must be overwritten from source.
+        if not link_si and flt(rate) <= 0:
             continue
-
-        item.bns_transfer_rate = flt(rate)
-        updated += 1
-        if (
+        new_rate = flt(rate)
+        link_needed = bool(
             link_si
             and pii_meta.has_field("sales_invoice_item")
             and not (item.get("sales_invoice_item") or "").strip()
-        ):
+        )
+        if flt(item.get("bns_transfer_rate") or 0) == new_rate and not link_needed:
+            continue
+
+        item.bns_transfer_rate = new_rate
+        updated += 1
+        if link_needed:
             item.sales_invoice_item = link_si
 
         row_name = item.get("name")
         if row_name and frappe.db.exists("Purchase Invoice Item", row_name):
-            db_vals: Dict[str, Any] = {"bns_transfer_rate": flt(rate)}
-            if link_si and pii_meta.has_field("sales_invoice_item"):
+            db_vals: Dict[str, Any] = {"bns_transfer_rate": new_rate}
+            if link_needed:
                 db_vals["sales_invoice_item"] = link_si
             frappe.db.set_value("Purchase Invoice Item", row_name, db_vals, update_modified=False)
 

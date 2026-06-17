@@ -73,14 +73,18 @@ frappe.query_reports["Internal Transfer Receive Mismatch"] = {
 			}
 		}
 
-		report.page.add_inner_button(__("Fix External-Party Rows"), function() {
+		report.page.add_inner_button(__("Fix External / Foreign-Reference Rows"), function() {
 			_fixExternalPartyRows(report);
 		}, __("Actions"));
 	}
 };
 
 function _isExternalPartyRow(row) {
-	return (row.transfer_chain || "") === "External party treated as internal";
+	// Both detections describe a doc treated as internal while its party master is
+	// external: "External party treated as internal" (flag/status set) and
+	// "Foreign-party reference" (carries a bns_inter_company_reference it shouldn't).
+	var tc = (row.transfer_chain || "");
+	return tc === "External party treated as internal" || tc === "Foreign-party reference";
 }
 
 function _fixExternalPartyRows(report) {
@@ -90,19 +94,23 @@ function _fixExternalPartyRows(report) {
 		return;
 	}
 
+	var seen = {};
 	var documents = [];
 	for (var i = 0; i < data.length; i++) {
 		var row = data[i];
-		if (row.document_type && row.document_name && _isExternalPartyRow(row)) {
-			documents.push({
-				voucher_type: row.document_type,
-				voucher_no: row.document_name
-			});
+		if (!row.document_type || !row.document_name || !_isExternalPartyRow(row)) {
+			continue;
 		}
+		var key = row.document_type + "::" + row.document_name;
+		if (seen[key]) {
+			continue;
+		}
+		seen[key] = 1;
+		documents.push({ voucher_type: row.document_type, voucher_no: row.document_name });
 	}
 
 	if (!documents.length) {
-		frappe.msgprint(__("No 'External party treated as internal' rows found in current report data."));
+		frappe.msgprint(__("No external-party / foreign-reference rows found in current report data."));
 		return;
 	}
 

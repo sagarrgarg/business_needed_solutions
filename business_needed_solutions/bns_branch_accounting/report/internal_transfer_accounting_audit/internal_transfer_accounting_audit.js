@@ -48,6 +48,10 @@ frappe.query_reports["Internal Transfer Accounting Audit"] = {
         }
       });
 
+    report.page.add_inner_button(__("Fix All (Repost)"), function () {
+      _triggerFixAll(report);
+    }, __("Actions"));
+
     report.page.add_inner_button(__("Repost SLE"), function () {
       _triggerBulkRepost(report, "sle");
     }, __("Actions"));
@@ -61,6 +65,63 @@ frappe.query_reports["Internal Transfer Accounting Audit"] = {
     }, __("Actions"));
   }
 };
+
+// A row is fixable by a GL repost (which backfills transfer rates from source,
+// then RIV + RAL). Informational rows that no repost can fix are excluded.
+function _isFixable(row) {
+  var dt = (row.deviation_type || "").toLowerCase();
+  return (
+    dt === "gl mismatch" ||
+    dt === "gl missing" ||
+    dt === "both" ||
+    dt === "sle mismatch" ||
+    dt === "transfer rate mismatch" ||
+    dt === "incoming rate mismatch" ||
+    dt === "asset transfer unposted"
+  );
+}
+
+function _triggerFixAll(report) {
+  var data = report.data || [];
+  if (!data.length) {
+    frappe.msgprint(__("No audit data available. Run the report first."));
+    return;
+  }
+
+  var seen = {};
+  var documents = [];
+  for (var i = 0; i < data.length; i++) {
+    var row = data[i];
+    if (!row.document_type || !row.document_name || !_isFixable(row)) {
+      continue;
+    }
+    var key = row.document_type + "::" + row.document_name;
+    if (seen[key]) {
+      continue;
+    }
+    seen[key] = 1;
+    documents.push({ voucher_type: row.document_type, voucher_no: row.document_name });
+  }
+
+  if (!documents.length) {
+    frappe.msgprint(__("No fixable rows in current report data."));
+    return;
+  }
+
+  frappe.confirm(
+    __("This will re-sync transfer rates from source and repost (RIV + RAL) {0} document(s) covering every fixable deviation, as a background job. Continue?", [documents.length]),
+    function () {
+      frappe.xcall(
+        "business_needed_solutions.bns_branch_accounting.report.internal_transfer_accounting_audit.internal_transfer_accounting_audit.repost_gl_for_audit_documents",
+        { documents: documents }
+      ).then(function (r) {
+        if (r && r.message) {
+          frappe.msgprint(r.message);
+        }
+      });
+    }
+  );
+}
 
 function _triggerTransferRateFix(report) {
   var data = report.data || [];
