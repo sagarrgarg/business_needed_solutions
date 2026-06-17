@@ -2240,6 +2240,25 @@ def _resolve_pr_transfer_amount(doc, force_mode: bool = False) -> Tuple[float, s
     return total, ""
 
 
+def _voucher_sle_stock_value(voucher_type: str, voucher_no: str) -> float:
+    """Absolute net stock value the voucher's own SLE actually moved.
+
+    This is the authoritative transit/stock-leg amount. ERPNext's stock GL falls
+    back to item.valuation_rate * qty when an SLE stock_value_difference is 0
+    (e.g. a receiver pulling in goods the sender shipped at 0 from negative
+    stock), which over/under-states the leg versus what really moved. Using the
+    SLE value keeps the receiver's transit credit equal to the sender's transit
+    debit so Stock-in-Transit / Internal COGS nets to zero.
+    """
+    row = frappe.db.sql(
+        """SELECT COALESCE(SUM(stock_value_difference), 0)
+           FROM `tabStock Ledger Entry`
+           WHERE voucher_type=%s AND voucher_no=%s AND is_cancelled=0""",
+        (voucher_type, voucher_no),
+    )
+    return abs(flt(row[0][0])) if row else 0.0
+
+
 def _resolve_valuation_from_gl_entries(
     gl_entries: List[Dict[str, Any]], side: str, company: Optional[str] = None
 ) -> Tuple[float, Optional[str], str]:
@@ -2478,6 +2497,11 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
         gl_entries, side=val_side, company=doc.company
     )
+    # Use the ACTUAL stock value moved (SLE svd) for the transit leg, not
+    # ERPNext's valuation_rate-based GL number (which diverges when an item's
+    # svd is 0), so receiver-transit-Cr == sender-transit-Dr.
+    if stock_account:
+        valuation_amount = _voucher_sle_stock_value(doc.doctype, doc.name)
     has_valuation = valuation_amount > 0 and bool(stock_account)
 
     template = None
@@ -2712,6 +2736,11 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
             gl_entries, side=stock_gl_side, company=doc.company
         )
+        # Use the ACTUAL stock value moved (SLE svd) for the transit leg, not
+        # ERPNext's valuation_rate-based GL number (which diverges when an item's
+        # svd is 0), so the receiver's Internal COGS credit == the sender's debit.
+        if stock_account:
+            valuation_amount = _voucher_sle_stock_value(doc.doctype, doc.name)
         # Stock legs are optional: when the PI received stock at zero valuation,
         # skip them but KEEP the party legs (creditor / purchase-transfer / GST).
         if valuation_amount > 0 and stock_account:
