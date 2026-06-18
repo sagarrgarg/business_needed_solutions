@@ -115,7 +115,7 @@ function _fixExternalPartyRows(report) {
 	}
 
 	frappe.confirm(
-		__("This clears the internal flag / status / reference on {0} document(s) whose party master is external, and reposts their GL to the normal external pattern. Documents whose party is actually internal are skipped. Continue?", [documents.length]),
+		__("This reconciles {0} document(s) to their party master and reposts: external master -> clear internal flag/status/reference (external GL); internal master -> heal the missing doc flag (keep reference, internal GL). Continue?", [documents.length]),
 		function() {
 			frappe.xcall(
 				"business_needed_solutions.bns_branch_accounting.report.internal_transfer_receive_mismatch.internal_transfer_receive_mismatch.fix_external_party_internal_documents",

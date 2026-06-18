@@ -24,7 +24,7 @@ import json
 
 import frappe
 from frappe import _
-from frappe.utils import today, flt, getdate
+from frappe.utils import cint, today, flt, getdate
 
 # Amounts: round to 2 decimals; qty: round to 6 decimals.
 # DN-PR uses hardcoded tolerances (₹5 / 0.01).
@@ -1780,16 +1780,21 @@ def fix_external_party_internal_documents(documents):
 
 
 def _process_external_party_fix_batch(documents):
-	"""Worker: clear internal markers on external-party docs and repost GL.
+	"""Worker: reconcile each flagged document's internal markers to its PARTY
+	MASTER (the source of truth), then repost GL.
 
-	Re-verifies the party master is external before touching each doc, so a row
-	that is actually internal (master flag set) is skipped rather than corrupted.
+	- Master EXTERNAL: clear the doc internal flag / status / reference -> the BNS
+	  rewrite skips and the doc emits the standard external GL.
+	- Master INTERNAL: the document is a legitimate internal transfer that lost its
+	  doc-level flag (e.g. a pre-no_copy Duplicate/Amend/import). HEAL it -- set the
+	  flag, keep the reference -- and repost so the internal GL pattern is asserted.
 	"""
 	from business_needed_solutions.bns_branch_accounting.utils import (
 		_apply_bns_internal_gl_rewrite_patch,
 	)
 
 	success = 0
+	healed = 0
 	errors = 0
 	skipped = 0
 	failures = []
@@ -1812,27 +1817,32 @@ def _process_external_party_fix_batch(documents):
 				failures.append(f"{voucher_type} {voucher_no}: not submitted")
 				continue
 
-			# Safety: only proceed when the party master is genuinely external.
+			# Reconcile the doc to its party master (the source of truth).
 			party = doc.get(party_field)
-			if party and frappe.db.get_value(party_dt, party, doc_flag):
-				skipped += 1
-				failures.append(f"{voucher_type} {voucher_no}: {party_dt} {party} IS internal — skipped")
-				continue
-
+			master_internal = bool(party and frappe.db.get_value(party_dt, party, doc_flag))
 			meta = frappe.get_meta(voucher_type)
-			frappe.db.set_value(voucher_type, voucher_no, doc_flag, 0, update_modified=False)
-			if meta.has_field("bns_internal_status"):
-				frappe.db.set_value(voucher_type, voucher_no, "bns_internal_status", None, update_modified=False)
-			if meta.has_field("bns_inter_company_reference"):
-				frappe.db.set_value(voucher_type, voucher_no, "bns_inter_company_reference", None, update_modified=False)
 
-			# Reset the custom status back to the standard computed status.
-			if (doc.get("status") or "") == "BNS Internally Transferred":
-				fresh = frappe.get_doc(voucher_type, voucher_no)
-				fresh.set_status(update=True)
+			if master_internal:
+				# HEAL: legitimate internal transfer that lost its doc-level flag.
+				if cint(doc.get(doc_flag)):
+					skipped += 1
+					failures.append(f"{voucher_type} {voucher_no}: already flagged internal — nothing to do")
+					continue
+				frappe.db.set_value(voucher_type, voucher_no, doc_flag, 1, update_modified=False)
+				healed += 1
+			else:
+				# CLEAR: external party wrongly carrying internal markers.
+				frappe.db.set_value(voucher_type, voucher_no, doc_flag, 0, update_modified=False)
+				if meta.has_field("bns_internal_status"):
+					frappe.db.set_value(voucher_type, voucher_no, "bns_internal_status", None, update_modified=False)
+				if meta.has_field("bns_inter_company_reference"):
+					frappe.db.set_value(voucher_type, voucher_no, "bns_inter_company_reference", None, update_modified=False)
+				if (doc.get("status") or "") == "BNS Internally Transferred":
+					fresh = frappe.get_doc(voucher_type, voucher_no)
+					fresh.set_status(update=True)
+				success += 1
 
-			# Repost GL: with the internal flag cleared, the BNS rewrite skips and
-			# make_gl_entries emits the standard external pattern.
+			# Repost GL so the pattern matches the now-consistent flag.
 			_apply_bns_internal_gl_rewrite_patch()
 			ral = frappe.new_doc("Repost Accounting Ledger")
 			ral.company = doc.company
@@ -1842,7 +1852,6 @@ def _process_external_party_fix_batch(documents):
 			ral.save()
 			ral.submit()
 
-			success += 1
 			frappe.db.commit()
 		except Exception as e:
 			errors += 1
@@ -1850,9 +1859,10 @@ def _process_external_party_fix_batch(documents):
 			failures.append(f"{voucher_type} {voucher_no}: {str(e)[:200]}")
 			frappe.log_error(title=f"External-party fix error: {voucher_type} {voucher_no}")
 
-	message = _("External-party fix complete: {0} fixed, {1} skipped (actually internal), {2} failed.").format(
-		success, skipped, errors
-	)
+	message = _(
+		"Internal-flag reconcile complete: {0} cleared (external), {1} healed "
+		"(flag set, master internal), {2} skipped, {3} failed."
+	).format(success, healed, skipped, errors)
 	if failures:
 		message += "<br><br>" + _("Details:") + "<br>" + "<br>".join(
 			frappe.utils.escape_html(f) for f in failures[:25]
@@ -1864,7 +1874,7 @@ def _process_external_party_fix_batch(documents):
 		"msgprint",
 		{
 			"message": message,
-			"title": _("External-Party Fix"),
+			"title": _("Internal-Flag Reconcile"),
 			"indicator": "green" if errors == 0 else "orange",
 		},
 	)
