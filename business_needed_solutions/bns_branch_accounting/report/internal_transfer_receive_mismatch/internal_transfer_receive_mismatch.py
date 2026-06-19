@@ -316,6 +316,23 @@ def _resolve_scope(company_gstin, billing_gstin, has_dn, has_si):
 	return None
 
 
+def _diff_gstin_dn_pr_allowed(ref, global_allow):
+	"""True when a diff-GSTIN DN->PR is a SUPPORTED transfer (routes through the
+	same-GSTIN path), mirroring the audit report's _classify_pr: the global
+	"allow different GSTIN DN->PR" setting is on, or the linked Delivery Note
+	carries the per-doc opt-in (bns_allow_diff_gstin_dn_pr -- the 'Submit as Diff
+	GSTIN Internal Transfer' option). Legacy DN-linked diff-GSTIN PRs created
+	before that option are valid whenever the global setting is enabled.
+	"""
+	if global_allow:
+		return True
+	ref = (ref or "").strip()
+	if ref and frappe.db.exists("Delivery Note", ref):
+		if frappe.get_meta("Delivery Note").has_field("bns_allow_diff_gstin_dn_pr"):
+			return bool(frappe.db.get_value("Delivery Note", ref, "bns_allow_diff_gstin_dn_pr"))
+	return False
+
+
 def get_internal_purchase_doc_linkage_mismatches(filters=None):
 	"""Find submitted internal PR/PI rows violating PR/PI linkage rules."""
 	filters = frappe._dict(filters or {})
@@ -345,6 +362,10 @@ def get_internal_purchase_doc_linkage_mismatches(filters=None):
 		as_dict=True,
 	) or []
 
+	global_allow_diff_gstin_dn_pr = bool(
+		frappe.db.get_single_value("BNS Branch Accounting Settings", "allow_different_gstin_dn_to_pr")
+	)
+
 	for pr in pr_rows:
 		has_dn, has_si = _link_flags_from_refs(
 			pr.get("bns_inter_company_reference"),
@@ -355,6 +376,15 @@ def get_internal_purchase_doc_linkage_mismatches(filters=None):
 			has_dn,
 			has_si,
 		)
+
+		# A diff-GSTIN DN->PR is valid when the allowance applies (global setting
+		# or the DN's per-doc opt-in); it routes through the same-GSTIN path, so
+		# treat its scope as "same" exactly like the audit's _classify_pr -- this
+		# stops legacy 'Submit as Diff GSTIN Internal Transfer' PRs being flagged.
+		if scope == "different" and has_dn and _diff_gstin_dn_pr_allowed(
+			pr.get("bns_inter_company_reference"), global_allow_diff_gstin_dn_pr
+		):
+			scope = "same"
 
 		reason = None
 		if has_dn and has_si:
