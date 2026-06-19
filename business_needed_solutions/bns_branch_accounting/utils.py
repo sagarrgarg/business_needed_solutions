@@ -4040,12 +4040,90 @@ def _apply_bns_asset_internal_patches() -> None:
         logger.error("Failed to apply BNS asset internal-transfer patches: %s", str(e))
 
 
+_BNS_STICKY_STATUS_PATCHED = False
+
+
+def _bns_should_hold_internal_status(doc) -> bool:
+    """True when a submitted SI/PI is a BNS internal transfer (after the
+    internal-transfer cutoff) and so must keep the 'BNS Internally Transferred'
+    status instead of the recomputed Unpaid/Overdue/Paid.
+
+    A cheap pre-filter on the internal flag (or an already-set status) avoids the
+    expensive detection on every set_status of every normal invoice.
+    """
+    try:
+        if getattr(doc, "docstatus", 0) != 1:
+            return False
+        dt = getattr(doc, "doctype", None)
+        if dt == "Sales Invoice":
+            if not (doc.get("is_bns_internal_customer") or doc.get("status") == "BNS Internally Transferred"):
+                return False
+            if not _should_update_sales_invoice_status(doc):
+                return False
+        elif dt == "Purchase Invoice":
+            if not (doc.get("is_bns_internal_supplier") or doc.get("status") == "BNS Internally Transferred"):
+                return False
+            if not _is_bns_internal_purchase_invoice_from_si(doc):
+                return False
+        else:
+            return False
+        return is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc))
+    except Exception:
+        logger.exception("BNS sticky status: detection failed for %s", getattr(doc, "name", "?"))
+        return False
+
+
+def _wrap_bns_sticky_set_status(original_set_status):
+    """Wrap an invoice set_status so a BNS internal transfer keeps its custom
+    status. ERPNext's overdue scheduler only escalates 'Unpaid%'/'Partly Paid%'
+    rows, so preventing the drift to Unpaid here keeps the status sticky."""
+
+    def patched_set_status(self, update=False, status=None, update_modified=True):
+        result = original_set_status(self, update=update, status=status, update_modified=update_modified)
+        try:
+            # Only re-assert on a recompute (status not explicitly forced) so an
+            # explicit set (e.g. Cancelled) is respected.
+            if status is None and _bns_should_hold_internal_status(self):
+                if self.status != "BNS Internally Transferred":
+                    self.status = "BNS Internally Transferred"
+                    if update:
+                        self.db_set("status", "BNS Internally Transferred", update_modified=update_modified)
+        except Exception:
+            logger.exception("BNS sticky status: re-assert failed for %s", getattr(self, "name", "?"))
+        return result
+
+    patched_set_status._bns_sticky_status_patched = True
+    return patched_set_status
+
+
+def _apply_bns_sticky_status_patch() -> None:
+    """Keep 'BNS Internally Transferred' sticky on internal SI/PI against
+    ERPNext's status recomputation (set_status -> Unpaid/Overdue/Paid)."""
+    global _BNS_STICKY_STATUS_PATCHED
+    if _BNS_STICKY_STATUS_PATCHED:
+        return
+    try:
+        from erpnext.accounts.doctype.purchase_invoice.purchase_invoice import PurchaseInvoice
+        from erpnext.accounts.doctype.sales_invoice.sales_invoice import SalesInvoice
+
+        if getattr(SalesInvoice.set_status, "_bns_sticky_status_patched", False):
+            _BNS_STICKY_STATUS_PATCHED = True
+            return
+        SalesInvoice.set_status = _wrap_bns_sticky_set_status(SalesInvoice.set_status)
+        PurchaseInvoice.set_status = _wrap_bns_sticky_set_status(PurchaseInvoice.set_status)
+        _BNS_STICKY_STATUS_PATCHED = True
+        logger.info("Applied BNS sticky-status patch (internal SI/PI keep 'BNS Internally Transferred')")
+    except Exception as e:
+        logger.error("Failed to apply BNS sticky-status patch: %s", str(e))
+
+
 # Best-effort eager patching on module import.
 _apply_bns_transfer_rate_stock_ledger_patch()
 _apply_bns_internal_gl_rewrite_patch()
 _apply_bns_repost_gl_failsafe_patch()
 _apply_bns_repost_accounting_ledger_patch()
 _apply_bns_asset_internal_patches()
+_apply_bns_sticky_status_patch()
 _suppress_repost_error_emails()
 
 
@@ -4059,6 +4137,7 @@ def apply_bns_runtime_patches() -> None:
     _apply_bns_repost_gl_failsafe_patch()
     _apply_bns_repost_accounting_ledger_patch()
     _apply_bns_asset_internal_patches()
+    _apply_bns_sticky_status_patch()
     _suppress_repost_error_emails()
 
 
