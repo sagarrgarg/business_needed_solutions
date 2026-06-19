@@ -361,7 +361,8 @@ fixtures = [
 # cadence without restarting anything.
 scheduler_events = {
     "daily": [
-        "business_needed_solutions.bns_branch_accounting.common_party_squareoff.scheduled_squareoff_run"
+        "business_needed_solutions.bns_branch_accounting.common_party_squareoff.scheduled_squareoff_run",
+        "business_needed_solutions.bns_branch_accounting.utils.reassert_bns_internal_invoice_status"
     ],
     "weekly": [
         "business_needed_solutions.business_needed_solutions.gl_sle_audit.scheduled_auto_fix_missing_ledgers"

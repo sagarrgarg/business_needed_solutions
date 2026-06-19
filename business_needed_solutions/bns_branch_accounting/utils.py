@@ -4117,6 +4117,51 @@ def _apply_bns_sticky_status_patch() -> None:
         logger.error("Failed to apply BNS sticky-status patch: %s", str(e))
 
 
+def reassert_bns_internal_invoice_status():
+    """Daily safety net: re-assert 'BNS Internally Transferred' on internal SI/PI
+    whose status drifted away (the overdue scheduler's bulk SQL, or any path that
+    wrote status outside set_status, or pre-patch data).
+
+    The set_status patch prevents drift in the live path; this heals whatever
+    slipped through. Uses frappe ORM (db_set) -- never a raw status SQL UPDATE.
+    """
+    cutoff = _get_internal_transfer_cutoff_date()
+    if not cutoff:
+        return
+
+    skip_statuses = [
+        "BNS Internally Transferred", "Cancelled", "Draft",
+        "Return", "Credit Note Issued", "Debit Note Issued",
+    ]
+    healed = 0
+    for dt, flag in (
+        ("Sales Invoice", "is_bns_internal_customer"),
+        ("Purchase Invoice", "is_bns_internal_supplier"),
+    ):
+        names = frappe.get_all(
+            dt,
+            filters={
+                "docstatus": 1,
+                flag: 1,
+                "status": ("not in", skip_statuses),
+                "posting_date": (">=", cutoff),
+            },
+            pluck="name",
+        )
+        for name in names:
+            try:
+                doc = frappe.get_doc(dt, name)
+                if _bns_should_hold_internal_status(doc):
+                    frappe.db.set_value(dt, name, "status", "BNS Internally Transferred", update_modified=False)
+                    healed += 1
+            except Exception:
+                logger.exception("BNS status re-assert failed for %s %s", dt, name)
+        frappe.db.commit()
+
+    if healed:
+        logger.info("BNS status re-assert: healed %s internal invoice(s)", healed)
+
+
 # Best-effort eager patching on module import.
 _apply_bns_transfer_rate_stock_ledger_patch()
 _apply_bns_internal_gl_rewrite_patch()
