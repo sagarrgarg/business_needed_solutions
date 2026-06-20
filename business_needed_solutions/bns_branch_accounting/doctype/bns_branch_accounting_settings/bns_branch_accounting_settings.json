@@ -29,7 +29,9 @@
   "enable_internal_dn_ewaybill",
   "tab_auto_fix",
   "enable_auto_fix_missing_ledgers",
-  "auto_fix_lookback_days"
+  "auto_fix_lookback_days",
+  "tab_reposting",
+  "prioritize_repost_item_valuation"
  ],
  "fields": [
   {
@@ -193,12 +195,24 @@
    "fieldname": "auto_fix_lookback_days",
    "fieldtype": "Int",
    "label": "Auto-Fix Lookback Days"
+  },
+  {
+   "fieldname": "tab_reposting",
+   "fieldtype": "Tab Break",
+   "label": "Reposting"
+  },
+  {
+   "default": "0",
+   "description": "When ON, a BNS cron re-triggers ERPNext's own 'repost_item_valuation.repost_entries' job every 5 minutes (instead of only hourly), so queued Repost Item Valuation entries keep draining continuously in a single worker. Frappe deduplicates the job, so it never runs concurrently with itself, and ERPNext's Stock Reposting timeslot limits are still honoured.",
+   "fieldname": "prioritize_repost_item_valuation",
+   "fieldtype": "Check",
+   "label": "Prioritise Repost Item Valuation (keep draining continuously)"
   }
  ],
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-06-02 12:00:00.000000",
+ "modified": "2026-06-20 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "BNS Branch Accounting",
  "name": "BNS Branch Accounting Settings",

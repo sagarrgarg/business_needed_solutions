@@ -4162,6 +4162,47 @@ def reassert_bns_internal_invoice_status():
         logger.info("BNS status re-assert: healed %s internal invoice(s)", healed)
 
 
+def bns_prioritize_repost_item_valuation():
+    """Cron (every 5 min): when the BNS setting is ON, keep the Repost Item
+    Valuation queue draining continuously instead of waiting for the hourly run.
+
+    Implementation note: we do NOT write our own repost loop. We re-trigger
+    ERPNext's own scheduled job ('repost_item_valuation.repost_entries') via
+    Scheduled Job Type.enqueue(force=True). Frappe deduplicates that job by its
+    rq_job_id, so it never runs concurrently with itself or with the hourly
+    scheduler -- zero double-processing risk -- and repost_entries() still
+    honours Stock Reposting Settings' configured timeslot. So this just makes
+    the *same* single-worker drainer start promptly (every 5 min) rather than
+    once an hour.
+    """
+    if not frappe.db.get_single_value(
+        "BNS Branch Accounting Settings", "prioritize_repost_item_valuation"
+    ):
+        return
+
+    # Nothing queued -> don't bother enqueuing.
+    pending = frappe.db.count(
+        "Repost Item Valuation",
+        {"status": ("in", ("Queued", "In Progress")), "docstatus": 1},
+    )
+    if not pending:
+        return
+
+    try:
+        job_type = frappe.get_doc(
+            "Scheduled Job Type", "repost_item_valuation.repost_entries"
+        )
+    except frappe.DoesNotExistError:
+        logger.warning(
+            "BNS prioritize repost: Scheduled Job Type 'repost_item_valuation.repost_entries' not found"
+        )
+        return
+
+    # enqueue() is a no-op if the job is already queued/running (frappe dedup),
+    # so calling it every 5 minutes simply keeps one drainer alive.
+    job_type.enqueue(force=True)
+
+
 # Best-effort eager patching on module import.
 _apply_bns_transfer_rate_stock_ledger_patch()
 _apply_bns_internal_gl_rewrite_patch()
