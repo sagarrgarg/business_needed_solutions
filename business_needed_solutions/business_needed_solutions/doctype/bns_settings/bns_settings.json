@@ -11,7 +11,7 @@
   "column_break_pan",
   "enforce_pan_uniqueness",
   "enforce_expense_account_for_non_stock_items",
-  "enable_bulk_cancel_sales_invoice",
+  "enable_bulk_cancel",
   "tab_break_gst_compliance",
   "gst_compliance_section",
   "block_purchase_invoice_same_gstin",
@@ -122,10 +122,10 @@
   },
   {
    "default": "0",
-   "description": "Adds 'Bulk Cancel (Background)' and 'Stop All Bulk Cancel Jobs' menu items in the Sales Invoice list view. Cancels matching SIs in background jobs (50/batch on long queue). Requires SI Cancel permission. Off by default \u2014 turn on only when you actually need to mass-cancel.",
-   "fieldname": "enable_bulk_cancel_sales_invoice",
+   "description": "Adds 'Bulk Cancel (Background)' and 'Stop All Bulk Cancel Jobs' menu items in the list view of supported doctypes (Sales Invoice, Purchase Invoice, Delivery Note, Purchase Receipt, Stock Entry, Journal Entry, Payment Entry). Cancels matching submitted docs in background jobs (50/batch on long queue). Requires Cancel permission on that doctype. Off by default \u2014 turn on only when you actually need to mass-cancel.",
+   "fieldname": "enable_bulk_cancel",
    "fieldtype": "Check",
-   "label": "Enable Bulk Cancel for Sales Invoice"
+   "label": "Enable Bulk Cancel (all supported doctypes)"
   },
   {
    "fieldname": "tab_break_gst_compliance",

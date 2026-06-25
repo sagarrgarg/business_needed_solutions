@@ -86,10 +86,13 @@ doctype_js = {
 
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 doctype_list_js = {
-    "Delivery Note" : "public/js/delivery_note_list.js",
-    "Purchase Receipt" : "public/js/purchase_receipt_list.js",
-    "Sales Invoice" : "public/js/sales_invoice_list.js",
-    "Purchase Invoice" : "public/js/purchase_invoice_list.js",
+    "Delivery Note" : ["public/js/delivery_note_list.js", "public/js/bulk_cancel_list.js"],
+    "Purchase Receipt" : ["public/js/purchase_receipt_list.js", "public/js/bulk_cancel_list.js"],
+    "Sales Invoice" : ["public/js/sales_invoice_list.js", "public/js/bulk_cancel_list.js"],
+    "Purchase Invoice" : ["public/js/purchase_invoice_list.js", "public/js/bulk_cancel_list.js"],
+    "Stock Entry" : "public/js/bulk_cancel_list.js",
+    "Journal Entry" : "public/js/bulk_cancel_list.js",
+    "Payment Entry" : "public/js/bulk_cancel_list.js",
     "Supplier" : "public/js/supplier_list.js"
 }
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
