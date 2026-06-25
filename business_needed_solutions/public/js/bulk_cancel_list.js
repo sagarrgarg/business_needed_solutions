@@ -256,13 +256,20 @@
         "Payment Entry",
     ];
 
-    BNS_BULK_CANCEL_DOCTYPES.forEach(function (dt) {
+    function bns_register(dt) {
         if (!frappe.listview_settings[dt]) {
             frappe.listview_settings[dt] = {};
         }
-        if (frappe.listview_settings[dt].__bns_bc_wrapped) return;
-        const _prev = frappe.listview_settings[dt].onload;
-        frappe.listview_settings[dt].onload = function (listview) {
+        const settings = frappe.listview_settings[dt];
+
+        // If the current onload is already ours, nothing to do. The marker lives
+        // ON the function, so if a doctype's own list JS reassigns/replaces the
+        // settings object (ERPNext does this for Journal/Stock/Payment Entry),
+        // the marker is gone with it and we correctly re-wrap.
+        if (settings.onload && settings.onload.__bns_bc) return;
+
+        const _prev = settings.onload;
+        const wrapped = function (listview) {
             if (_prev) {
                 try {
                     _prev(listview);
@@ -272,6 +279,9 @@
             }
             bns_attach_bulk_cancel(listview);
         };
-        frappe.listview_settings[dt].__bns_bc_wrapped = true;
-    });
+        wrapped.__bns_bc = true;
+        settings.onload = wrapped;
+    }
+
+    BNS_BULK_CANCEL_DOCTYPES.forEach(bns_register);
 })();
