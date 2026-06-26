@@ -31,7 +31,15 @@
   "enable_auto_fix_missing_ledgers",
   "auto_fix_lookback_days",
   "tab_reposting",
-  "prioritize_repost_item_valuation"
+  "prioritize_repost_item_valuation",
+  "repost_parallel_section",
+  "repost_worker_count",
+  "repost_reserved_workers",
+  "repost_window_col",
+  "repost_restrict_window",
+  "repost_window_start",
+  "repost_window_end",
+  "repost_window_days"
  ],
  "fields": [
   {
@@ -207,12 +215,68 @@
    "fieldname": "prioritize_repost_item_valuation",
    "fieldtype": "Check",
    "label": "Prioritise Repost Item Valuation (keep draining continuously)"
+  },
+  {
+   "depends_on": "eval:doc.prioritize_repost_item_valuation",
+   "fieldname": "repost_parallel_section",
+   "fieldtype": "Section Break",
+   "label": "Parallel Reposting (advanced)"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.prioritize_repost_item_valuation",
+   "description": "Parallel worker lanes draining the queue. Each lane handles a disjoint set of items (partitioned by item_code), so a given item's warehouses never split across lanes. 0 = auto: max(2, live 'long'-queue workers - Reserved Workers). Real throughput is capped by the number of background workers actually running.",
+   "fieldname": "repost_worker_count",
+   "fieldtype": "Int",
+   "label": "Parallel Repost Workers (0 = auto)"
+  },
+  {
+   "default": "4",
+   "depends_on": "eval:doc.prioritize_repost_item_valuation",
+   "description": "Auto mode only (Workers = 0): keep this many background workers free for other jobs. Lanes = max(2, total workers - this).",
+   "fieldname": "repost_reserved_workers",
+   "fieldtype": "Int",
+   "label": "Reserved Workers (auto mode)"
+  },
+  {
+   "depends_on": "eval:doc.prioritize_repost_item_valuation",
+   "fieldname": "repost_window_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.prioritize_repost_item_valuation",
+   "description": "Only run the parallel drain inside the window / weekdays below. The single-worker fallback is unaffected.",
+   "fieldname": "repost_restrict_window",
+   "fieldtype": "Check",
+   "label": "Restrict parallel reposting to a window"
+  },
+  {
+   "depends_on": "eval:doc.prioritize_repost_item_valuation && doc.repost_restrict_window",
+   "description": "e.g. 21:00:00. Overnight windows (start > end) are supported. Leave start & end blank to allow all hours on the selected weekdays.",
+   "fieldname": "repost_window_start",
+   "fieldtype": "Time",
+   "label": "Window Start"
+  },
+  {
+   "depends_on": "eval:doc.prioritize_repost_item_valuation && doc.repost_restrict_window",
+   "description": "e.g. 09:00:00.",
+   "fieldname": "repost_window_end",
+   "fieldtype": "Time",
+   "label": "Window End"
+  },
+  {
+   "depends_on": "eval:doc.prioritize_repost_item_valuation && doc.repost_restrict_window",
+   "description": "Comma-separated weekdays the parallel drain may run on, e.g. 'Sunday' or 'Saturday, Sunday'. Blank = every day.",
+   "fieldname": "repost_window_days",
+   "fieldtype": "Small Text",
+   "label": "Allowed Weekdays"
   }
  ],
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-06-20 12:00:00.000000",
+ "modified": "2026-06-26 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "BNS Branch Accounting",
  "name": "BNS Branch Accounting Settings",
