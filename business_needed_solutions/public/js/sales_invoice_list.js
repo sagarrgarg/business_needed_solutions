@@ -30,5 +30,5 @@ frappe.listview_settings['Sales Invoice'].get_indicator = function(doc) {
 };
 
 // NOTE: "Bulk Cancel (Background)" / "Stop All Bulk Cancel Jobs" menu items are
-// now provided by the shared public/js/bulk_cancel_list.js (registered for all
-// supported doctypes via doctype_list_js).
+// provided globally by public/js/bulk_cancel.js (loaded via app_include_js with
+// a ?v= cache-bust; attaches per route to every supported list view).

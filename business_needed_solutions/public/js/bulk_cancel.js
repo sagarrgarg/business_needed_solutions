@@ -1,23 +1,35 @@
-// BNS Bulk Cancel (Background) — shared list-view UI.
-// Registered via doctype_list_js for every supported doctype; works generically
-// by reading the current list's doctype. Backend allow-lists the doctype.
+// BNS Bulk Cancel (Background) — list-view UI.
+//
+// Loaded globally via app_include_js (so the ?v= query param reliably busts the
+// browser cache on every release). It attaches its menu items on *route change*
+// to a supported list view — NOT via listview_settings[doctype].onload, because
+// a global script runs once at desk boot, BEFORE ERPNext's per-doctype list JS,
+// which reassigns listview_settings[doctype] and would wipe a pre-set onload
+// with no chance to re-wrap. The router approach re-runs on every navigation.
 
 (function () {
     const M = "business_needed_solutions.business_needed_solutions.bulk_cancel";
+    const SUPPORTED = [
+        "Sales Invoice",
+        "Purchase Invoice",
+        "Delivery Note",
+        "Purchase Receipt",
+        "Stock Entry",
+        "Journal Entry",
+        "Payment Entry",
+    ];
 
     function bns_attach_bulk_cancel(listview) {
         const doctype = listview.doctype;
 
-        // Guard: onload can fire more than once for the same list — don't add the
-        // menu items (or run the role/enabled check) twice.
+        // Guard: don't add the menu items twice for the same list instance.
         if (listview.__bns_bc_added) return;
-        listview.__bns_bc_added = true;
 
         // Only show to users who can actually cancel this doctype (backend
         // re-checks the cancel permission on every call regardless).
-        if (!frappe.model.can_cancel(doctype)) {
-            return;
-        }
+        if (!frappe.model.can_cancel(doctype)) return;
+
+        listview.__bns_bc_added = true;
 
         frappe.call({
             method: M + ".is_enabled",
@@ -46,7 +58,6 @@
     }
 
     function bns_format_filters_human(filters) {
-        if (!filters || !filters.length) return __("(no filters — entire {0} table)", [""]);
         return filters
             .map(function (f) {
                 const field = f[1], op = f[2], val = f[3];
@@ -242,46 +253,24 @@
         });
     }
 
-    // Register onload for every supported doctype, preserving any existing one.
-    // Wrap-once guard so SPA re-evaluation of this file doesn't chain wrappers.
-    frappe.provide("frappe.listview_settings");
+    // --- Attach on navigation to a supported list view ---
+    function bns_on_route() {
+        const route = frappe.get_route() || [];
+        if (route[0] !== "List") return;
+        const doctype = route[1];
+        if (SUPPORTED.indexOf(doctype) === -1) return;
 
-    const BNS_BULK_CANCEL_DOCTYPES = [
-        "Sales Invoice",
-        "Purchase Invoice",
-        "Delivery Note",
-        "Purchase Receipt",
-        "Stock Entry",
-        "Journal Entry",
-        "Payment Entry",
-    ];
-
-    function bns_register(dt) {
-        if (!frappe.listview_settings[dt]) {
-            frappe.listview_settings[dt] = {};
-        }
-        const settings = frappe.listview_settings[dt];
-
-        // If the current onload is already ours, nothing to do. The marker lives
-        // ON the function, so if a doctype's own list JS reassigns/replaces the
-        // settings object (ERPNext does this for Journal/Stock/Payment Entry),
-        // the marker is gone with it and we correctly re-wrap.
-        if (settings.onload && settings.onload.__bns_bc) return;
-
-        const _prev = settings.onload;
-        const wrapped = function (listview) {
-            if (_prev) {
-                try {
-                    _prev(listview);
-                } catch (e) {
-                    /* ignore */
-                }
+        // cur_list may lag the route change; retry briefly until it's the right list.
+        let tries = 0;
+        (function wait() {
+            if (typeof cur_list !== "undefined" && cur_list && cur_list.doctype === doctype && cur_list.page) {
+                bns_attach_bulk_cancel(cur_list);
+                return;
             }
-            bns_attach_bulk_cancel(listview);
-        };
-        wrapped.__bns_bc = true;
-        settings.onload = wrapped;
+            if (tries++ < 40) setTimeout(wait, 50);
+        })();
     }
 
-    BNS_BULK_CANCEL_DOCTYPES.forEach(bns_register);
+    frappe.router.on("change", bns_on_route);
+    bns_on_route(); // handle a full-page load that lands directly on a list
 })();

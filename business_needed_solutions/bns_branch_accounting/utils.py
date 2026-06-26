@@ -8802,6 +8802,9 @@ def ignore_parent_cancellation_links_for_bns_internal(doc, method: Optional[str]
             # Payment-ledger link safety
             "Payment Ledger Entry",
             "Advance Payment Ledger Entry",
+            # Repost log must not block cancel (newer ERPNext ignores these too)
+            "Repost Accounting Ledger",
+            "Repost Accounting Ledger Items",
         ]
     elif doc.doctype == "Purchase Invoice":
         ignore_linked_doctypes = [
@@ -8812,12 +8815,40 @@ def ignore_parent_cancellation_links_for_bns_internal(doc, method: Optional[str]
             "Sales Invoice",
             "Payment Ledger Entry",
             "Advance Payment Ledger Entry",
+            "Repost Accounting Ledger",
+            "Repost Accounting Ledger Items",
         ]
     else:
         return
 
     doc.ignore_linked_doctypes = ignore_linked_doctypes
     doc.flags.ignore_linked_doctypes = ignore_linked_doctypes
+
+
+# Repost Accounting Ledger is just a repost log; a submitted RAL referencing a
+# voucher must never block that voucher's cancellation.
+REPOST_LEDGER_LINK_DOCTYPES = ("Repost Accounting Ledger", "Repost Accounting Ledger Items")
+
+
+def bns_ignore_repost_ledger_links_on_cancel(doc, method: Optional[str] = None) -> None:
+    """Append Repost Accounting Ledger (+ child) to ignore_linked_doctypes on cancel.
+
+    Newer ERPNext already ignores these, but older versions (and BNS's own
+    before_cancel overrides) may not — leaving a submitted Repost Accounting
+    Ledger to raise "linked with ... Repost Accounting Ledger" and block cancel.
+
+    Hooked on ``on_cancel`` so it runs AFTER the controller's on_cancel (which
+    may reset ``ignore_linked_doctypes``) and before ``check_no_back_links_exist``
+    (frappe document.py). Appends rather than replaces, so it never drops any
+    ignore another handler already set. The RAL is left intact (it's a log); the
+    voucher's own cancel reposts its GL anyway.
+    """
+    existing = list(doc.get("ignore_linked_doctypes") or [])
+    for dt in REPOST_LEDGER_LINK_DOCTYPES:
+        if dt not in existing:
+            existing.append(dt)
+    doc.ignore_linked_doctypes = existing
+    doc.flags.ignore_linked_doctypes = existing
 
 
 def ignore_payment_ledger_cancellation_links_for_dn(doc, method: Optional[str] = None) -> None:
@@ -8844,6 +8875,9 @@ def ignore_payment_ledger_cancellation_links_for_dn(doc, method: Optional[str] =
         # party-tracked accounts must not block DN cancel.
         "Payment Ledger Entry",
         "Advance Payment Ledger Entry",
+        # Repost log must not block cancel.
+        "Repost Accounting Ledger",
+        "Repost Accounting Ledger Items",
     ]
     doc.ignore_linked_doctypes = ignore_linked_doctypes
     doc.flags.ignore_linked_doctypes = ignore_linked_doctypes
