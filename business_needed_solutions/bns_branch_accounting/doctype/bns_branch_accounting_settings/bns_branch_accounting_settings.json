@@ -29,7 +29,9 @@
   "enable_internal_dn_ewaybill",
   "tab_auto_fix",
   "enable_auto_fix_missing_ledgers",
-  "auto_fix_lookback_days"
+  "auto_fix_lookback_days",
+  "tab_reposting",
+  "repost_job_timeout"
  ],
  "fields": [
   {
@@ -193,12 +195,24 @@
    "fieldname": "auto_fix_lookback_days",
    "fieldtype": "Int",
    "label": "Auto-Fix Lookback Days"
+  },
+  {
+   "fieldname": "tab_reposting",
+   "fieldtype": "Tab Break",
+   "label": "Reposting"
+  },
+  {
+   "default": "1800",
+   "description": "Timeout (seconds) for BNS background repost / audit / remediation jobs: asset-transfer NBV repost, internal-transfer accounting-audit reposts (SLE + GL), receive-mismatch fix, and asset remediation. Default 1800 (30 min). Lower it (e.g. 300) so stuck jobs are killed and retried sooner. Minimum 60s; blank/0 falls back to 1800.",
+   "fieldname": "repost_job_timeout",
+   "fieldtype": "Int",
+   "label": "Repost Job Timeout (Seconds)"
   }
  ],
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-06-26 13:00:00.000000",
+ "modified": "2026-06-28 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "BNS Branch Accounting",
  "name": "BNS Branch Accounting Settings",

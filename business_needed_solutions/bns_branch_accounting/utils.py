@@ -4514,6 +4514,22 @@ def _bns_repost_transfers_for_asset(asset_name: str) -> None:
             logger.exception("BNS asset NBV repost failed for %s %s", voucher_type, voucher_no)
 
 
+def get_bns_repost_job_timeout() -> int:
+    """Configurable RQ timeout (seconds) for BNS background repost / audit /
+    remediation jobs. Set via BNS Branch Accounting Settings -> repost_job_timeout.
+    Falls back to 1800 (30 min) when unset; floored at 60s so a misconfigured tiny
+    value can't kill every job mid-run."""
+    try:
+        val = frappe.utils.cint(
+            frappe.db.get_single_value("BNS Branch Accounting Settings", "repost_job_timeout")
+        )
+    except Exception:
+        val = 0
+    if not val:
+        return 1800
+    return max(60, val)
+
+
 def bns_repost_asset_transfers_on_depreciation(doc, method: Optional[str] = None) -> None:
     """When a depreciation Journal Entry (incl. back-dated) changes an asset's
     NBV, repost any BNS internal transfers of that asset so their NBV-based GL
@@ -4535,7 +4551,7 @@ def bns_repost_asset_transfers_on_depreciation(doc, method: Optional[str] = None
         frappe.enqueue(
             "business_needed_solutions.bns_branch_accounting.utils._bns_repost_transfers_for_asset",
             queue="long",
-            timeout=1800,
+            timeout=get_bns_repost_job_timeout(),
             asset_name=asset_name,
         )
 
