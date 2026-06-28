@@ -4516,12 +4516,12 @@ def _bns_repost_transfers_for_asset(asset_name: str) -> None:
 
 def get_bns_repost_job_timeout() -> int:
     """Configurable RQ timeout (seconds) for BNS background repost / audit /
-    remediation jobs. Set via BNS Branch Accounting Settings -> repost_job_timeout.
+    remediation jobs. Set via BNS Settings -> Reposting -> repost_job_timeout.
     Falls back to 1800 (30 min) when unset; floored at 60s so a misconfigured tiny
     value can't kill every job mid-run."""
     try:
         val = frappe.utils.cint(
-            frappe.db.get_single_value("BNS Branch Accounting Settings", "repost_job_timeout")
+            frappe.db.get_single_value("BNS Settings", "repost_job_timeout")
         )
     except Exception:
         val = 0
@@ -4530,21 +4530,35 @@ def get_bns_repost_job_timeout() -> int:
     return max(60, val)
 
 
-def bns_handle_stuck_repost_item_valuation():
-    """Scheduled watchdog (every 15 min): auto-handle Repost Item Valuation
-    entries stuck 'In Progress' past the configured timeout -- their worker has
-    almost certainly died. Per BNS Branch Accounting Settings:
-      - Requeue -> status set back to 'Queued' so ERPNext retries it
-      - Skip    -> status set to 'Skipped' (finalize a poison-pill entry)
+_BNS_RIV_WATCHDOG_FREQ = {"Every 1 minute": 1, "Every 5 minutes": 5, "Every 15 minutes": 15}
 
-    Off by default (action 'Disabled'). The staleness test uses `modified`, which
-    ERPNext bumps as a live repost advances (current_index / data file), so a
-    slow-but-running repost is not interrupted provided the timeout is set
-    comfortably above the longest legitimate single repost."""
-    settings = frappe.get_cached_doc("BNS Branch Accounting Settings")
+
+def bns_handle_stuck_repost_item_valuation():
+    """Scheduler cron (fires every minute, self-throttled): auto-handle Repost
+    Item Valuation entries stuck 'In Progress' past the configured timeout --
+    their worker has almost certainly died. Per BNS Settings -> Reposting:
+      - Requeue -> restart_reposting() (resets current_index / data file) so
+                   ERPNext re-runs it cleanly from scratch -- NOT a raw status
+                   flip, which would resume from a crashed checkpoint.
+      - Skip    -> status set to 'Skipped' (finalize a poison-pill entry).
+
+    Off by default (action 'Disabled'). Frequency (1/5/15 min) throttles the scan.
+    Staleness uses `modified`, which ERPNext bumps after every voucher batch of a
+    live repost (stock_ledger.update_args_in_repost_item_valuation), so a slow-
+    but-running repost is not restarted provided the timeout sits comfortably
+    above the longest single-batch time."""
+    settings = frappe.get_cached_doc("BNS Settings")
     action = settings.get("riv_stuck_action") or "Disabled"
     if action not in ("Requeue", "Skip"):
         return
+
+    # Self-throttle: cron fires every minute; only scan at the chosen frequency.
+    freq_min = _BNS_RIV_WATCHDOG_FREQ.get(settings.get("riv_stuck_check_frequency"), 15)
+    last_run = frappe.cache().get_value("bns_riv_watchdog_last_run")
+    now_str = frappe.utils.now()
+    if last_run and frappe.utils.time_diff_in_seconds(now_str, last_run) < (freq_min * 60 - 15):
+        return
+    frappe.cache().set_value("bns_riv_watchdog_last_run", now_str)
 
     minutes = max(5, frappe.utils.cint(settings.get("riv_stuck_timeout_minutes")) or 30)
     cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-minutes)
@@ -4557,13 +4571,23 @@ def bns_handle_stuck_repost_item_valuation():
     if not stuck:
         return
 
-    new_status = "Queued" if action == "Requeue" else "Skipped"
+    done = 0
     for name in stuck:
-        frappe.db.set_value("Repost Item Valuation", name, "status", new_status, update_modified=True)
+        try:
+            if action == "Requeue":
+                # ERPNext's sanctioned reset: clears current_index / reposting_data_file
+                # / gl_reposting_index so the retry starts fresh instead of resuming a
+                # crashed checkpoint.
+                frappe.get_doc("Repost Item Valuation", name).restart_reposting()
+            else:
+                frappe.db.set_value("Repost Item Valuation", name, "status", "Skipped", update_modified=True)
+            done += 1
+        except Exception:
+            logger.exception("BNS RIV watchdog: failed on %s", name)
     frappe.db.commit()
     logger.info(
-        "BNS RIV watchdog: %s %d stuck entries (In Progress > %d min) -> %s",
-        action, len(stuck), minutes, new_status,
+        "BNS RIV watchdog: %s %d/%d stuck entries (In Progress > %d min)",
+        action, done, len(stuck), minutes,
     )
 
 

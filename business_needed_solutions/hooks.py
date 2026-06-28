@@ -380,7 +380,7 @@ scheduler_events = {
         "business_needed_solutions.business_needed_solutions.gl_sle_audit.scheduled_auto_fix_missing_ledgers"
     ],
     "cron": {
-        "*/15 * * * *": [
+        "* * * * *": [
             "business_needed_solutions.bns_branch_accounting.utils.bns_handle_stuck_repost_item_valuation"
         ]
     }
