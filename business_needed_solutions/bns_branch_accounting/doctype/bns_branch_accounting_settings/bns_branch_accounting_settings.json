@@ -31,7 +31,10 @@
   "enable_auto_fix_missing_ledgers",
   "auto_fix_lookback_days",
   "tab_reposting",
-  "repost_job_timeout"
+  "repost_job_timeout",
+  "riv_stuck_section",
+  "riv_stuck_action",
+  "riv_stuck_timeout_minutes"
  ],
  "fields": [
   {
@@ -207,12 +210,33 @@
    "fieldname": "repost_job_timeout",
    "fieldtype": "Int",
    "label": "Repost Job Timeout (Seconds)"
+  },
+  {
+   "fieldname": "riv_stuck_section",
+   "fieldtype": "Section Break",
+   "label": "Stuck Repost Item Valuation Watchdog"
+  },
+  {
+   "default": "Disabled",
+   "description": "Auto-handle Repost Item Valuation entries stuck 'In Progress' (worker died) longer than the timeout below. Requeue = set back to Queued so ERPNext retries it; Skip = finalize as Skipped (for poison-pill entries that keep failing). Checked every 15 min by the scheduler.",
+   "fieldname": "riv_stuck_action",
+   "fieldtype": "Select",
+   "label": "On Stuck In-Progress RIV",
+   "options": "Disabled\nRequeue\nSkip"
+  },
+  {
+   "default": "30",
+   "depends_on": "eval:doc.riv_stuck_action && doc.riv_stuck_action != 'Disabled'",
+   "description": "An 'In Progress' Repost Item Valuation whose modified timestamp is older than this many minutes is treated as stuck. Keep this comfortably above your longest legitimate single repost so a slow-but-live repost is never interrupted.",
+   "fieldname": "riv_stuck_timeout_minutes",
+   "fieldtype": "Int",
+   "label": "Stuck Timeout (Minutes)"
   }
  ],
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-06-28 12:00:00.000000",
+ "modified": "2026-06-28 14:00:00.000000",
  "modified_by": "Administrator",
  "module": "BNS Branch Accounting",
  "name": "BNS Branch Accounting Settings",

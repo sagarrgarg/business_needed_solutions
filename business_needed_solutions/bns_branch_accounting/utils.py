@@ -4530,6 +4530,43 @@ def get_bns_repost_job_timeout() -> int:
     return max(60, val)
 
 
+def bns_handle_stuck_repost_item_valuation():
+    """Scheduled watchdog (every 15 min): auto-handle Repost Item Valuation
+    entries stuck 'In Progress' past the configured timeout -- their worker has
+    almost certainly died. Per BNS Branch Accounting Settings:
+      - Requeue -> status set back to 'Queued' so ERPNext retries it
+      - Skip    -> status set to 'Skipped' (finalize a poison-pill entry)
+
+    Off by default (action 'Disabled'). The staleness test uses `modified`, which
+    ERPNext bumps as a live repost advances (current_index / data file), so a
+    slow-but-running repost is not interrupted provided the timeout is set
+    comfortably above the longest legitimate single repost."""
+    settings = frappe.get_cached_doc("BNS Branch Accounting Settings")
+    action = settings.get("riv_stuck_action") or "Disabled"
+    if action not in ("Requeue", "Skip"):
+        return
+
+    minutes = max(5, frappe.utils.cint(settings.get("riv_stuck_timeout_minutes")) or 30)
+    cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-minutes)
+
+    stuck = frappe.get_all(
+        "Repost Item Valuation",
+        filters={"status": "In Progress", "docstatus": 1, "modified": ("<", cutoff)},
+        pluck="name",
+    )
+    if not stuck:
+        return
+
+    new_status = "Queued" if action == "Requeue" else "Skipped"
+    for name in stuck:
+        frappe.db.set_value("Repost Item Valuation", name, "status", new_status, update_modified=True)
+    frappe.db.commit()
+    logger.info(
+        "BNS RIV watchdog: %s %d stuck entries (In Progress > %d min) -> %s",
+        action, len(stuck), minutes, new_status,
+    )
+
+
 def bns_repost_asset_transfers_on_depreciation(doc, method: Optional[str] = None) -> None:
     """When a depreciation Journal Entry (incl. back-dated) changes an asset's
     NBV, repost any BNS internal transfers of that asset so their NBV-based GL
