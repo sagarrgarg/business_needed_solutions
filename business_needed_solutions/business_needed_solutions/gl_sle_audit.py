@@ -157,6 +157,16 @@ STATUS_MISSING_GL = "Missing GL"
 STATUS_MISSING_SLE = "Missing SLE"
 STATUS_MISSING_BOTH = "Missing GL & SLE"
 STATUS_IMBALANCED_GL = "Imbalanced GL"
+
+# Cancelled (docstatus=2) doc that STILL has active (is_cancelled=0) GL/SLE rows
+# -- the footprint of an interrupted cancel (e.g. a deadlocked repost left a
+# dependant SLE / GL un-cancelled). A fully cancelled voucher must have ZERO
+# active GL/SLE; the heal flags the stray rows is_cancelled=1 and reposts the
+# affected item-warehouses so balances recompute.
+STATUS_CANCELLED_ACTIVE_GL = "Cancelled · active GL"
+STATUS_CANCELLED_ACTIVE_SLE = "Cancelled · active SLE"
+STATUS_CANCELLED_ACTIVE_BOTH = "Cancelled · active GL & SLE"
+
 # Imbalanced SLE intentionally dropped — sign mismatches are byproducts
 # of upstream negative-stock issues, NOT bugs in the GL/SLE pipeline.
 # Use BNS Settings `enable_per_warehouse_negative_stock_disallow` +
@@ -359,6 +369,85 @@ def _audit_one_doctype(
     return output[: int(limit)] if limit else output
 
 
+def _audit_cancelled_active_one_doctype(
+    doctype: str,
+    cutoff_date: Optional[str],
+    company: Optional[str] = None,
+    limit: int = 50000,
+) -> List[Dict[str, Any]]:
+    """Find CANCELLED (docstatus=2) docs that still carry ACTIVE (is_cancelled=0)
+    GL Entry or Stock Ledger Entry rows. A fully cancelled voucher must have
+    zero active GL/SLE; any left over is the footprint of an interrupted cancel
+    (typically a deadlocked / failed repost that left a dependant SLE or GL
+    un-cancelled). Output schema matches `_audit_one_doctype` so the report
+    renders both kinds of finding uniformly."""
+    spec = AUDIT_SPEC[doctype]
+    posting_field = spec["posting_field"]
+    parent_table = f"tab{doctype}"
+
+    where_clauses = ["p.docstatus = 2", "(COALESCE(gl.c, 0) > 0 OR COALESCE(sle.c, 0) > 0)"]
+    params: Dict[str, Any] = {"doctype": doctype}
+    if cutoff_date:
+        where_clauses.append(f"p.{posting_field} >= %(cutoff)s")
+        params["cutoff"] = getdate(cutoff_date)
+    if company:
+        where_clauses.append("p.company = %(company)s")
+        params["company"] = company
+    where_sql = " AND ".join(where_clauses)
+
+    sql = f"""
+        SELECT p.name, p.{posting_field} AS posting_date, p.company,
+               COALESCE(gl.c, 0)  AS gl_count,
+               COALESCE(sle.c, 0) AS sle_count
+        FROM `{parent_table}` p
+        LEFT JOIN (
+            SELECT voucher_no, COUNT(*) AS c FROM `tabGL Entry`
+            WHERE voucher_type = %(doctype)s AND is_cancelled = 0 GROUP BY voucher_no
+        ) gl ON gl.voucher_no = p.name
+        LEFT JOIN (
+            SELECT voucher_no, COUNT(*) AS c FROM `tabStock Ledger Entry`
+            WHERE voucher_type = %(doctype)s AND is_cancelled = 0 GROUP BY voucher_no
+        ) sle ON sle.voucher_no = p.name
+        WHERE {where_sql}
+        ORDER BY p.{posting_field} DESC, p.name DESC
+        LIMIT {_SCAN_CAP}
+    """
+    rows = frappe.db.sql(sql, params, as_dict=True)
+
+    output: List[Dict[str, Any]] = []
+    for r in rows:
+        gl_active = cint(r["gl_count"])
+        sle_active = cint(r["sle_count"])
+        if gl_active and sle_active:
+            status_label = STATUS_CANCELLED_ACTIVE_BOTH
+        elif gl_active:
+            status_label = STATUS_CANCELLED_ACTIVE_GL
+        else:
+            status_label = STATUS_CANCELLED_ACTIVE_SLE
+
+        output.append({
+            "doctype": doctype,
+            "name": r["name"],
+            "posting_date": r["posting_date"],
+            "company": r["company"],
+            "update_stock": 0,
+            "perpetual": 0,
+            "expected_gl": 0,
+            "expected_sle": 0,
+            "gl_count": gl_active,
+            "gl_dr": 0,
+            "gl_cr": 0,
+            "gl_imbalance": 0,
+            "sle_count": sle_active,
+            "stock_item_count": 0,
+            "asset_item_count": 0,
+            "total_item_count": 0,
+            "status": status_label,
+        })
+
+    return output[: int(limit)] if limit else output
+
+
 def _resolve_expectations(
     spec: Dict[str, Any],
     row: Dict[str, Any],
@@ -469,6 +558,9 @@ def audit_gl_sle(cutoff_date=None, doctypes=None, company=None, statuses=None, l
             all_rows.extend(
                 _audit_one_doctype(dt, cutoff_date, company=company, limit=int(limit))
             )
+            all_rows.extend(
+                _audit_cancelled_active_one_doctype(dt, cutoff_date, company=company, limit=int(limit))
+            )
         except Exception as e:
             frappe.log_error(
                 title=f"GL/SLE Audit failed for {dt}",
@@ -505,6 +597,9 @@ _VALID_STATUSES = frozenset({
     STATUS_MISSING_SLE,
     STATUS_MISSING_BOTH,
     STATUS_IMBALANCED_GL,
+    STATUS_CANCELLED_ACTIVE_GL,
+    STATUS_CANCELLED_ACTIVE_SLE,
+    STATUS_CANCELLED_ACTIVE_BOTH,
 })
 
 
@@ -542,7 +637,7 @@ def _normalize_list_arg(value: Any, *, allowed: Optional[frozenset] = None) -> O
 
 
 @frappe.whitelist()
-def repair_gl_sle(docs, cutoff_date=None, fix_missing=True, fix_imbalanced=False, dry_run=True, force_sync=False):
+def repair_gl_sle(docs, cutoff_date=None, fix_missing=True, fix_imbalanced=False, dry_run=True, force_sync=False, fix_cancelled_active=False):
     _bns_require_accounts_write()
     """Attempt to regenerate missing GL/SLE for the given docs.
 
@@ -569,6 +664,7 @@ def repair_gl_sle(docs, cutoff_date=None, fix_missing=True, fix_imbalanced=False
     docs = _normalize_doc_list(docs)
     fix_missing = cint(fix_missing)
     fix_imbalanced = cint(fix_imbalanced)
+    fix_cancelled_active = cint(fix_cancelled_active)
     dry_run = cint(dry_run)
     force_sync = cint(force_sync)
 
@@ -586,6 +682,7 @@ def repair_gl_sle(docs, cutoff_date=None, fix_missing=True, fix_imbalanced=False
             cutoff_date=cutoff_date,
             fix_missing=fix_missing,
             fix_imbalanced=fix_imbalanced,
+            fix_cancelled_active=fix_cancelled_active,
             user=frappe.session.user,
             # Pass job_name into the worker so it can cache progress under it.
             # Use a non-reserved kwarg name — `job_name` is consumed by Frappe's
@@ -599,6 +696,7 @@ def repair_gl_sle(docs, cutoff_date=None, fix_missing=True, fix_imbalanced=False
             "dry_run": False,
             "fix_missing": bool(fix_missing),
             "fix_imbalanced": bool(fix_imbalanced),
+            "fix_cancelled_active": bool(fix_cancelled_active),
             "cutoff_date": cutoff_date,
         }
 
@@ -607,6 +705,7 @@ def repair_gl_sle(docs, cutoff_date=None, fix_missing=True, fix_imbalanced=False
         cutoff_date=cutoff_date,
         fix_missing=fix_missing,
         fix_imbalanced=fix_imbalanced,
+        fix_cancelled_active=fix_cancelled_active,
         dry_run=dry_run,
         publish_progress=False,
     )
@@ -619,6 +718,7 @@ def _run_repair_in_background(
     fix_imbalanced: int,
     user: str,
     target_job_name: Optional[str] = None,
+    fix_cancelled_active: int = 0,
 ) -> Dict[str, Any]:
     """Worker entry point for background repair. Publishes realtime progress
     and ALSO stashes the final result in the Redis cache keyed by job_name,
@@ -634,6 +734,7 @@ def _run_repair_in_background(
             cutoff_date=cutoff_date,
             fix_missing=fix_missing,
             fix_imbalanced=fix_imbalanced,
+            fix_cancelled_active=fix_cancelled_active,
             dry_run=False,
             publish_progress=True,
             progress_job_name=target_job_name,
@@ -676,6 +777,7 @@ def _run_repair_loop(
     dry_run: int,
     publish_progress: bool,
     progress_job_name: Optional[str] = None,
+    fix_cancelled_active: int = 0,
 ) -> Dict[str, Any]:
     """Core repair loop. Used by both inline and background paths.
 
@@ -688,6 +790,7 @@ def _run_repair_loop(
         "dry_run": bool(dry_run),
         "fix_missing": bool(fix_missing),
         "fix_imbalanced": bool(fix_imbalanced),
+        "fix_cancelled_active": bool(fix_cancelled_active),
         "cutoff_date": cutoff_date,
         "repaired": [],
         "skipped": [],
@@ -709,18 +812,24 @@ def _run_repair_loop(
         # checks roles, not per-document write/submit permission. Submitting
         # a forged docs list against doctypes the user can't otherwise touch
         # would slip past the role gate without this.
-        if not frappe.has_permission(dt, "submit", doc=name):
+        _required_perm = "cancel" if _is_cancelled_active_status(status) else "submit"
+        if not frappe.has_permission(dt, _required_perm, doc=name):
             result["skipped"].append({
                 "doctype": dt, "name": name,
-                "reason": "no submit permission for this doc",
+                "reason": f"no {_required_perm} permission for this doc",
             })
             _maybe_progress(publish_progress, idx, total, dt, name, "skipped", progress_job_name)
             continue
 
         is_missing = STATUS_MISSING_GL in status or STATUS_MISSING_SLE in status or STATUS_MISSING_BOTH in status
         is_imbalanced = STATUS_IMBALANCED_GL in status
+        is_cancelled_active = _is_cancelled_active_status(status)
 
-        will_fix = (is_missing and fix_missing) or (is_imbalanced and fix_imbalanced)
+        will_fix = (
+            (is_missing and fix_missing)
+            or (is_imbalanced and fix_imbalanced)
+            or (is_cancelled_active and fix_cancelled_active)
+        )
         if not will_fix:
             result["skipped"].append({
                 "doctype": dt, "name": name, "reason": f"status='{status}' not in fix scope"
@@ -735,7 +844,10 @@ def _run_repair_loop(
             continue
 
         try:
-            details = _execute_repair(dt, name, plan)
+            if "heal_cancelled_active" in plan:
+                details = _heal_cancelled_active(dt, name)
+            else:
+                details = _execute_repair(dt, name, plan)
             frappe.db.commit()
             result["repaired"].append({
                 "doctype": dt,
@@ -849,8 +961,84 @@ def _normalize_doc_list(docs: Any) -> List[Dict[str, str]]:
     return out
 
 
+def _is_cancelled_active_status(status: str) -> bool:
+    return (
+        STATUS_CANCELLED_ACTIVE_GL in status
+        or STATUS_CANCELLED_ACTIVE_SLE in status
+        or STATUS_CANCELLED_ACTIVE_BOTH in status
+    )
+
+
+def _heal_cancelled_active(doctype: str, name: str) -> Dict[str, Any]:
+    """Heal a CANCELLED voucher that still has active GL/SLE rows.
+
+    A cancelled voucher's normal flow already posted is_cancelled=1 reversal
+    rows; the bug is that one or more ORIGINALS were left is_cancelled=0 (a
+    deadlocked/failed repost dropped the dependant-SLE sync). Flagging them
+    is_cancelled=1 makes net effect zero (original excluded + reversal already
+    excluded) -- the correct state for a cancelled voucher. Then we repost each
+    affected item-warehouse so the running balance/valuation recomputes without
+    the stray rows. Guarded to ONLY run when docstatus=2."""
+    ds = frappe.db.get_value(doctype, name, "docstatus")
+    if cint(ds) != 2:
+        raise frappe.ValidationError(
+            f"{doctype} {name} is not cancelled (docstatus={ds}); heal aborted"
+        )
+
+    details: Dict[str, Any] = {"gl_cancelled": 0, "sle_cancelled": 0, "reposted": []}
+
+    gl_names = frappe.get_all(
+        "GL Entry",
+        filters={"voucher_type": doctype, "voucher_no": name, "is_cancelled": 0},
+        pluck="name",
+    )
+    for g in gl_names:
+        frappe.db.set_value("GL Entry", g, "is_cancelled", 1, update_modified=True)
+    details["gl_cancelled"] = len(gl_names)
+
+    sles = frappe.get_all(
+        "Stock Ledger Entry",
+        filters={"voucher_type": doctype, "voucher_no": name, "is_cancelled": 0},
+        fields=["name", "item_code", "warehouse", "posting_date", "company"],
+    )
+    for s in sles:
+        frappe.db.set_value("Stock Ledger Entry", s.name, "is_cancelled", 1, update_modified=True)
+    details["sle_cancelled"] = len(sles)
+
+    # Repost each affected item-warehouse (deduped) so balances recompute.
+    seen: set = set()
+    for s in sles:
+        if not s.item_code or not s.warehouse:
+            continue
+        key = (s.item_code, s.warehouse)
+        if key in seen:
+            continue
+        seen.add(key)
+        riv = frappe.get_doc({
+            "doctype": "Repost Item Valuation",
+            "based_on": "Item and Warehouse",
+            "company": s.company,
+            "item_code": s.item_code,
+            "warehouse": s.warehouse,
+            "posting_date": s.posting_date,
+            "posting_time": "00:00:00",
+            "allow_negative_stock": 1,
+        })
+        riv.flags.ignore_permissions = True
+        riv.insert()
+        riv.submit()
+        riv.repost_now()
+        details["reposted"].append({
+            "item_code": s.item_code, "warehouse": s.warehouse,
+            "riv": riv.name, "status": riv.status,
+        })
+    return details
+
+
 def _plan_repair(doctype: str, status: str) -> List[str]:
     """Decide which repair actions to run for this doctype + status."""
+    if _is_cancelled_active_status(status):
+        return ["heal_cancelled_active"]
     plan: List[str] = []
     spec = AUDIT_SPEC[doctype]
     if STATUS_MISSING_SLE in status and spec["expect_sle"] != "never":

@@ -25,6 +25,9 @@ frappe.query_reports["GL SLE Audit"] = {
                     { value: "Missing SLE", description: "" },
                     { value: "Missing GL & SLE", description: "" },
                     { value: "Imbalanced GL", description: "sum(dr) ≠ sum(cr)" },
+                    { value: "Cancelled · active GL", description: "cancelled doc, GL still active" },
+                    { value: "Cancelled · active SLE", description: "cancelled doc, SLE still active" },
+                    { value: "Cancelled · active GL & SLE", description: "cancelled doc, GL+SLE still active" },
                 ];
             },
             default: [],
@@ -55,6 +58,9 @@ frappe.query_reports["GL SLE Audit"] = {
             if (s.startsWith("Imbalanced")) {
                 return `<span style="color:#d35400;font-weight:600">${v}</span>`;
             }
+            if (s.startsWith("Cancelled")) {
+                return `<span style="color:#8e44ad;font-weight:600">${v}</span>`;
+            }
             if (s.startsWith("AUDIT ERROR")) {
                 return `<span style="color:#7f1d1d;font-weight:700">${v}</span>`;
             }
@@ -65,7 +71,7 @@ frappe.query_reports["GL SLE Audit"] = {
     onload: function (report) {
         report.page.add_inner_button(
             __("Preview Repair (Dry Run)"),
-            () => bns_repair_action(report, true),
+            () => bns_repair_action(report, true, { fix_missing: 1, fix_imbalanced: 1, fix_cancelled_active: 1 }),
             __("Repair"),
         );
 
@@ -78,6 +84,12 @@ frappe.query_reports["GL SLE Audit"] = {
         report.page.add_inner_button(
             __("Repair Missing + Imbalanced"),
             () => bns_repair_action(report, false, { fix_missing: 1, fix_imbalanced: 1 }),
+            __("Repair"),
+        );
+
+        report.page.add_inner_button(
+            __("Heal Cancelled (active GL/SLE)"),
+            () => bns_repair_action(report, false, { fix_missing: 0, fix_imbalanced: 0, fix_cancelled_active: 1 }),
             __("Repair"),
         );
     },
@@ -112,6 +124,7 @@ function bns_repair_action(report, dry_run, fixFlags) {
                 cutoff_date: cutoff || null,
                 fix_missing: fixFlags.fix_missing,
                 fix_imbalanced: fixFlags.fix_imbalanced,
+                fix_cancelled_active: fixFlags.fix_cancelled_active || 0,
                 dry_run: dry_run ? 1 : 0,
             },
             freeze: true,
