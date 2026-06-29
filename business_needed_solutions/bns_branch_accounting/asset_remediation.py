@@ -29,7 +29,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint
 
-from business_needed_solutions.bns_branch_accounting.utils import _bns_repost_voucher_gl, get_bns_repost_job_timeout
+from business_needed_solutions.bns_branch_accounting.utils import _bns_repost_voucher_gl
 
 _RECEIVER_TYPES = ("Purchase Receipt", "Purchase Invoice")
 _SENDER_TYPES = ("Delivery Note", "Sales Invoice")
@@ -199,7 +199,7 @@ def apply_asset_transfer_remediation(documents, delete_draft_duplicates=0):
 	frappe.enqueue(
 		"business_needed_solutions.bns_branch_accounting.asset_remediation._process_asset_remediation_batch",
 		queue="long",
-		timeout=get_bns_repost_job_timeout(),
+		timeout=1800,
 		documents=documents,
 		delete_draft_duplicates=cint(delete_draft_duplicates),
 	)

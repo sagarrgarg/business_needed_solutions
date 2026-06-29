@@ -26,8 +26,6 @@ import frappe
 from frappe import _
 from frappe.utils import cint, today, flt, getdate
 
-from business_needed_solutions.bns_branch_accounting.utils import get_bns_repost_job_timeout
-
 # Amounts: round to 2 decimals; qty: round to 6 decimals.
 # DN-PR uses hardcoded tolerances (₹5 / 0.01).
 # SI-PI uses si_pi_amount_tolerance from BNS Branch Accounting Settings.
@@ -1798,7 +1796,7 @@ def fix_external_party_internal_documents(documents):
 		".internal_transfer_receive_mismatch.internal_transfer_receive_mismatch"
 		"._process_external_party_fix_batch",
 		queue="long",
-		timeout=get_bns_repost_job_timeout(),
+		timeout=1800,
 		documents=documents,
 	)
 

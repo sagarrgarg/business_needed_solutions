@@ -80,13 +80,7 @@
   "srbnb_internal_clearing_account",
   "ineligible_itc_section",
   "restrict_ineligible_itc_submission",
-  "ineligible_itc_authorized_role",
-  "tab_reposting",
-  "repost_job_timeout",
-  "riv_stuck_section",
-  "riv_stuck_action",
-  "riv_stuck_check_frequency",
-  "riv_stuck_timeout_minutes"
+  "ineligible_itc_authorized_role"
  ],
  "fields": [
   {
@@ -555,54 +549,12 @@
    "default": "Accounts Manager",
    "depends_on": "eval:doc.restrict_ineligible_itc_submission",
    "description": "Only users with this role may submit PR/PI that book ineligible ITC. Defaults to Accounts Manager."
-  },
-  {
-   "fieldname": "tab_reposting",
-   "fieldtype": "Tab Break",
-   "label": "Reposting"
-  },
-  {
-   "default": "1800",
-   "description": "Timeout (seconds) for BNS background repost / audit / remediation jobs (asset-transfer NBV repost, internal-transfer accounting-audit reposts, receive-mismatch fix, asset remediation). Default 1800 (30 min); min 60; blank/0 falls back to 1800. Note: this does NOT control ERPNext's Repost Item Valuation draining.",
-   "fieldname": "repost_job_timeout",
-   "fieldtype": "Int",
-   "label": "Repost Job Timeout (Seconds)"
-  },
-  {
-   "fieldname": "riv_stuck_section",
-   "fieldtype": "Section Break",
-   "label": "Stuck Repost Item Valuation Watchdog"
-  },
-  {
-   "default": "Disabled",
-   "description": "Auto-handle Repost Item Valuation entries stuck 'In Progress' (worker died). Requeue = restart the entry cleanly via ERPNext restart_reposting() (resets its progress checkpoint) so it re-runs from scratch; Skip = finalize as Skipped (for poison-pill entries that keep failing). Disabled = off.",
-   "fieldname": "riv_stuck_action",
-   "fieldtype": "Select",
-   "label": "On Stuck In-Progress RIV",
-   "options": "Disabled\nRequeue\nSkip"
-  },
-  {
-   "default": "Every 15 minutes",
-   "depends_on": "eval:doc.riv_stuck_action && doc.riv_stuck_action != 'Disabled'",
-   "description": "How often the watchdog scans for stuck entries. The scheduler fires every minute; this throttles the actual scan to the chosen interval.",
-   "fieldname": "riv_stuck_check_frequency",
-   "fieldtype": "Select",
-   "label": "Watchdog Check Frequency",
-   "options": "Every 1 minute\nEvery 5 minutes\nEvery 15 minutes"
-  },
-  {
-   "default": "30",
-   "depends_on": "eval:doc.riv_stuck_action && doc.riv_stuck_action != 'Disabled'",
-   "description": "An 'In Progress' Repost Item Valuation whose modified timestamp is older than this many minutes is treated as stuck. ERPNext bumps 'modified' after every voucher batch of a live repost, so keep this comfortably above your longest single-batch time so a slow-but-running repost is never restarted. Minimum 5.",
-   "fieldname": "riv_stuck_timeout_minutes",
-   "fieldtype": "Int",
-   "label": "Stuck Timeout (Minutes)"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-06-28 15:00:00.000000",
+ "modified": "2026-04-01 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Business Needed Solutions",
  "name": "BNS Settings",

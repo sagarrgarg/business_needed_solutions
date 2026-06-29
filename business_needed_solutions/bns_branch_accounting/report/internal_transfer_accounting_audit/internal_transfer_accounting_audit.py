@@ -17,8 +17,6 @@ import frappe
 from frappe import _
 from frappe.utils import flt, getdate, cint
 
-from business_needed_solutions.bns_branch_accounting.utils import get_bns_repost_job_timeout
-
 
 def execute(filters=None):
 	"""
@@ -1839,7 +1837,7 @@ def repost_sle_for_audit_documents(documents):
 		".internal_transfer_accounting_audit.internal_transfer_accounting_audit"
 		"._process_sle_repost_batch",
 		queue="long",
-		timeout=get_bns_repost_job_timeout(),
+		timeout=1800,
 		documents=documents,
 	)
 
@@ -2014,7 +2012,7 @@ def repost_gl_for_audit_documents(documents):
 		".internal_transfer_accounting_audit.internal_transfer_accounting_audit"
 		"._process_gl_repost_batch",
 		queue="long",
-		timeout=get_bns_repost_job_timeout(),
+		timeout=1800,
 		documents=documents,
 	)
 
@@ -2062,7 +2060,7 @@ def fix_transfer_rate_for_audit_documents(documents):
 		".internal_transfer_accounting_audit.internal_transfer_accounting_audit"
 		"._process_gl_repost_batch",
 		queue="long",
-		timeout=get_bns_repost_job_timeout(),
+		timeout=1800,
 		documents=documents,
 	)
 
