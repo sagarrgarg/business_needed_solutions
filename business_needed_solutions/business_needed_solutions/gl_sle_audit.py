@@ -985,8 +985,6 @@ def _heal_cancelled_active(doctype: str, name: str) -> Dict[str, Any]:
             f"{doctype} {name} is not cancelled (docstatus={ds}); heal aborted"
         )
 
-    details: Dict[str, Any] = {"gl_cancelled": 0, "sle_cancelled": 0, "reposted": []}
-
     gl_names = frappe.get_all(
         "GL Entry",
         filters={"voucher_type": doctype, "voucher_no": name, "is_cancelled": 0},
@@ -994,7 +992,6 @@ def _heal_cancelled_active(doctype: str, name: str) -> Dict[str, Any]:
     )
     for g in gl_names:
         frappe.db.set_value("GL Entry", g, "is_cancelled", 1, update_modified=True)
-    details["gl_cancelled"] = len(gl_names)
 
     sles = frappe.get_all(
         "Stock Ledger Entry",
@@ -1003,9 +1000,9 @@ def _heal_cancelled_active(doctype: str, name: str) -> Dict[str, Any]:
     )
     for s in sles:
         frappe.db.set_value("Stock Ledger Entry", s.name, "is_cancelled", 1, update_modified=True)
-    details["sle_cancelled"] = len(sles)
 
     # Repost each affected item-warehouse (deduped) so balances recompute.
+    reposted: List[Dict[str, Any]] = []
     seen: set = set()
     for s in sles:
         if not s.item_code or not s.warehouse:
@@ -1028,11 +1025,34 @@ def _heal_cancelled_active(doctype: str, name: str) -> Dict[str, Any]:
         riv.insert()
         riv.submit()
         riv.repost_now()
-        details["reposted"].append({
+        reposted.append({
             "item_code": s.item_code, "warehouse": s.warehouse,
             "riv": riv.name, "status": riv.status,
         })
-    return details
+
+    # Build a result-detail payload SHAPE-COMPATIBLE with the repair UI
+    # (live_*_before/after + actions_run), so healed rows render as mutated
+    # rather than no-op. live_*_after = 0 by construction (we cancelled every
+    # active row for this voucher).
+    actions_run: List[str] = []
+    if gl_names:
+        actions_run.append(f"cancel {len(gl_names)} GL")
+    if sles:
+        actions_run.append(f"cancel {len(sles)} SLE")
+    if reposted:
+        actions_run.append(f"repost {len(reposted)} item-warehouse")
+
+    return {
+        "actions_run": actions_run,
+        "skipped": [],
+        "gl_cancelled": len(gl_names),
+        "sle_cancelled": len(sles),
+        "reposted": reposted,
+        "live_gl_before": len(gl_names),
+        "live_gl_after": 0,
+        "live_sle_before": len(sles),
+        "live_sle_after": 0,
+    }
 
 
 def _plan_repair(doctype: str, status: str) -> List[str]:

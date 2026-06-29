@@ -111,9 +111,13 @@ function bns_repair_action(report, dry_run, fixFlags) {
     }
 
     const label = dry_run ? __("Preview") : __("Apply Repair");
+    const isHeal = fixFlags.fix_cancelled_active && !fixFlags.fix_missing && !fixFlags.fix_imbalanced;
+    const applyDesc = isHeal
+        ? __("This marks the stray active GL/SLE rows on each CANCELLED doc as is_cancelled=1, then reposts the affected item-warehouses.")
+        : __("This re-runs make_gl_entries / update_stock_ledger on each doc.");
     const msg = dry_run
         ? __("Preview repair plan for {0} row(s)? This does not change any data.", [data.length])
-        : __("Repair {0} row(s) with cutoff {1}?<br><br>This will re-run make_gl_entries / update_stock_ledger on each doc. The cutoff is logged with the action.", [data.length, cutoff]);
+        : __("Repair {0} row(s) with cutoff {1}?<br><br>{2} The cutoff is logged with the action.", [data.length, cutoff, applyDesc]);
 
     frappe.confirm(msg, function () {
         const docs = data.map((r) => ({ doctype: r.doctype, name: r.name, status: r.status }));
