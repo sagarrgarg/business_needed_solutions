@@ -4171,7 +4171,6 @@ BNS_REPOST_LANE_TIMEOUT = 3600            # secs per lane invocation (cron re-en
 BNS_REPOST_LANE_MAX_ITER = 2000           # reposts per lane invocation, then exit & let cron restart
 _BNS_REPOST_ITEM_LOCK_TTL = 1800          # secs; must exceed a single item's repost time
 _BNS_REPOST_ORPHAN_MINUTES = 45           # > lock TTL: requeue In-Progress orphans past this
-_BNS_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 _BNS_REPOST_ITEM_LOCK_PATCHED = False
 _BNS_REPOST_DEADLOCK_MAX_WAIT = 300       # secs a lane waits out a deadlock/lock-wait on ONE entry before deferring it
 _BNS_REPOST_DEADLOCK_BACKOFF = 3          # secs between retries while waiting out contention
@@ -4269,79 +4268,12 @@ def _apply_bns_repost_item_lock_patch() -> None:
         logger.error("Failed to apply BNS repost item lock patch: %s", str(e))
 
 
-# --- worker count / lane sizing ---------------------------------------------
-def _bns_count_queue_workers(queue: str = BNS_REPOST_QUEUE) -> int:
-    try:
-        from frappe.utils.background_jobs import get_redis_conn
-        from rq import Worker
-
-        conn = get_redis_conn()
-        n = 0
-        for w in Worker.all(connection=conn):
-            try:
-                names = w.queue_names()
-            except Exception:
-                names = []
-            if any(qn == queue or qn.endswith(":" + queue) or qn.endswith(queue) for qn in names):
-                n += 1
-        return n
-    except Exception:
-        logger.exception("BNS repost: could not count queue workers")
-        return 0
-
-
+# --- lane sizing -------------------------------------------------------------
 def _bns_resolve_lane_count(settings) -> int:
-    """Resolve lane count. Pinned in cache for the drain session so the
-    item->lane partition cannot shift mid-drain (which would let two workers
-    touch one item)."""
-    configured = frappe.utils.cint(settings.get("repost_worker_count"))
-    if configured > 0:
-        return configured
-    cached = frappe.cache().get_value("bns_repost_active_lanes")
-    if cached:
-        return frappe.utils.cint(cached)
-    reserved = frappe.utils.cint(settings.get("repost_reserved_workers")) or 4
-    total = _bns_count_queue_workers()
-    n = max(2, total - reserved)
-    frappe.cache().set_value("bns_repost_active_lanes", n, expires_in_sec=6 * 3600)
-    return n
-
-
-# --- time / weekday window ---------------------------------------------------
-def _bns_in_repost_window(settings, now_dt=None) -> bool:
-    if not settings.get("repost_restrict_window"):
-        return True
-    now_dt = now_dt or frappe.utils.now_datetime()
-
-    days_raw = (settings.get("repost_window_days") or "").strip()
-    if days_raw:
-        allowed = {d.strip().lower() for d in days_raw.split(",") if d.strip()}
-        if allowed and _BNS_WEEKDAYS[now_dt.weekday()] not in allowed:
-            return False
-
-    start, end = settings.get("repost_window_start"), settings.get("repost_window_end")
-    s, e = _bns_secs(start), _bns_secs(end)
-    if s is None or e is None:
-        return True  # days-only window (or unset times) -> allow all hours
-    now_s = now_dt.hour * 3600 + now_dt.minute * 60 + now_dt.second
-    if s <= e:
-        return s <= now_s <= e
-    return now_s >= s or now_s <= e  # overnight (e.g. 21:00 -> 09:00)
-
-
-def _bns_secs(v):
-    """Time field (timedelta or 'HH:MM:SS') -> seconds-of-day, or None."""
-    if v is None or v == "":
-        return None
-    import datetime
-
-    if isinstance(v, datetime.timedelta):
-        return int(v.total_seconds())
-    try:
-        p = str(v).split(":")
-        return int(p[0]) * 3600 + (int(p[1]) if len(p) > 1 else 0) * 60 + (int(float(p[2])) if len(p) > 2 else 0)
-    except Exception:
-        return None
+    """Number of parallel drain lanes = exactly what the operator set in
+    "Parallel Repost Workers". No system worker-counting, no auto mode: 0 or 1
+    means a single worker (no parallelism)."""
+    return frappe.utils.cint(settings.get("repost_worker_count"))
 
 
 # --- orphan recovery ---------------------------------------------------------
@@ -4382,7 +4314,7 @@ def _bns_next_lane_riv(lane: int, n: int):
     return rows[0] if rows else None
 
 
-def _bns_repost_one(doc, riv, settings) -> str:
+def _bns_repost_one(doc, riv) -> str:
     """Repost ONE entry, *waiting out* a transient deadlock / lock-wait instead
     of skipping it and leaving it stuck 'In Progress'.
 
@@ -4397,8 +4329,8 @@ def _bns_repost_one(doc, riv, settings) -> str:
       'done'      -> Completed / Skipped / Failed: advance to the next entry.
       'contended' -> still Queued: the per-item lock is held elsewhere, repost()
                      was a no-op; caller stops (next cron tick retries).
-      'gave_up'   -> still In Progress after the wait budget / kill switch /
-                     window closed: defer to the next drain cycle's safety nets.
+      'gave_up'   -> still In Progress after the wait budget / kill switch:
+                     defer to the next drain cycle's safety nets.
     """
     import time
 
@@ -4414,7 +4346,6 @@ def _bns_repost_one(doc, riv, settings) -> str:
         if (
             time.monotonic() >= deadline
             or not _bns_repost_prioritize_live()   # operator unchecked mid-wait
-            or not _bns_in_repost_window(settings)  # window closed mid-wait
         ):
             return "gave_up"
         logger.warning(
@@ -4432,15 +4363,12 @@ def bns_repost_lane(lane: int, lane_count: int) -> None:
     guarantees no overlap even against ERPNext's own drainer."""
     from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as riv
 
-    settings = _bns_repost_settings()
     processed = 0
     while processed < BNS_REPOST_LANE_MAX_ITER:
         if not _bns_repost_prioritize_live():
             # Operator unchecked "Prioritise Repost Item Valuation" -> stop now,
             # don't wait for the code to be removed or for the job to time out.
             logger.info("BNS repost lane %s/%s: prioritise turned OFF -> stopping", lane, lane_count)
-            break
-        if not _bns_in_repost_window(settings):
             break
         row = _bns_next_lane_riv(lane, lane_count)
         if not row:
@@ -4449,7 +4377,7 @@ def bns_repost_lane(lane: int, lane_count: int) -> None:
             doc = frappe.get_doc("Repost Item Valuation", row.name)
             if doc.status != "Queued":
                 continue
-            outcome = _bns_repost_one(doc, riv, settings)
+            outcome = _bns_repost_one(doc, riv)
             if outcome == "contended":
                 # item lock held elsewhere -> stop; next cron tick retries
                 break
@@ -4477,19 +4405,18 @@ def _bns_trigger_default_drainer() -> None:
 def bns_prioritize_repost_item_valuation():
     """Cron (every 5 min): keep the Repost Item Valuation queue draining.
 
-    Single-worker mode (workers<=1, or outside the configured window): nudge
-    ERPNext's own deduplicated 'repost_item_valuation.repost_entries' job so the
-    one drainer starts promptly instead of waiting for the hourly run.
+    Single-worker mode (Parallel Repost Workers <= 1): nudge ERPNext's own
+    deduplicated 'repost_item_valuation.repost_entries' job so the one drainer
+    starts promptly instead of waiting for the hourly run.
 
-    Parallel mode (workers>1, inside the window): fan out N lane jobs, each
-    draining a disjoint item-hash partition. The per-item lock patch on repost()
-    makes lanes + ERPNext's drainer mutually safe (no item processed twice)."""
+    Parallel mode (Parallel Repost Workers > 1): fan out that many lane jobs,
+    each draining a disjoint item-hash partition. The per-item lock patch on
+    repost() makes lanes + ERPNext's drainer mutually safe (no item processed
+    twice)."""
     settings = _bns_repost_settings()
     if not settings.get("prioritize_repost_item_valuation"):
-        # Disabled: don't fan out new lanes, and drop the pinned lane count so a
-        # later re-enable recomputes it fresh. Live lanes self-stop via
+        # Disabled: don't fan out new lanes. Live lanes self-stop via
         # _bns_repost_prioritize_live().
-        frappe.cache().delete_value("bns_repost_active_lanes")
         return
 
     pending = frappe.db.count(
@@ -4497,13 +4424,12 @@ def bns_prioritize_repost_item_valuation():
         {"status": ("in", ("Queued", "In Progress")), "docstatus": 1},
     )
     if not pending:
-        frappe.cache().delete_value("bns_repost_active_lanes")  # end session -> recompute next drain
         return
 
     _bns_reset_stale_inprogress()
 
     lanes = _bns_resolve_lane_count(settings)
-    if lanes <= 1 or not _bns_in_repost_window(settings):
+    if lanes <= 1:
         _bns_trigger_default_drainer()
         return
 
