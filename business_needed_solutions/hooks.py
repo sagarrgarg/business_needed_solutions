@@ -378,7 +378,12 @@ scheduler_events = {
     ],
     "weekly": [
         "business_needed_solutions.business_needed_solutions.gl_sle_audit.scheduled_auto_fix_missing_ledgers"
-    ]
+    ],
+    "cron": {
+        "*/5 * * * *": [
+            "business_needed_solutions.bns_branch_accounting.utils.bns_prioritize_repost_item_valuation"
+        ]
+    }
 }
 
 # Testing
