@@ -31,9 +31,7 @@
   "enable_auto_fix_missing_ledgers",
   "auto_fix_lookback_days",
   "tab_reposting",
-  "prioritize_repost_item_valuation",
-  "repost_parallel_section",
-  "repost_worker_count"
+  "prioritize_repost_item_valuation"
  ],
  "fields": [
   {
@@ -209,26 +207,12 @@
    "fieldname": "prioritize_repost_item_valuation",
    "fieldtype": "Check",
    "label": "Prioritise Repost Item Valuation (keep draining continuously)"
-  },
-  {
-   "depends_on": "eval:doc.prioritize_repost_item_valuation",
-   "fieldname": "repost_parallel_section",
-   "fieldtype": "Section Break",
-   "label": "Parallel Reposting"
-  },
-  {
-   "default": "0",
-   "depends_on": "eval:doc.prioritize_repost_item_valuation",
-   "description": "Number of parallel drain lanes you want. Each lane is one background worker handling a disjoint set of items (partitioned by item_code), so a given item's warehouses never split across lanes. 0 or 1 = single worker (no parallelism). Set this to how many parallel workers you want, e.g. 2. Real throughput is still capped by the number of background ('long' queue) workers actually running.",
-   "fieldname": "repost_worker_count",
-   "fieldtype": "Int",
-   "label": "Parallel Repost Workers"
   }
  ],
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-06-30 13:00:00.000000",
+ "modified": "2026-06-30 14:00:00.000000",
  "modified_by": "Administrator",
  "module": "BNS Branch Accounting",
  "name": "BNS Branch Accounting Settings",

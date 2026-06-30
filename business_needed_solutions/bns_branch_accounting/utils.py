@@ -4163,262 +4163,33 @@ def reassert_bns_internal_invoice_status():
 
 
 # ---------------------------------------------------------------------------
-# Repost Item Valuation: continuous drain + optional parallel lanes
+# Repost Item Valuation: keep the queue draining continuously (single worker)
 # ---------------------------------------------------------------------------
-BNS_REPOST_QUEUE = "long"
-BNS_REPOST_LANE_JOB_PREFIX = "bns_repost_lane"
-BNS_REPOST_LANE_TIMEOUT = 3600            # secs per lane invocation (cron re-enqueues)
-BNS_REPOST_LANE_MAX_ITER = 2000           # reposts per lane invocation, then exit & let cron restart
-_BNS_REPOST_ITEM_LOCK_TTL = 1800          # secs; must exceed a single item's repost time
-_BNS_REPOST_ORPHAN_MINUTES = 45           # > lock TTL: requeue In-Progress orphans past this
-_BNS_REPOST_ITEM_LOCK_PATCHED = False
-_BNS_REPOST_DEADLOCK_MAX_WAIT = 300       # secs a lane waits out a deadlock/lock-wait on ONE entry before deferring it
-_BNS_REPOST_DEADLOCK_BACKOFF = 3          # secs between retries while waiting out contention
-
-
-def _bns_repost_settings():
-    return frappe.get_cached_doc("BNS Branch Accounting Settings")
-
-
-def _bns_repost_prioritize_live() -> bool:
-    """Fresh, uncached read of the master toggle.
-
-    A running lane loops for minutes; ``get_cached_doc`` / ``get_single_value``
-    can hand back a stale value inside one long-lived worker, so an operator who
-    *unchecks* "Prioritise Repost Item Valuation" mid-drain wouldn't be seen.
-    Read ``tabSingles`` directly so unchecking stops live lanes within one
-    iteration -- no code removal / redeploy needed."""
-    try:
-        rows = frappe.db.sql(
-            """SELECT value FROM `tabSingles`
-               WHERE doctype='BNS Branch Accounting Settings'
-                 AND field='prioritize_repost_item_valuation'"""
-        )
-        return bool(rows and frappe.utils.cint(rows[0][0]))
-    except Exception:
-        # Transient DB hiccup -> don't spuriously abort an in-flight drain.
-        return True
-
-
-# --- per-item cross-worker lock (raw redis: nx/ex; site-prefixed key) --------
-def _bns_repost_item_lock_key(lock_id: str) -> str:
-    return f"bns_repost_item_lock::{getattr(frappe.local, 'site', '') or ''}::{lock_id}"
-
-
-def _bns_acquire_item_lock(lock_id, ttl: int = _BNS_REPOST_ITEM_LOCK_TTL) -> bool:
-    if not lock_id:
-        return True
-    try:
-        return bool(frappe.cache().set(_bns_repost_item_lock_key(lock_id), "1", nx=True, ex=int(ttl)))
-    except Exception:
-        logger.exception("BNS repost item lock acquire failed for %s", lock_id)
-        return False  # fail-closed: never process without a lock
-
-
-def _bns_release_item_lock(lock_id) -> None:
-    if not lock_id:
-        return
-    try:
-        frappe.cache().delete(_bns_repost_item_lock_key(lock_id))
-    except Exception:
-        pass
-
-
-def _bns_item_lock_held(lock_id) -> bool:
-    try:
-        return frappe.cache().get(_bns_repost_item_lock_key(lock_id)) is not None
-    except Exception:
-        return True  # unknown -> assume held (don't requeue)
-
-
-def _apply_bns_repost_item_lock_patch() -> None:
-    """Wrap ERPNext's repost(doc) with a per-item lock so no two reposts ever
-    process the same item concurrently -- regardless of caller (BNS lanes,
-    ERPNext's own hourly drainer, manual). This is the safety foundation for
-    BNS parallel reposting. Voucher-level GL races between *different* items of
-    one voucher remain handled by InnoDB row serialization + ERPNext's existing
-    deadlock rollback-and-retry (status reset to In Progress)."""
-    global _BNS_REPOST_ITEM_LOCK_PATCHED
-    if _BNS_REPOST_ITEM_LOCK_PATCHED:
-        return
-    try:
-        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as riv
-
-        original_repost = riv.repost
-        if getattr(original_repost, "_bns_item_lock_patched", False):
-            _BNS_REPOST_ITEM_LOCK_PATCHED = True
-            return
-
-        def patched_repost(doc):
-            # Transaction-based RIVs (no single item) serialize on one global slot.
-            lock_id = (doc.item_code if (doc and doc.get("item_code")) else "__txn__")
-            if not _bns_acquire_item_lock(lock_id):
-                # Item busy elsewhere -> skip; RIV keeps its status and is retried.
-                return
-            try:
-                return original_repost(doc)
-            finally:
-                _bns_release_item_lock(lock_id)
-
-        patched_repost._bns_item_lock_patched = True
-        riv.repost = patched_repost
-        _BNS_REPOST_ITEM_LOCK_PATCHED = True
-        logger.info("Applied BNS repost per-item lock patch")
-    except Exception as e:
-        logger.error("Failed to apply BNS repost item lock patch: %s", str(e))
-
-
-# --- lane sizing -------------------------------------------------------------
-def _bns_resolve_lane_count(settings) -> int:
-    """Number of parallel drain lanes = exactly what the operator set in
-    "Parallel Repost Workers". No system worker-counting, no auto mode: 0 or 1
-    means a single worker (no parallelism)."""
-    return frappe.utils.cint(settings.get("repost_worker_count"))
-
-
-# --- orphan recovery ---------------------------------------------------------
-def _bns_reset_stale_inprogress() -> None:
-    """Requeue In-Progress RIVs orphaned by a dead worker (item lock expired)."""
-    cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-_BNS_REPOST_ORPHAN_MINUTES)
-    stale = frappe.db.sql(
-        """SELECT name, item_code FROM `tabRepost Item Valuation`
-           WHERE docstatus=1 AND status='In Progress' AND modified < %s""",
-        cutoff,
-        as_dict=True,
-    )
-    reset = 0
-    for r in stale:
-        lock_id = r.item_code or "__txn__"
-        if not _bns_item_lock_held(lock_id):  # lock gone -> worker is dead
-            frappe.db.set_value("Repost Item Valuation", r.name, "status", "Queued", update_modified=False)
-            reset += 1
-    if reset:
-        frappe.db.commit()
-        logger.info("BNS repost: requeued %s orphaned In-Progress entries", reset)
-
-
-# --- lane worker -------------------------------------------------------------
-def _bns_next_lane_riv(lane: int, n: int):
-    rows = frappe.db.sql(
-        """
-        SELECT name, item_code FROM `tabRepost Item Valuation`
-        WHERE docstatus=1 AND status='Queued'
-          AND ( (item_code IS NOT NULL AND MOD(CRC32(item_code), %(n)s) = %(lane)s)
-             OR (item_code IS NULL AND %(lane)s = 0) )
-        ORDER BY timestamp(posting_date, posting_time) ASC, creation ASC
-        LIMIT 1
-        """,
-        {"n": n, "lane": lane},
-        as_dict=True,
-    )
-    return rows[0] if rows else None
-
-
-def _bns_repost_one(doc, riv) -> str:
-    """Repost ONE entry, *waiting out* a transient deadlock / lock-wait instead
-    of skipping it and leaving it stuck 'In Progress'.
-
-    ERPNext's repost() swallows recoverable errors (QueryDeadlockError,
-    QueryTimeoutError, JobTimeoutException): it rolls back and resets the entry
-    to 'In Progress' WITHOUT re-raising. We detect that by re-reading the
-    persisted status and retry the SAME entry -- a deadlock victim is rolled back
-    the instant the cycle is broken, and a lock-wait clears when the blocking txn
-    commits, so a short backoff loop genuinely waits the contention out.
-
-    Returns:
-      'done'      -> Completed / Skipped / Failed: advance to the next entry.
-      'contended' -> still Queued: the per-item lock is held elsewhere, repost()
-                     was a no-op; caller stops (next cron tick retries).
-      'gave_up'   -> still In Progress after the wait budget / kill switch:
-                     defer to the next drain cycle's safety nets.
-    """
-    import time
-
-    deadline = time.monotonic() + _BNS_REPOST_DEADLOCK_MAX_WAIT
-    while True:
-        riv.repost(doc)  # patched: per-item lock; no-op (stays Queued) if the item is busy
-        status = frappe.db.get_value("Repost Item Valuation", doc.name, "status")
-        if status in ("Completed", "Skipped", "Failed"):
-            return "done"
-        if status == "Queued":
-            return "contended"
-        # status == 'In Progress' -> recoverable deadlock / lock-wait / timeout.
-        if (
-            time.monotonic() >= deadline
-            or not _bns_repost_prioritize_live()   # operator unchecked mid-wait
-        ):
-            return "gave_up"
-        logger.warning(
-            "BNS repost: %s hit a recoverable deadlock/lock-wait; waiting %ss then retrying",
-            doc.name,
-            _BNS_REPOST_DEADLOCK_BACKOFF,
-        )
-        time.sleep(_BNS_REPOST_DEADLOCK_BACKOFF)
-        doc.reload()
-
-
-def bns_repost_lane(lane: int, lane_count: int) -> None:
-    """One parallel drain lane. Processes only its item-hash partition so a given
-    item's warehouses never split across lanes; the per-item lock in repost()
-    guarantees no overlap even against ERPNext's own drainer."""
-    from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as riv
-
-    processed = 0
-    while processed < BNS_REPOST_LANE_MAX_ITER:
-        if not _bns_repost_prioritize_live():
-            # Operator unchecked "Prioritise Repost Item Valuation" -> stop now,
-            # don't wait for the code to be removed or for the job to time out.
-            logger.info("BNS repost lane %s/%s: prioritise turned OFF -> stopping", lane, lane_count)
-            break
-        row = _bns_next_lane_riv(lane, lane_count)
-        if not row:
-            break
-        try:
-            doc = frappe.get_doc("Repost Item Valuation", row.name)
-            if doc.status != "Queued":
-                continue
-            outcome = _bns_repost_one(doc, riv)
-            if outcome == "contended":
-                # item lock held elsewhere -> stop; next cron tick retries
-                break
-            if outcome == "done":
-                doc.deduplicate_similar_repost()
-            # 'gave_up' -> entry left In Progress; orphan sweep / ERPNext drainer
-            # retry it later. Advance so one pathological entry can't starve the lane.
-        except Exception:
-            logger.exception("BNS repost lane %s/%s error on %s", lane, lane_count, row.name)
-        processed += 1
-    if processed:
-        logger.info("BNS repost lane %s/%s processed %s entries", lane, lane_count, processed)
-
-
-def _bns_trigger_default_drainer() -> None:
-    """Single-worker fallback: nudge ERPNext's own (deduplicated) drainer."""
-    try:
-        job_type = frappe.get_doc("Scheduled Job Type", "repost_item_valuation.repost_entries")
-    except frappe.DoesNotExistError:
-        logger.warning("BNS prioritize repost: 'repost_item_valuation.repost_entries' not found")
-        return
-    job_type.enqueue(force=True)
-
-
 def bns_prioritize_repost_item_valuation():
-    """Cron (every 5 min): keep the Repost Item Valuation queue draining.
+    """Cron (every 5 min): when the BNS setting is ON, keep the Repost Item
+    Valuation queue draining continuously instead of waiting for the hourly run.
 
-    Single-worker mode (Parallel Repost Workers <= 1): nudge ERPNext's own
-    deduplicated 'repost_item_valuation.repost_entries' job so the one drainer
-    starts promptly instead of waiting for the hourly run.
-
-    Parallel mode (Parallel Repost Workers > 1): fan out that many lane jobs,
-    each draining a disjoint item-hash partition. The per-item lock patch on
-    repost() makes lanes + ERPNext's drainer mutually safe (no item processed
-    twice)."""
-    settings = _bns_repost_settings()
-    if not settings.get("prioritize_repost_item_valuation"):
-        # Disabled: don't fan out new lanes. Live lanes self-stop via
-        # _bns_repost_prioritize_live().
+    Implementation note: we do NOT write our own repost loop. We re-trigger
+    ERPNext's own scheduled job ('repost_item_valuation.repost_entries') via
+    Scheduled Job Type.enqueue(force=True). Frappe deduplicates that job by its
+    rq_job_id, so it never runs concurrently with itself or with the hourly
+    scheduler -- zero double-processing risk -- and repost_entries() still
+    honours Stock Reposting Settings' configured timeslot. So this just makes
+    the *same* single-worker drainer start promptly (every 5 min) rather than
+    once an hour.
+    """
+    # Read the toggle defensively: during the deploy -> migrate window the field
+    # may not exist yet, and frappe.db.get_single_value() RAISES on a missing
+    # field. Read tabSingles directly so a missing/off value is just a no-op.
+    row = frappe.db.sql(
+        """SELECT value FROM `tabSingles`
+           WHERE doctype='BNS Branch Accounting Settings'
+             AND field='prioritize_repost_item_valuation'"""
+    )
+    if not (row and frappe.utils.cint(row[0][0])):
         return
 
+    # Nothing queued -> don't bother enqueuing.
     pending = frappe.db.count(
         "Repost Item Valuation",
         {"status": ("in", ("Queued", "In Progress")), "docstatus": 1},
@@ -4426,24 +4197,19 @@ def bns_prioritize_repost_item_valuation():
     if not pending:
         return
 
-    _bns_reset_stale_inprogress()
-
-    lanes = _bns_resolve_lane_count(settings)
-    if lanes <= 1:
-        _bns_trigger_default_drainer()
+    try:
+        job_type = frappe.get_doc(
+            "Scheduled Job Type", "repost_item_valuation.repost_entries"
+        )
+    except frappe.DoesNotExistError:
+        logger.warning(
+            "BNS prioritize repost: Scheduled Job Type 'repost_item_valuation.repost_entries' not found"
+        )
         return
 
-    # One job per lane; frappe dedup by job_id keeps exactly one worker per lane,
-    # so re-firing every 5 min simply keeps the lanes alive.
-    for i in range(lanes):
-        frappe.enqueue(
-            "business_needed_solutions.bns_branch_accounting.utils.bns_repost_lane",
-            queue=BNS_REPOST_QUEUE,
-            timeout=BNS_REPOST_LANE_TIMEOUT,
-            job_id=f"{BNS_REPOST_LANE_JOB_PREFIX}_{i}_of_{lanes}",
-            lane=i,
-            lane_count=lanes,
-        )
+    # enqueue() is a no-op if the job is already queued/running (frappe dedup),
+    # so calling it every 5 minutes simply keeps one drainer alive.
+    job_type.enqueue(force=True)
 
 
 # Best-effort eager patching on module import.
@@ -4453,7 +4219,6 @@ _apply_bns_repost_gl_failsafe_patch()
 _apply_bns_repost_accounting_ledger_patch()
 _apply_bns_asset_internal_patches()
 _apply_bns_sticky_status_patch()
-_apply_bns_repost_item_lock_patch()
 _suppress_repost_error_emails()
 
 
@@ -4468,7 +4233,6 @@ def apply_bns_runtime_patches() -> None:
     _apply_bns_repost_accounting_ledger_patch()
     _apply_bns_asset_internal_patches()
     _apply_bns_sticky_status_patch()
-    _apply_bns_repost_item_lock_patch()
     _suppress_repost_error_emails()
 
 
