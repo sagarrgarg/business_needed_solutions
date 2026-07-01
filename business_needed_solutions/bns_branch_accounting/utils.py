@@ -12142,3 +12142,126 @@ def repair_internal_reference_glitches(dry_run=1):
         "actions": actions,
         "skipped": skipped,
     }
+
+
+@frappe.whitelist()
+def repair_asymmetric_dn_back_references(dry_run=1, company=None, from_date=None, to_date=None):
+    """Complete a MISSING DN->PR back-reference where the PR already points to the DN.
+
+    Detects the "asymmetric back-reference" the Internal Transfer Receive Mismatch
+    report tags as 'DN <-> PR Back-Reference': a submitted, internal Purchase
+    Receipt carries bns_inter_company_reference = <DN>, but that Delivery Note's
+    own bns_inter_company_reference is empty. Repair = write
+    DN.bns_inter_company_reference = PR.name so the two-way link is symmetric.
+
+    Complementary to repair_internal_reference_glitches(), which CLEARS bad refs;
+    this COMPLETES a good-but-half-written one. Safety:
+      - only when the DN's Customer master is internal (a genuine transfer -- a
+        non-internal customer is left to the glitch repair, which clears instead),
+      - only when exactly ONE submitted PR claims the DN (duplicate claimants are
+        skipped for manual / glitch-repair resolution),
+      - only when the target PR isn't already back-referenced by another DN.
+    Only bns_inter_company_reference is touched -- no status, flags, per_billed,
+    GL or SLE mutation. Each change drops an audit Comment. dry_run=1 (default)
+    returns the plan without writing.
+    """
+    _bns_require_accounts_write()
+    dry_run = cint(dry_run)
+
+    conditions = [
+        "pr.docstatus = 1",
+        "pr.is_bns_internal_supplier = 1",
+        "COALESCE(pr.bns_inter_company_reference, '') != ''",
+        "dn.docstatus = 1",
+        "COALESCE(dn.bns_inter_company_reference, '') = ''",
+        "COALESCE(c.is_bns_internal_customer, 0) = 1",
+    ]
+    values = []
+    if company:
+        conditions.append("dn.company = %s")
+        values.append(company)
+    if from_date:
+        conditions.append("dn.posting_date >= %s")
+        values.append(from_date)
+    if to_date:
+        conditions.append("dn.posting_date <= %s")
+        values.append(to_date)
+
+    rows = frappe.db.sql(
+        f"""
+        SELECT pr.name AS pr_name, dn.name AS dn_name, dn.posting_date
+        FROM `tabPurchase Receipt` pr
+        JOIN `tabDelivery Note` dn ON dn.name = pr.bns_inter_company_reference
+        JOIN `tabCustomer` c ON c.name = dn.customer
+        WHERE {" AND ".join(conditions)}
+        ORDER BY dn.posting_date, dn.name
+        """,
+        tuple(values),
+        as_dict=True,
+    ) or []
+
+    # A PR holds a single ref value, so it maps to exactly one DN here; group by
+    # DN to catch the case of several PRs all claiming one DN (duplicate).
+    by_dn = {}
+    for r in rows:
+        by_dn.setdefault(r.dn_name, []).append(r)
+
+    actions = []
+    skipped = []
+    for dn_name, claimers in by_dn.items():
+        pr_names = sorted({c.pr_name for c in claimers})
+        if len(pr_names) > 1:
+            skipped.append({
+                "doctype": "Delivery Note", "name": dn_name,
+                "reason": _("{0} submitted PRs reference this DN ({1}) -- duplicate claimants; resolve via repair_internal_reference_glitches or manually.").format(
+                    len(pr_names), ", ".join(pr_names)
+                ),
+            })
+            continue
+
+        pr_name = pr_names[0]
+        # Don't create a duplicate on the DN side: skip if another DN already
+        # back-references this PR.
+        other = frappe.get_all(
+            "Delivery Note",
+            filters={"bns_inter_company_reference": pr_name, "docstatus": 1, "name": ("!=", dn_name)},
+            pluck="name",
+        ) or []
+        if other:
+            skipped.append({
+                "doctype": "Delivery Note", "name": dn_name,
+                "reason": _("PR {0} is already back-referenced by DN {1} -- conflict, resolve manually.").format(
+                    pr_name, ", ".join(other)
+                ),
+            })
+            continue
+
+        actions.append({
+            "doctype": "Delivery Note", "name": dn_name,
+            "action": f"set ref -> {pr_name}",
+            "reason": "Completed DN->PR back-reference (PR already references DN)",
+            "purchase_receipt": pr_name,
+            "posting_date": claimers[0].posting_date,
+        })
+
+    if not dry_run:
+        for a in actions:
+            frappe.db.set_value(
+                "Delivery Note", a["name"], "bns_inter_company_reference", a["purchase_receipt"], update_modified=False
+            )
+            frappe.get_doc({
+                "doctype": "Comment",
+                "comment_type": "Info",
+                "reference_doctype": "Delivery Note",
+                "reference_name": a["name"],
+                "content": _("BNS repair: {0} ({1})").format(a["action"], a["reason"]),
+            }).insert(ignore_permissions=True)
+        frappe.db.commit()
+
+    return {
+        "dry_run": dry_run,
+        "total_planned": len(actions),
+        "total_skipped": len(skipped),
+        "actions": actions,
+        "skipped": skipped,
+    }
