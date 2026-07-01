@@ -856,8 +856,22 @@ def get_delivery_note_mismatches(filters=None):
 	# Base conditions
 	conditions.append("c.is_bns_internal_customer = 1")
 	conditions.append("dn.docstatus = 1")
-	# Only show DNs where GSTINs match (exclude GSTIN mismatches)
-	conditions.append("(dn.company_gstin IS NOT NULL AND dn.billing_address_gstin IS NOT NULL AND dn.company_gstin = dn.billing_address_gstin)")
+	# Include internal DNs on BOTH accounting paths:
+	#   - same GSTIN (billing == company), and
+	#   - diff GSTIN that opted into the internal DN->PR flow (per-doc flag
+	#     bns_allow_diff_gstin_dn_pr, or already switched to 'BNS Internally
+	#     Transferred').
+	# Without the diff-GSTIN arm, an inter-state internal DN that was sent but
+	# never received (empty bns_inter_company_reference / no PR) never surfaced
+	# here. Genuine inter-state SALES (DN->SI) are excluded: they carry neither
+	# the per-doc flag nor the 'BNS Internally Transferred' status.
+	gstin_scope = [
+		"(dn.company_gstin IS NOT NULL AND dn.billing_address_gstin IS NOT NULL AND dn.company_gstin = dn.billing_address_gstin)",
+		"dn.status = 'BNS Internally Transferred'",
+	]
+	if frappe.get_meta("Delivery Note").has_field("bns_allow_diff_gstin_dn_pr"):
+		gstin_scope.append("COALESCE(dn.bns_allow_diff_gstin_dn_pr, 0) = 1")
+	conditions.append("(" + " OR ".join(gstin_scope) + ")")
 	
 	# Add filter conditions
 	if filters:
