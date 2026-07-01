@@ -76,6 +76,10 @@ frappe.query_reports["Internal Transfer Receive Mismatch"] = {
 		report.page.add_inner_button(__("Fix External / Foreign-Reference Rows"), function() {
 			_fixExternalPartyRows(report);
 		}, __("Actions"));
+
+		report.page.add_inner_button(__("Repair DN ↔ PR Back-References"), function() {
+			_repairBackReferences(report);
+		}, __("Actions"));
 	}
 };
 
@@ -127,5 +131,104 @@ function _fixExternalPartyRows(report) {
 			});
 		}
 	);
+}
+
+const _BACKREF_REPAIR_METHOD =
+	"business_needed_solutions.bns_branch_accounting.utils.repair_asymmetric_dn_back_references";
+
+// "Repair DN <-> PR Back-References": completes half-written links where a PR
+// already references the DN but the DN's own bns_inter_company_reference is empty
+// (the 'DN <-> PR Back-Reference' rows). Preview (dry_run) -> Apply. Scoped to the
+// report's current company / date filters.
+function _repairBackReferences(report) {
+	var f = (report.get_filter_values && report.get_filter_values()) || {};
+	var scope = {
+		company: f.company || null,
+		from_date: f.from_date || null,
+		to_date: f.to_date || null,
+	};
+	frappe.call({
+		method: _BACKREF_REPAIR_METHOD,
+		args: Object.assign({ dry_run: 1 }, scope),
+		freeze: true,
+		freeze_message: __("Scanning for half-linked DN ↔ PR pairs…"),
+		callback: function(r) {
+			if (r && r.message) {
+				_showBackRefPreview(report, r.message, scope);
+			}
+		},
+	});
+}
+
+function _renderBackRefPreview(res) {
+	var esc = frappe.utils.escape_html;
+	var html = '<div style="line-height:1.7">';
+	html += "<div><b>" + __("To repair (PR already references DN; DN back-ref missing)") + ":</b> " + res.total_planned + "</div>";
+	html += "<div><b>" + __("Skipped (ambiguous / conflict)") + ":</b> " + res.total_skipped + "</div>";
+
+	if (res.actions && res.actions.length) {
+		html += '<hr><table class="table table-bordered" style="font-size:12px"><thead><tr><th>' +
+			__("Delivery Note") + "</th><th>" + __("→ Purchase Receipt") + "</th><th>" + __("Posting Date") + "</th></tr></thead><tbody>";
+		res.actions.slice(0, 200).forEach(function(a) {
+			html += "<tr><td>" + esc(a.name) + "</td><td>" + esc(a.purchase_receipt || "") +
+				"</td><td>" + esc(String(a.posting_date || "")) + "</td></tr>";
+		});
+		html += "</tbody></table>";
+		if (res.actions.length > 200) {
+			html += '<div style="color:#888">' + __("… and {0} more", [res.actions.length - 200]) + "</div>";
+		}
+	}
+
+	if (res.skipped && res.skipped.length) {
+		html += "<hr><b>" + __("Skipped") + ':</b><table class="table table-bordered" style="font-size:12px"><tbody>';
+		res.skipped.slice(0, 50).forEach(function(s) {
+			html += '<tr><td style="white-space:nowrap">' + esc(String(s.name)) + "</td><td>" + esc(s.reason || "") + "</td></tr>";
+		});
+		html += "</tbody></table>";
+		if (res.skipped.length > 50) {
+			html += '<div style="color:#888">' + __("… and {0} more", [res.skipped.length - 50]) + "</div>";
+		}
+	}
+	html += "</div>";
+	return html;
+}
+
+function _showBackRefPreview(report, res, scope) {
+	if (!res.total_planned && !res.total_skipped) {
+		frappe.msgprint({
+			title: __("Nothing to repair"),
+			indicator: "green",
+			message: __("No half-linked DN ↔ PR pairs found for the current filters."),
+		});
+		return;
+	}
+
+	var d = new frappe.ui.Dialog({
+		title: __("Repair DN ↔ PR Back-References — Preview"),
+		size: "large",
+		fields: [{ fieldtype: "HTML", fieldname: "body", options: _renderBackRefPreview(res) }],
+		primary_action_label: res.total_planned ? __("Apply {0} repair(s)", [res.total_planned]) : __("Close"),
+		primary_action: function() {
+			if (!res.total_planned) { d.hide(); return; }
+			frappe.call({
+				method: _BACKREF_REPAIR_METHOD,
+				args: Object.assign({ dry_run: 0 }, scope),
+				freeze: true,
+				freeze_message: __("Repairing back-references…"),
+				callback: function(r2) {
+					d.hide();
+					var out = r2 && r2.message;
+					if (out) {
+						frappe.show_alert({
+							message: __("Repaired {0} DN(s); {1} skipped.", [out.total_planned, out.total_skipped]),
+							indicator: out.total_planned ? "green" : "orange",
+						}, 7);
+						report.refresh();
+					}
+				},
+			});
+		},
+	});
+	d.show();
 }
 
