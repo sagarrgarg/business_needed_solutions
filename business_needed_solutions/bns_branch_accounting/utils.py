@@ -8533,16 +8533,50 @@ def apply_diff_gstin_to_submitted_dn(delivery_note: str) -> Dict[str, Any]:
             title=_("Cutoff Date Restriction"),
         )
 
-    # Idempotent: already flagged AND already switched -> nothing to do.
-    already_flagged = bool(dn.get("bns_allow_diff_gstin_dn_pr"))
-    if already_flagged and dn.get("status") == "BNS Internally Transferred":
+    res = _do_switch_submitted_dn_to_diff_gstin(dn, source="apply_diff_gstin_to_submitted_dn")
+
+    if res["already"]:
         return {
             "success": True,
             "delivery_note": dn.name,
-            "status": dn.get("status"),
+            "status": res["status"],
             "gl_rewritten": False,
             "message": _("Delivery Note {0} is already a Diff GSTIN Internal Transfer.").format(dn.name),
         }
+
+    if res["switched"] and not res["gl_rewritten"]:
+        message = _(
+            "Delivery Note {0} switched to Diff GSTIN Internal Transfer. GL was NOT "
+            "rewritten because the posting date is before the Accounting Rewrite cutoff."
+        ).format(dn.name)
+    else:
+        message = _("Delivery Note {0} switched to Diff GSTIN Internal Transfer.").format(dn.name)
+
+    return {
+        "success": True,
+        "delivery_note": dn.name,
+        "status": res["status"],
+        "gl_rewritten": res["gl_rewritten"],
+        "message": message,
+    }
+
+
+def _do_switch_submitted_dn_to_diff_gstin(dn, source: str) -> Dict[str, Any]:
+    """Stamp the diff-GSTIN opt-in on an ALREADY-VALIDATED submitted DN and run
+    the same status + guarded GL rewrite the on_submit hook uses.
+
+    Shared by the single API (apply_diff_gstin_to_submitted_dn) and the bulk
+    worker so the accounting-affecting mutation is one source of truth. Callers
+    MUST have already validated eligibility (submitted, internal customer,
+    diff GSTIN populated, after the Internal Transfer cutoff, org setting ON).
+
+    Returns {already, switched, gl_rewritten, status}. Does not throw for
+    business reasons; unexpected errors bubble up to the caller.
+    """
+    # Idempotent: already flagged AND already switched -> nothing to do.
+    already_flagged = bool(dn.get("bns_allow_diff_gstin_dn_pr"))
+    if already_flagged and dn.get("status") == "BNS Internally Transferred":
+        return {"already": True, "switched": True, "gl_rewritten": False, "status": dn.get("status")}
 
     # Stamp the per-doc opt-in. Submitted doc -> db_set (fields are read-only);
     # also set it in-memory so the status routine sees the flag this run. Only
@@ -8556,7 +8590,7 @@ def apply_diff_gstin_to_submitted_dn(delivery_note: str) -> Dict[str, Any]:
     # Same status + guarded GL rewrite the on_submit hook runs: flips
     # status/per_billed/is_bns_internal_customer and, when past the Accounting
     # Rewrite (Phase-2) cutoff, reposts the voucher GL onto the internal accounts.
-    update_delivery_note_status_for_bns_internal(dn, method="apply_diff_gstin_to_submitted_dn")
+    update_delivery_note_status_for_bns_internal(dn, method=source)
 
     dn.reload()
     switched = dn.get("status") == "BNS Internally Transferred"
@@ -8565,29 +8599,167 @@ def apply_diff_gstin_to_submitted_dn(delivery_note: str) -> Dict[str, Any]:
     _audit_unlink_action(
         "diff_gstin_dn_pr_opt_in_submitted_dn",
         {
-            "delivery_note": delivery_note,
-            "company_gstin": company_gstin,
-            "billing_address_gstin": billing_gstin,
+            "delivery_note": dn.name,
+            "company_gstin": (dn.get("company_gstin") or "").strip(),
+            "billing_address_gstin": (dn.get("billing_address_gstin") or "").strip(),
             "enabled_by": frappe.session.user,
             "gl_rewritten": gl_rewritten,
+            "source": source,
         },
     )
+    return {"already": False, "switched": switched, "gl_rewritten": gl_rewritten, "status": dn.get("status")}
 
-    if switched and not gl_rewritten:
-        message = _(
-            "Delivery Note {0} switched to Diff GSTIN Internal Transfer. GL was NOT "
-            "rewritten because the posting date is before the Accounting Rewrite cutoff."
-        ).format(dn.name)
-    else:
-        message = _("Delivery Note {0} switched to Diff GSTIN Internal Transfer.").format(dn.name)
 
-    return {
-        "success": True,
-        "delivery_note": dn.name,
-        "status": dn.get("status"),
-        "gl_rewritten": gl_rewritten,
-        "message": message,
-    }
+# --- Bulk "Switch to Diff GSTIN Internal Transfer" (list-view Actions) --------
+_BULK_DIFF_GSTIN_BATCH = 10                 # commit + emit progress every N docs
+_BULK_DIFF_GSTIN_PROGRESS_TTL = 3600        # secs to keep progress in cache
+_BULK_DIFF_GSTIN_EVENT = "bns_diff_gstin_bulk_progress"
+
+
+def _bulk_diff_gstin_progress_key(token: str) -> str:
+    return f"bns_diff_gstin_bulk::{token}"
+
+
+def _bulk_diff_gstin_set_progress(token: str, state: Dict[str, Any]) -> None:
+    try:
+        frappe.cache().set_value(
+            _bulk_diff_gstin_progress_key(token), state, expires_in_sec=_BULK_DIFF_GSTIN_PROGRESS_TTL
+        )
+    except Exception:
+        logger.exception("bulk diff-gstin: could not persist progress for %s", token)
+
+
+@frappe.whitelist()
+def bulk_switch_diff_gstin_progress(token: str) -> Dict[str, Any]:
+    """Poll fallback for the bulk-switch progress dialog (realtime is primary)."""
+    if not token:
+        return {}
+    return frappe.cache().get_value(_bulk_diff_gstin_progress_key(token)) or {}
+
+
+def _bulk_diff_gstin_eligibility(dn_name: str):
+    """Non-throwing per-DN eligibility for the bulk list-view action.
+
+    Target set = SUBMITTED Delivery Notes in 'To Bill' with 0% billed, internal
+    customer, GSTINs populated and different, after the Internal Transfer cutoff.
+    Returns (dn_doc, None) when eligible, else (None, reason)."""
+    if not frappe.db.exists("Delivery Note", dn_name):
+        return None, _("does not exist")
+    dn = frappe.get_doc("Delivery Note", dn_name)
+    if dn.docstatus != 1:
+        return None, _("not submitted")
+    if dn.get("status") == "BNS Internally Transferred":
+        return None, _("already switched")
+    if dn.get("status") != "To Bill":
+        return None, _("status is '{0}' (need 'To Bill')").format(dn.get("status"))
+    if frappe.utils.flt(dn.get("per_billed")) != 0:
+        return None, _("already {0}% billed").format(frappe.utils.flt(dn.get("per_billed")))
+    if not is_bns_internal_customer(dn):
+        return None, _("customer is not BNS Internal")
+    company_gstin = (dn.get("company_gstin") or "").strip()
+    billing_gstin = (dn.get("billing_address_gstin") or "").strip()
+    if not company_gstin or not billing_gstin:
+        return None, _("Company/Billing GSTIN not populated")
+    if company_gstin == billing_gstin:
+        return None, _("same GSTIN (use standard conversion)")
+    if not is_after_internal_transfer_cutoff(dn.get("posting_date")):
+        return None, _("before Internal Transfer cutoff")
+    return dn, None
+
+
+@frappe.whitelist()
+def bulk_switch_diff_gstin_dns(delivery_notes) -> Dict[str, Any]:
+    """Enqueue a background switch of the selected submitted DNs to Diff GSTIN
+    Internal Transfer. Eligibility is re-checked authoritatively per DN in the
+    worker (submitted, To Bill, 0% billed, internal, diff GSTIN, after cutoff);
+    ineligible ones are skipped with a reason. Returns {token, total}.
+    """
+    _bns_require_doctype_write("Delivery Note")
+    _bns_require_accounts_write()
+
+    if not _diff_gstin_dn_pr_global_enabled():
+        frappe.throw(
+            _(
+                "Diff-GSTIN DN -> PR is not enabled at the company level. "
+                "Enable 'Allow Different GSTIN DN → PR' in BNS Branch "
+                "Accounting Settings first."
+            ),
+            title=_("Org Setting Disabled"),
+        )
+
+    names = delivery_notes
+    if isinstance(names, str):
+        names = frappe.parse_json(names)
+    names = [n for n in (names or []) if n]
+    if not names:
+        frappe.throw(_("No Delivery Notes selected."))
+
+    token = frappe.generate_hash(length=12)
+    _bulk_diff_gstin_set_progress(
+        token,
+        {"total": len(names), "done": 0, "switched": 0, "skipped": 0, "failed": 0, "finished": False},
+    )
+    frappe.enqueue(
+        "business_needed_solutions.bns_branch_accounting.utils._bulk_switch_diff_gstin_worker",
+        queue="long",
+        timeout=min(len(names) * 60 + 600, 21600),
+        job_id=f"bns_bulk_diff_gstin_{token}",
+        names=names,
+        token=token,
+        user=frappe.session.user,
+    )
+    return {"token": token, "total": len(names)}
+
+
+def _bulk_switch_diff_gstin_worker(names, token, user) -> None:
+    """Background worker: switch each eligible DN, committing + emitting progress
+    every batch. Per-DN failures are isolated (rollback + record), never abort
+    the run."""
+    frappe.set_user(user)  # attribute audit + session to the initiator
+    total = len(names)
+    done = switched = skipped = failed = 0
+    details = []
+
+    for name in names:
+        try:
+            dn, reason = _bulk_diff_gstin_eligibility(name)
+            if reason:
+                skipped += 1
+                details.append({"dn": name, "result": "skipped", "reason": reason})
+            else:
+                res = _do_switch_submitted_dn_to_diff_gstin(dn, source="bulk_switch_diff_gstin_dns")
+                switched += 1
+                details.append({"dn": name, "result": "switched", "gl_rewritten": res["gl_rewritten"]})
+            frappe.db.commit()
+        except Exception as e:
+            frappe.db.rollback()
+            failed += 1
+            details.append({"dn": name, "result": "failed", "reason": str(e)[:200]})
+            logger.exception("bulk diff-gstin switch failed for %s", name)
+
+        done += 1
+        if done % _BULK_DIFF_GSTIN_BATCH == 0 or done == total:
+            state = {
+                "total": total, "done": done, "switched": switched,
+                "skipped": skipped, "failed": failed, "finished": done == total,
+            }
+            _bulk_diff_gstin_set_progress(token, state)
+            try:
+                frappe.publish_realtime(_BULK_DIFF_GSTIN_EVENT, {**state, "token": token}, user=user)
+            except Exception:
+                pass
+
+    _bulk_diff_gstin_set_progress(
+        token,
+        {
+            "total": total, "done": done, "switched": switched, "skipped": skipped,
+            "failed": failed, "finished": True, "details": details[:500],
+        },
+    )
+    logger.info(
+        "bulk diff-gstin switch %s: switched=%s skipped=%s failed=%s (of %s)",
+        token, switched, skipped, failed, total,
+    )
 
 
 @frappe.whitelist()
