@@ -8456,6 +8456,141 @@ def submit_diff_gstin_dn_for_internal_transfer(delivery_note: str) -> Dict[str, 
 
 
 @frappe.whitelist()
+def apply_diff_gstin_to_submitted_dn(delivery_note: str) -> Dict[str, Any]:
+    """Submitted-DN counterpart of submit_diff_gstin_dn_for_internal_transfer().
+
+    The draft path is Draft-only (it stamps the flag and calls dn.submit()). This
+    lets an already-submitted diff-GSTIN Delivery Note be switched to
+    "BNS Internally Transferred" WITHOUT re-submitting: it stamps the per-doc
+    opt-in flag via db_set, then runs the SAME
+    update_delivery_note_status_for_bns_internal() the on_submit hook uses. So the
+    status flip + guarded GL rewrite are identical to a DN flagged while draft --
+    including honouring the Accounting Rewrite (Phase-2) cutoff (GL is only
+    rewritten when the posting date is past it; otherwise only the status flips,
+    consistent with the BNS two-phase model).
+
+    Guardrails mirror the draft path: org setting ON, internal customer, both
+    GSTINs populated and different, after the Internal Transfer (Phase-1) cutoff,
+    and write permission on Delivery Note AND BNS Branch Accounting Settings.
+
+    Returns: {success, delivery_note, status, gl_rewritten, message}.
+    """
+    _bns_require_doctype_write("Delivery Note")
+    _bns_require_accounts_write()
+
+    if not delivery_note:
+        frappe.throw(_("Delivery Note name is required."))
+    if not frappe.db.exists("Delivery Note", delivery_note):
+        frappe.throw(_("Delivery Note {0} does not exist.").format(delivery_note))
+
+    if not _diff_gstin_dn_pr_global_enabled():
+        frappe.throw(
+            _(
+                "Diff-GSTIN DN -> PR is not enabled at the company level. "
+                "Enable 'Allow Different GSTIN DN → PR' in BNS Branch "
+                "Accounting Settings first."
+            ),
+            title=_("Org Setting Disabled"),
+        )
+
+    dn = frappe.get_doc("Delivery Note", delivery_note)
+
+    if dn.docstatus != 1:
+        frappe.throw(
+            _(
+                "This action is only for submitted Delivery Notes. {0} is currently "
+                "in '{1}' state -- use 'Submit as Diff GSTIN Internal Transfer' for a draft."
+            ).format(delivery_note, _docstatus_label(dn.docstatus)),
+            title=_("Submitted Only"),
+        )
+
+    if not is_bns_internal_customer(dn):
+        frappe.throw(
+            _("Delivery Note {0} customer is not marked as BNS Internal Customer.").format(delivery_note),
+            title=_("Internal Customer Required"),
+        )
+
+    company_gstin = (dn.get("company_gstin") or "").strip()
+    billing_gstin = (dn.get("billing_address_gstin") or "").strip()
+    if not company_gstin or not billing_gstin:
+        frappe.throw(
+            _("Both Company GSTIN and Billing GSTIN must be populated on the Delivery Note before using this flow."),
+            title=_("GSTIN Required"),
+        )
+    if company_gstin == billing_gstin:
+        frappe.throw(
+            _(
+                "Company GSTIN and Billing GSTIN are the same on this Delivery Note. "
+                "The diff-GSTIN opt-in is only for inter-state transfers; use the "
+                "regular internal-transfer conversion for same-GSTIN movement."
+            ),
+            title=_("Use Standard Conversion"),
+        )
+
+    if not is_after_internal_transfer_cutoff(dn.get("posting_date")):
+        frappe.throw(
+            _("Delivery Note {0} posting date is before the Internal Transfer Cutoff.").format(delivery_note),
+            title=_("Cutoff Date Restriction"),
+        )
+
+    # Idempotent: already flagged AND already switched -> nothing to do.
+    already_flagged = bool(dn.get("bns_allow_diff_gstin_dn_pr"))
+    if already_flagged and dn.get("status") == "BNS Internally Transferred":
+        return {
+            "success": True,
+            "delivery_note": dn.name,
+            "status": dn.get("status"),
+            "gl_rewritten": False,
+            "message": _("Delivery Note {0} is already a Diff GSTIN Internal Transfer.").format(dn.name),
+        }
+
+    # Stamp the per-doc opt-in. Submitted doc -> db_set (fields are read-only);
+    # also set it in-memory so the status routine sees the flag this run. Only
+    # write the audit stamps on first flagging.
+    if not already_flagged:
+        dn.db_set("bns_allow_diff_gstin_dn_pr", 1, update_modified=False)
+        dn.db_set("bns_diff_gstin_enabled_by", frappe.session.user, update_modified=False)
+        dn.db_set("bns_diff_gstin_enabled_on", now_datetime(), update_modified=False)
+    dn.bns_allow_diff_gstin_dn_pr = 1
+
+    # Same status + guarded GL rewrite the on_submit hook runs: flips
+    # status/per_billed/is_bns_internal_customer and, when past the Accounting
+    # Rewrite (Phase-2) cutoff, reposts the voucher GL onto the internal accounts.
+    update_delivery_note_status_for_bns_internal(dn, method="apply_diff_gstin_to_submitted_dn")
+
+    dn.reload()
+    switched = dn.get("status") == "BNS Internally Transferred"
+    gl_rewritten = bool(switched and is_after_accounting_rewrite_cutoff(dn.get("posting_date")))
+
+    _audit_unlink_action(
+        "diff_gstin_dn_pr_opt_in_submitted_dn",
+        {
+            "delivery_note": delivery_note,
+            "company_gstin": company_gstin,
+            "billing_address_gstin": billing_gstin,
+            "enabled_by": frappe.session.user,
+            "gl_rewritten": gl_rewritten,
+        },
+    )
+
+    if switched and not gl_rewritten:
+        message = _(
+            "Delivery Note {0} switched to Diff GSTIN Internal Transfer. GL was NOT "
+            "rewritten because the posting date is before the Accounting Rewrite cutoff."
+        ).format(dn.name)
+    else:
+        message = _("Delivery Note {0} switched to Diff GSTIN Internal Transfer.").format(dn.name)
+
+    return {
+        "success": True,
+        "delivery_note": dn.name,
+        "status": dn.get("status"),
+        "gl_rewritten": gl_rewritten,
+        "message": message,
+    }
+
+
+@frappe.whitelist()
 def convert_delivery_note_to_bns_internal(delivery_note: str, purchase_receipt: Optional[str] = None) -> Dict:
     """
     Convert a Delivery Note to BNS Internally Transferred status (same GSTIN only).

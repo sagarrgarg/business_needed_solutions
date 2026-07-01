@@ -272,3 +272,76 @@ frappe.ui.form.on('Delivery Note', {
             });
     },
 });
+
+
+// Diff-GSTIN DN -> PR opt-in: SUBMITTED-DN counterpart of the draft button above.
+// Switches an already-submitted diff-GSTIN, internal-customer Delivery Note to
+// "BNS Internally Transferred" (stamping the per-doc flag + rewriting DN GL via
+// the same on_submit path) without re-submitting. Same two-gate visibility.
+frappe.ui.form.on('Delivery Note', {
+    refresh: function(frm) {
+        if (frm.doc.docstatus !== 1) {
+            return;
+        }
+        if (!frm.doc.customer) {
+            return;
+        }
+        // Already switched -> nothing to do.
+        if (frm.doc.status === 'BNS Internally Transferred') {
+            return;
+        }
+        const billing_gstin = (frm.doc.billing_address_gstin || '').trim();
+        const company_gstin = (frm.doc.company_gstin || '').trim();
+        if (!billing_gstin || !company_gstin || billing_gstin === company_gstin) {
+            return;
+        }
+
+        frappe.db.get_value('Customer', frm.doc.customer, 'is_bns_internal_customer')
+            .then((cust_res) => {
+                if (!cust_res || !cust_res.message || !cust_res.message.is_bns_internal_customer) {
+                    return;
+                }
+                frappe.db.get_single_value('BNS Branch Accounting Settings', 'allow_different_gstin_dn_to_pr')
+                    .then((global_on) => {
+                        if (!global_on) {
+                            return;
+                        }
+                        frm.add_custom_button(__('Switch to Diff GSTIN Internal Transfer'), function() {
+                            frappe.warn(
+                                __('Switch to Diff GSTIN Internal Transfer?'),
+                                __(
+                                    'This submitted Delivery Note will be switched to ' +
+                                    '"BNS Internally Transferred" even though Company GSTIN ({0}) and ' +
+                                    'Billing GSTIN ({1}) differ, and its GL will be rewritten to the ' +
+                                    'same-GSTIN internal pattern (Internal Branch Debtor / Sales Transfer ' +
+                                    '+ Stock in Transit / Stock) — provided the posting date is past the ' +
+                                    'Accounting Rewrite cutoff. This is for inter-state stock transfers on ' +
+                                    'a delivery challan basis only (e.g. own-use, job work). The opt-in ' +
+                                    'flag and your user/timestamp are recorded permanently on the DN.',
+                                    [company_gstin, billing_gstin]
+                                ),
+                                () => {
+                                    frappe.call({
+                                        method: 'business_needed_solutions.bns_branch_accounting.utils.apply_diff_gstin_to_submitted_dn',
+                                        args: { delivery_note: frm.doc.name },
+                                        freeze: true,
+                                        freeze_message: __('Switching to Diff GSTIN Internal Transfer...'),
+                                        callback: function(r) {
+                                            if (!r.exc && r.message && r.message.success) {
+                                                frappe.show_alert({
+                                                    message: r.message.message || __('Switched'),
+                                                    indicator: r.message.gl_rewritten === false ? 'orange' : 'green',
+                                                });
+                                                frm.reload_doc();
+                                            }
+                                        },
+                                    });
+                                },
+                                __('Switch'),
+                                true,
+                            );
+                        }, __('Actions'));
+                    });
+            });
+    },
+});
