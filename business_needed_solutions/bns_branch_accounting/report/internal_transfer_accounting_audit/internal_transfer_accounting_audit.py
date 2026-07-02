@@ -151,16 +151,33 @@ def _classify_dn(doc):
 		if not frappe.db.get_value("Customer", customer, "is_bns_internal_customer"):
 			return None
 
-	company_gstin = (doc.get("company_gstin") or "").strip()
-	billing_gstin = (doc.get("billing_address_gstin") or "").strip()
-	if company_gstin and billing_gstin and company_gstin == billing_gstin:
-		return "same_gstin"
-	# Diff-GSTIN DN with the per-doc opt-in flag routes through the same-GSTIN
-	# GL rewrite path (utils.py:_is_same_gstin_internal_delivery_note), so the
-	# audit must expect the same-GSTIN GL pattern for these documents.
-	if cint(doc.get("bns_allow_diff_gstin_dn_pr")):
+	if _dn_routes_as_internal_pr(doc):
 		return "same_gstin"
 	return "different_gstin"
+
+
+def _dn_routes_as_internal_pr(dn) -> bool:
+	"""True when a Delivery Note's internal counter-document is a Purchase
+	Receipt and it posts the same-GSTIN internal GL pattern:
+
+	- billing GSTIN == company GSTIN (plain same-GSTIN internal transfer), OR
+	- a diff-GSTIN DN that took the internal DN->PR path. That path is marked by
+	  the per-doc opt-in flag ``bns_allow_diff_gstin_dn_pr``; but that flag is
+	  ``no_copy`` (dropped on amend) and absent on legacy DNs created before it
+	  existed, so we also accept the ``BNS Internally Transferred`` status, which
+	  ``update_delivery_note_status_for_bns_internal`` only ever sets when the DN
+	  routes through that same-GSTIN internal path.
+
+	Requires ``dn`` to carry company_gstin, billing_address_gstin,
+	bns_allow_diff_gstin_dn_pr and status.
+	"""
+	co = (dn.get("company_gstin") or "").strip()
+	bill = (dn.get("billing_address_gstin") or "").strip()
+	if co and bill and co == bill:
+		return True
+	if cint(dn.get("bns_allow_diff_gstin_dn_pr")):
+		return True
+	return dn.get("status") == "BNS Internally Transferred"
 
 
 def _classify_si(doc):
@@ -1043,7 +1060,8 @@ def _audit_delivery_notes(filters, settings):
 
 	sql = f"""
 		SELECT dn.name, dn.posting_date, dn.company, dn.customer,
-			   dn.is_bns_internal_customer, dn.company_gstin, dn.billing_address_gstin
+			   dn.is_bns_internal_customer, dn.company_gstin, dn.billing_address_gstin,
+			   dn.status, dn.bns_allow_diff_gstin_dn_pr
 		FROM `tabDelivery Note` dn
 		LEFT JOIN `tabCustomer` c ON dn.customer = c.name
 		WHERE {" AND ".join(conditions)}
@@ -1440,7 +1458,8 @@ def _audit_cross_document_consistency(filters, settings):
 	# --- Check 3: DN with BNS internal GL but no submitted PR/SI->PI ---
 	dn_rows = frappe.db.sql(
 		f"""SELECT dn.name, dn.posting_date, dn.is_bns_internal_customer, dn.customer,
-		          dn.company_gstin, dn.billing_address_gstin
+		          dn.company_gstin, dn.billing_address_gstin, dn.status,
+		          dn.bns_allow_diff_gstin_dn_pr
 		   FROM `tabDelivery Note` dn
 		   WHERE dn.docstatus = 1
 		     AND dn.posting_date >= %s AND dn.posting_date <= %s
@@ -1457,11 +1476,11 @@ def _audit_cross_document_consistency(filters, settings):
 		if not _has_internal_gl("Delivery Note", dn.name):
 			continue
 
-		co_gstin = (dn.get("company_gstin") or "").strip()
-		bill_gstin = (dn.get("billing_address_gstin") or "").strip()
-		is_same_gstin = co_gstin and bill_gstin and co_gstin == bill_gstin
-
-		if is_same_gstin:
+		# A diff-GSTIN DN that took the internal DN->PR path (flag or the
+		# 'BNS Internally Transferred' status) has a PURCHASE RECEIPT counter,
+		# NOT a Sales Invoice -- otherwise it is falsely flagged as a
+		# different-GSTIN DN missing its SI.
+		if _dn_routes_as_internal_pr(dn):
 			has_pr = frappe.db.exists("Purchase Receipt", {
 				"bns_inter_company_reference": dn.name,
 				"docstatus": 1,
@@ -1469,7 +1488,7 @@ def _audit_cross_document_consistency(filters, settings):
 			if not has_pr:
 				results.append(_build_row(
 					dn, "no_counter_doc", "No Counter-Document",
-					details="Same-GSTIN DN has BNS internal GL but no submitted PR references it.",
+					details="Internal DN has BNS internal GL but no submitted PR references it.",
 				))
 		else:
 			linked_si = frappe.db.sql(
