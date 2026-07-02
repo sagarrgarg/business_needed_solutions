@@ -560,5 +560,69 @@ frappe.ui.form.on('BNS Branch Accounting Settings', {
 
       d.show();
     }, __('Actions'));
+  },
+
+  repost_add_worker: function(frm) {
+    frappe.confirm(
+      __('Enable Prioritise and add one parallel repost worker (spawns it now)?'),
+      function() {
+        frappe.call({
+          method: 'business_needed_solutions.bns_branch_accounting.utils.bns_repost_add_worker',
+          freeze: true,
+          freeze_message: __('Adding worker…'),
+          callback: function(r) {
+            if (r && r.message) {
+              frappe.show_alert({ message: r.message.message, indicator: 'green' }, 7);
+              frm.reload_doc();
+            }
+          }
+        });
+      }
+    );
+  },
+
+  repost_stop_all: function(frm) {
+    frappe.warn(
+      __('Stop ALL reposting?'),
+      __('Turns Prioritise OFF and Parallel Repost Workers to 0 — running workers exit within one iteration — and kills the queued/running repost JOBS. The RQ worker processes are NOT killed.'),
+      function() {
+        frappe.call({
+          method: 'business_needed_solutions.bns_branch_accounting.utils.bns_repost_stop_all',
+          freeze: true,
+          freeze_message: __('Stopping…'),
+          callback: function(r) {
+            if (r && r.message) {
+              frappe.show_alert({ message: r.message.message, indicator: 'orange' }, 8);
+              frm.reload_doc();
+            }
+          }
+        });
+      },
+      __('Stop'),
+      true
+    );
+  },
+
+  repost_status: function(frm) {
+    frappe.call({
+      method: 'business_needed_solutions.bns_branch_accounting.utils.bns_repost_status',
+      callback: function(r) {
+        if (!r || !r.message) return;
+        const m = r.message;
+        frappe.msgprint({
+          title: __('Repost Status'),
+          indicator: m.failed ? 'orange' : 'blue',
+          message:
+            '<table class="table table-bordered" style="font-size:12px">' +
+            '<tr><td>' + __('Prioritise') + '</td><td><b>' + (m.prioritize ? 'ON' : 'OFF') + '</b></td></tr>' +
+            '<tr><td>' + __('Target workers') + '</td><td><b>' + m.target_workers + '</b></td></tr>' +
+            '<tr><td>' + __('Running workers') + '</td><td><b>' + (m.running_workers < 0 ? '?' : m.running_workers) + '</b></td></tr>' +
+            '<tr><td>' + __('Queued') + '</td><td>' + m.queued + '</td></tr>' +
+            '<tr><td>' + __('In Progress') + '</td><td>' + m.in_progress + '</td></tr>' +
+            '<tr><td>' + __('Failed') + '</td><td>' + m.failed + '</td></tr>' +
+            '</table>'
+        });
+      }
+    });
   }
 });
