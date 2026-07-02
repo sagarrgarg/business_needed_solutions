@@ -31,14 +31,7 @@
   "enable_auto_fix_missing_ledgers",
   "auto_fix_lookback_days",
   "tab_reposting",
-  "prioritize_repost_item_valuation",
-  "repost_parallel_section",
-  "repost_worker_count",
-  "repost_controls_section",
-  "repost_add_worker",
-  "repost_stop_all",
-  "repost_controls_col",
-  "repost_status"
+  "prioritize_repost_item_valuation"
  ],
  "fields": [
   {
@@ -210,60 +203,16 @@
   },
   {
    "default": "0",
-   "description": "When ON, a BNS cron re-triggers ERPNext's own 'repost_item_valuation.repost_entries' job every 5 minutes (instead of only hourly), so queued Repost Item Valuation entries keep draining continuously in a single worker. Frappe deduplicates the job, so it never runs concurrently with itself, and ERPNext's Stock Reposting timeslot limits are still honoured.",
+   "description": "When ON, a BNS cron reposts the oldest-dated Queued Repost Item Valuation entries every 5 minutes in a single background worker (repost now, oldest first), so the queue keeps draining continuously instead of waiting for ERPNext's hourly run. The job is deduplicated, so it never runs concurrently with itself.",
    "fieldname": "prioritize_repost_item_valuation",
    "fieldtype": "Check",
    "label": "Prioritise Repost Item Valuation (keep draining continuously)"
-  },
-  {
-   "depends_on": "eval:doc.prioritize_repost_item_valuation",
-   "fieldname": "repost_parallel_section",
-   "fieldtype": "Section Break",
-   "label": "Parallel Reposting"
-  },
-  {
-   "default": "0",
-   "depends_on": "eval:doc.prioritize_repost_item_valuation",
-   "description": "Number of parallel drain workers. Each grabs the oldest Queued Repost Item Valuation whose item isn't already being processed (per-item lock), so no two workers ever touch one item; deadlocks between different items of one voucher are waited out and retried. 0 or 1 = single worker (no parallelism). Use the buttons below to add a worker or hard-stop. Real throughput is still capped by the number of background ('long' queue) workers actually running.",
-   "fieldname": "repost_worker_count",
-   "fieldtype": "Int",
-   "label": "Parallel Repost Workers"
-  },
-  {
-   "fieldname": "repost_controls_section",
-   "fieldtype": "Section Break",
-   "label": "Controls"
-  },
-  {
-   "depends_on": "eval:!doc.__islocal",
-   "description": "Enable prioritise + add one parallel worker and spawn it now.",
-   "fieldname": "repost_add_worker",
-   "fieldtype": "Button",
-   "label": "➕ Add Worker"
-  },
-  {
-   "depends_on": "eval:!doc.__islocal",
-   "description": "HARD STOP: turn prioritise OFF + workers = 0 (running workers exit within one iteration) and kill the queued/running repost JOBS (not the RQ worker processes).",
-   "fieldname": "repost_stop_all",
-   "fieldtype": "Button",
-   "label": "⛔ Stop All Reposting (kill jobs)"
-  },
-  {
-   "fieldname": "repost_controls_col",
-   "fieldtype": "Column Break"
-  },
-  {
-   "depends_on": "eval:!doc.__islocal",
-   "description": "Show live reposting status (prioritise, target/running workers, Queued / In Progress / Failed counts).",
-   "fieldname": "repost_status",
-   "fieldtype": "Button",
-   "label": "🔄 Repost Status"
   }
  ],
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-07-02 10:00:00.000000",
+ "modified": "2026-07-02 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "BNS Branch Accounting",
  "name": "BNS Branch Accounting Settings",
