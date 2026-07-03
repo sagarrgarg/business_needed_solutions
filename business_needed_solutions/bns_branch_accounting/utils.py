@@ -6585,13 +6585,28 @@ def _resolve_impacted_vouchers_for_repost(
     Sources:
     - direct transaction metadata on repost doc
     - get_affected_transactions(doc)
-    - item+warehouse fallback via get_future_stock_vouchers
+    - FORWARD SCAN via get_future_stock_vouchers:
+        * Item and Warehouse: the RIV's own item + warehouse
+        * Transaction: every item+warehouse combo the trigger voucher touched
+          (from the RIV's persisted items_to_be_repost, which also includes
+          dependant combos discovered mid-repost; falls back to the voucher's
+          own SLE combos)
+
+    The forward scan is the LOAD-BEARING source for both modes: ERPNext's
+    affected-transactions file structurally EXCLUDES vouchers in the same
+    item+warehouse stream as the combo being reposted (stock_ledger.py only
+    records an SLE when args.item_code/warehouse differ, i.e. cross-combo
+    dependant SLEs of same-voucher transfers). So a back-dated voucher's repost
+    never reports the internal DN/SI it revalued -- without the forward scan
+    those DN/SIs are missed, their SI incoming_rate is never re-synced from the
+    DN, and no bns_transfer_rate / receiver SLE+GL sync happens downstream.
     """
     discovered: Set[str] = set()
     source_counts = {
         "transaction": 0,
         "affected_transactions": 0,
         "item_warehouse_fallback": 0,
+        "txn_forward_scan": 0,
     }
 
     def _add_if_valid(voucher_no: Optional[str], source_key: str) -> None:
@@ -6621,30 +6636,55 @@ def _resolve_impacted_vouchers_for_repost(
         if voucher_type == target_voucher_type:
             _add_if_valid(voucher_no, "affected_transactions")
 
+    def _forward_scan(for_items: Set[str], for_warehouses: Set[str], source_key: str) -> None:
+        if not (for_items and for_warehouses and doc.get("posting_date")):
+            return
+        try:
+            from erpnext.accounts.utils import get_future_stock_vouchers
+
+            vouchers = get_future_stock_vouchers(
+                posting_date=doc.get("posting_date"),
+                posting_time=doc.get("posting_time") or "00:00:00",
+                for_warehouses=sorted(for_warehouses),
+                for_items=sorted(for_items),
+                company=doc.get("company"),
+            )
+        except Exception:
+            vouchers = []
+        for voucher_type, voucher_no in vouchers:
+            if voucher_type == target_voucher_type:
+                _add_if_valid(voucher_no, source_key)
+
     # Item+warehouse repost can miss direct transaction context for SI/DN source docs.
     if (
         doc.get("based_on") == "Item and Warehouse"
         and doc.get("item_code")
         and doc.get("warehouse")
         and doc.get("company")
-        and doc.get("posting_date")
+    ):
+        _forward_scan({doc.get("item_code")}, {doc.get("warehouse")}, "item_warehouse_fallback")
+
+    # Transaction repost: expand the trigger voucher's own item+warehouse combos
+    # and forward-scan them -- the only reliable way to find same-stream DN/SIs
+    # the repost revalued (see docstring).
+    if (
+        doc.get("based_on") == "Transaction"
+        and doc.get("voucher_type")
+        and doc.get("voucher_no")
     ):
         try:
-            from erpnext.accounts.utils import get_future_stock_vouchers
+            from erpnext.stock.stock_ledger import get_items_to_be_repost
 
-            fallback_vouchers = get_future_stock_vouchers(
-                posting_date=doc.get("posting_date"),
-                posting_time=doc.get("posting_time") or "00:00:00",
-                for_warehouses=[doc.get("warehouse")],
-                for_items=[doc.get("item_code")],
-                company=doc.get("company"),
-            )
+            combos = get_items_to_be_repost(
+                voucher_type=doc.get("voucher_type"),
+                voucher_no=doc.get("voucher_no"),
+                doc=doc,
+            ) or []
         except Exception:
-            fallback_vouchers = []
-
-        for voucher_type, voucher_no in fallback_vouchers:
-            if voucher_type == target_voucher_type:
-                _add_if_valid(voucher_no, "item_warehouse_fallback")
+            combos = []
+        items = {(c.get("item_code") or "").strip() for c in combos}
+        warehouses = {(c.get("warehouse") or "").strip() for c in combos}
+        _forward_scan({i for i in items if i}, {w for w in warehouses if w}, "txn_forward_scan")
 
     return sorted(discovered), source_counts
 
