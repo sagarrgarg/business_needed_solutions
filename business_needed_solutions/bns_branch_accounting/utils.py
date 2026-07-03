@@ -3502,7 +3502,40 @@ def _force_rebuild_bns_gl_for_voucher(
         # endregion
         return True
     except Exception as e:
-        frappe.db.rollback(save_point=save_point)
+        # A commit anywhere inside make_gl_entries releases ALL savepoints
+        # (MariaDB), so this rollback can itself raise OperationalError 1305
+        # "SAVEPOINT ... does not exist". That second error used to escape this
+        # except block, bubble through the RIV on_change hook into ERPNext's
+        # repost() and flip a SUCCESSFULLY reposted RIV to Failed (seen on prod:
+        # PI090127-0023 chain). Savepoint recovery must never be fatal.
+        rolled_back = False
+        try:
+            frappe.db.rollback(save_point=save_point)
+            rolled_back = True
+        except Exception:
+            logger.warning(
+                "BNS force rebuild: savepoint %s lost (nested commit) for %s %s; continuing without rollback",
+                save_point, voucher_type, voucher_no,
+            )
+        if not rolled_back:
+            # The savepoint existed to undo _delete_ledger_rows_for_voucher. If it
+            # is gone, the delete may already be durable: never leave a posted
+            # voucher without GL -- re-attempt the rebuild once, and if that also
+            # fails, surface an Error Log for the missing-ledger audit/repair.
+            try:
+                after_fail = _get_ledger_row_counts_for_voucher(voucher_type, voucher_no)
+                if before_counts.get("gl_entry", 0) > 0 and after_fail.get("gl_entry", 0) == 0:
+                    doc.make_gl_entries(from_repost=True)
+                    logger.error(
+                        "BNS force rebuild: savepoint lost; re-ran make_gl_entries to restore GL for %s %s",
+                        voucher_type, voucher_no,
+                    )
+            except Exception:
+                frappe.log_error(
+                    title="BNS GL missing after failed force rebuild",
+                    message=f"{voucher_type} {voucher_no}: ledger rows deleted, rebuild + retry failed "
+                    f"(context={context}). Heal via GL/SLE audit missing-ledger repair or manual repost.",
+                )
         logger.error("Force rebuild failed for %s %s: %s", voucher_type, voucher_no, str(e))
         # region agent log
         _bns_debug_log(
@@ -6689,6 +6722,32 @@ def _resolve_impacted_vouchers_for_repost(
     return sorted(discovered), source_counts
 
 
+def _bns_repost_cascade_safe(fn):
+    """Make a Repost Item Valuation on_change hook exception-proof.
+
+    These hooks fire from db_set("status", "Completed") INSIDE ERPNext's
+    repost(). Any exception escaping them lands in repost()'s except handler,
+    which rolls back and marks the RIV Failed -- converting a SUCCESSFULLY
+    completed repost into a permanent failure (Failed is never retried), which
+    is exactly how transfer-rate chains go permanently stale. A cascade/sync
+    failure must only be logged; healing is the audit tools' job.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(doc, method=None):
+        try:
+            return fn(doc, method)
+        except Exception:
+            logger.exception(
+                "BNS repost cascade hook %s failed for %s (repost itself is unaffected)",
+                fn.__name__, getattr(doc, "name", None),
+            )
+
+    return wrapper
+
+
+@_bns_repost_cascade_safe
 def refresh_pr_transfer_rate_after_repost(doc, method: Optional[str] = None) -> None:
     """Refresh PR item bns_transfer_rate after repost completion (DN->PR same GSTIN)."""
     if doc.doctype != "Repost Item Valuation":
@@ -6784,6 +6843,7 @@ def refresh_pr_transfer_rate_after_repost(doc, method: Optional[str] = None) -> 
     frappe.cache().set_value(cache_key, 1, expires_in_sec=_BNS_REPOST_CACHE_TTL_SEC)
 
 
+@_bns_repost_cascade_safe
 def refresh_si_transfer_rate_after_repost(doc, method: Optional[str] = None) -> None:
     """Refresh PI/PR item transfer-rate after SI repost completion (SI->PI/SI->PR)."""
     if doc.doctype != "Repost Item Valuation":
@@ -6919,6 +6979,7 @@ def _reassert_purchase_invoice_bns_internal_status(pi_name: str) -> bool:
     return changed
 
 
+@_bns_repost_cascade_safe
 def refresh_bns_internal_status_after_repost(doc, method: Optional[str] = None) -> None:
     """
     Re-assert BNS internal status after repost completion.
