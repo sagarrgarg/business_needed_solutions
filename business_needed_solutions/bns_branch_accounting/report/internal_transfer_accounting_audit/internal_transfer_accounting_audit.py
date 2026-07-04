@@ -715,19 +715,28 @@ def _check_incoming_rate_stale_for_si(doc):
 	return issues
 
 
-def _transfer_rate_missing_issues(doc, rate_by_code):
+def _transfer_rate_missing_issues(doc, rate_by_code, rate_by_row=None, link_fields=(), ambiguous_codes=None):
 	"""Return per-row issue strings for stock items whose bns_transfer_rate does
 	not match the CONFIRMED source rate by more than a rupee of valuation impact.
 
-	rate_by_code holds every item_code present on the source document (the value
-	is its source rate, which may legitimately be 0). A row whose item_code is
-	absent from that map is unresolved and skipped -- it is NOT a mismatch. A row
-	present in the map is flagged whenever the stored rate differs from the source
-	rate, covering all three cases:
+	Source-rate resolution is PER ROW, not per item_code:
+	  1. rate_by_row (source-row name -> rate) resolved via this row's link_fields
+	     (e.g. sales_invoice_item / pr_detail / delivery_note_item). This is
+	     authoritative and MUST be preferred, because the same item can appear on
+	     several source rows at different rates (FIFO layers), and each receiver
+	     row mirrors its own source row.
+	  2. Only if no per-row link resolves, fall back to rate_by_code[item_code] --
+	     and even then skip codes in ambiguous_codes (item present on the source
+	     with >1 distinct rate), since a max-by-code compare would falsely flag the
+	     lower-rated rows.
+
+	A row present is flagged whenever the resolved rate differs from stored:
 	  - missing:  stored 0, source > 0  (undervalued receive)
 	  - stale:    stored > 0, source different  (back-dated / un-cascaded)
 	  - over-valued: stored > 0, source 0  (receiver values a zero-cost source)
 	"""
+	rate_by_row = rate_by_row or {}
+	ambiguous_codes = ambiguous_codes or set()
 	issues = []
 	for item in (doc.get("items") or []):
 		qty = flt(item.get("qty") or 0)
@@ -736,10 +745,18 @@ def _transfer_rate_missing_issues(doc, rate_by_code):
 		code = item.get("item_code")
 		if not code or not cint(frappe.db.get_value("Item", code, "is_stock_item")):
 			continue
-		# Only confirmed-source rows (present on the source doc) are actionable.
-		if code not in rate_by_code:
-			continue
-		expected = flt(rate_by_code.get(code) or 0)
+		# 1) Authoritative per-row source rate via the row's own link.
+		expected = None
+		for lf in link_fields:
+			link = (item.get(lf) or "").strip()
+			if link and link in rate_by_row:
+				expected = flt(rate_by_row.get(link) or 0)
+				break
+		# 2) Fall back to item_code only when unambiguous.
+		if expected is None:
+			if code not in rate_by_code or code in ambiguous_codes:
+				continue
+			expected = flt(rate_by_code.get(code) or 0)
 		stored = flt(item.get("bns_transfer_rate") or 0)
 		stock_qty = flt(item.get("stock_qty") or qty)
 		impact = abs(expected - stored) * stock_qty
@@ -777,6 +794,7 @@ def _check_transfer_rate_missing_for_pi(doc):
 		return []
 	si_rate_by_item, si_rows, _buckets = _build_si_rate_maps_for_pi(si_name)
 	rate_by_code = {}
+	code_rates = {}
 	for sr in si_rows:
 		code = sr.get("item_code")
 		if not code:
@@ -785,7 +803,17 @@ def _check_transfer_rate_missing_for_pi(doc):
 		# Record every source item_code (incl rate 0) so a confirmed-zero source
 		# is comparable; keep the max when an item appears on multiple rows.
 		rate_by_code[code] = max(rate_by_code.get(code, 0.0), rate)
-	return _transfer_rate_missing_issues(doc, rate_by_code)
+		code_rates.setdefault(code, set()).add(round(rate, 4))
+	ambiguous = {c for c, rs in code_rates.items() if len(rs) > 1}
+	# si_rate_by_item is keyed by SI item ROW name -> authoritative per-row source,
+	# so a FIFO-split item (same code, several SI rows at different rates) is
+	# compared row-to-row via the PI row's sales_invoice_item link.
+	return _transfer_rate_missing_issues(
+		doc, rate_by_code,
+		rate_by_row=si_rate_by_item,
+		link_fields=("sales_invoice_item",),
+		ambiguous_codes=ambiguous,
+	)
 
 
 def _check_transfer_rate_missing_for_pr(doc):
@@ -801,16 +829,18 @@ def _check_transfer_rate_missing_for_pr(doc):
 	if frappe.db.exists("Delivery Note", ref):
 		src_rows = frappe.get_all(
 			"Delivery Note Item", filters={"parent": ref},
-			fields=["item_code", "incoming_rate"],
+			fields=["name", "item_code", "incoming_rate"],
 		)
 	elif frappe.db.exists("Sales Invoice", ref):
 		src_rows = frappe.get_all(
 			"Sales Invoice Item", filters={"parent": ref},
-			fields=["item_code", "incoming_rate"],
+			fields=["name", "item_code", "incoming_rate"],
 		)
 	else:
 		return []
 	rate_by_code = {}
+	code_rates = {}
+	rate_by_row = {}
 	for sr in src_rows:
 		code = sr.get("item_code")
 		if not code:
@@ -819,7 +849,18 @@ def _check_transfer_rate_missing_for_pr(doc):
 		# Record every source item_code (incl rate 0) so a confirmed-zero source
 		# is comparable; keep the max when an item appears on multiple rows.
 		rate_by_code[code] = max(rate_by_code.get(code, 0.0), rate)
-	return _transfer_rate_missing_issues(doc, rate_by_code)
+		code_rates.setdefault(code, set()).add(round(rate, 4))
+		if sr.get("name"):
+			rate_by_row[sr["name"]] = rate
+	ambiguous = {c for c, rs in code_rates.items() if len(rs) > 1}
+	# Compare each PR row to its own source row (delivery_note_item / sales_invoice_item),
+	# so a FIFO-split item is not falsely flagged by a max-by-code compare.
+	return _transfer_rate_missing_issues(
+		doc, rate_by_code,
+		rate_by_row=rate_by_row,
+		link_fields=("delivery_note_item", "sales_invoice_item"),
+		ambiguous_codes=ambiguous,
+	)
 
 
 # ---------------------------------------------------------------------------
