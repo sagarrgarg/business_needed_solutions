@@ -2715,10 +2715,14 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             creditor_template,
         )
         abs_tax = abs(tax_amount)
-        if is_return:
-            tax_positive_side = "credit" if tax_amount > 0 else "debit"
-        else:
-            tax_positive_side = "debit" if tax_amount > 0 else "credit"
+        # Tax side follows the SIGNED tax amount, which already encodes return
+        # direction (ERPNext stores return-document taxes as negative). A PI
+        # input tax is normally a debit; a negative amount (return) flips it to
+        # a credit. Do NOT additionally invert on is_return -- that double-counts
+        # the sign, pushes the tax onto the same side as the Internal Creditor
+        # debit, and unbalances the party legs, tripping the balance-guard below
+        # into a standard-GL fallback (leaving a bogus COGS margin on returns).
+        tax_positive_side = "debit" if tax_amount > 0 else "credit"
         rewritten.append(
             _make_bns_gl_entry(
                 doc,
@@ -2891,10 +2895,14 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             debtor_template,
         )
         abs_tax = abs(tax_amount)
-        if is_return:
-            tax_positive_side = "debit" if tax_amount > 0 else "credit"
-        else:
-            tax_positive_side = "credit" if tax_amount > 0 else "debit"
+        # Tax side follows the SIGNED tax amount, which already encodes return
+        # direction (ERPNext stores return-document taxes as negative). An SI
+        # output tax is normally a credit; a negative amount (return) flips it to
+        # a debit. Do NOT additionally invert on is_return -- that double-counts
+        # the sign, pushes the tax onto the same side as the Internal Debtor
+        # credit, and unbalances the party legs, tripping the balance-guard below
+        # into a standard-GL fallback (leaving a bogus COGS margin on returns).
+        tax_positive_side = "credit" if tax_amount > 0 else "debit"
         rewritten.append(
             _make_bns_gl_entry(
                 doc,
