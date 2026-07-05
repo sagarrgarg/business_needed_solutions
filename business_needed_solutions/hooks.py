@@ -27,8 +27,8 @@ app_license = "Commercial"
 # include js, css files in header of desk.html
 # app_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
 app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=122",
-                  "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=215",
-                  "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=49",
+                  "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=216",
+                  "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=50",
                   "/assets/business_needed_solutions/js/delivery_note.js?v=137",
                   "/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=38",
                   "/assets/business_needed_solutions/js/direct_print.js?v=50",
@@ -234,11 +234,13 @@ doc_events = {
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
+            "business_needed_solutions.bns_branch_accounting.utils.validate_internal_return_credit_note_parity",
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.bns_branch_accounting.gst_integration.validate_internal_dn_vehicle_no",
             "business_needed_solutions.bns_branch_accounting.utils.update_delivery_note_status_for_bns_internal",
+            "business_needed_solutions.bns_branch_accounting.utils.backlink_internal_return_debit_note",
             "business_needed_solutions.bns_branch_accounting.gst_integration.maybe_generate_internal_dn_ewaybill"
         ],
         "on_cancel": [
@@ -253,6 +255,7 @@ doc_events = {
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
+            "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_return_linkage",
             "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments",
             "business_needed_solutions.business_needed_solutions.overrides.ineligible_itc_submission_control.restrict_ineligible_itc_submission"
         ],
@@ -285,10 +288,12 @@ doc_events = {
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_stock_movement_captured",
+            "business_needed_solutions.bns_branch_accounting.utils.validate_internal_return_credit_note_parity",
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
-            "business_needed_solutions.bns_branch_accounting.utils.update_sales_invoice_status_for_bns_internal"
+            "business_needed_solutions.bns_branch_accounting.utils.update_sales_invoice_status_for_bns_internal",
+            "business_needed_solutions.bns_branch_accounting.utils.backlink_internal_return_debit_note"
         ],
         "on_cancel": [
             "business_needed_solutions.bns_branch_accounting.utils.cancel_linked_purchase_docs_for_sales_invoice",
@@ -300,6 +305,7 @@ doc_events = {
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
             "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_invoice_si_parity",
+            "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_return_linkage",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_stock_movement_captured",
             "business_needed_solutions.business_needed_solutions.overrides.ineligible_itc_submission_control.restrict_ineligible_itc_submission",
         ],

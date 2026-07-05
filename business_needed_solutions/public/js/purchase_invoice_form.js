@@ -52,6 +52,25 @@ frappe.ui.form.on('Purchase Invoice', {
             }
         }
 
+        // Internal return: the receiving branch leads with this debit note; create
+        // the sender-side credit note FROM it (never standalone).
+        if (frm.doc.docstatus == 1 && frm.doc.is_return && frm.doc.is_bns_internal_supplier && frm.doc.return_against) {
+            frm.add_custom_button(__('Internal Return Credit Note'), function() {
+                frappe.call({
+                    method: 'business_needed_solutions.bns_branch_accounting.utils.make_bns_internal_return_credit_note',
+                    args: { debit_note: frm.doc.name, debit_note_type: 'Purchase Invoice' },
+                    freeze: true,
+                    freeze_message: __('Creating internal return credit note...'),
+                    callback: function(r) {
+                        if (r.message) {
+                            var newdoc = frappe.model.sync(r.message)[0];
+                            frappe.set_route('Form', newdoc.doctype, newdoc.name);
+                        }
+                    }
+                });
+            }, __('Create'));
+        }
+
         // Show button to convert to BNS Internal if supplier is BNS internal but PI is not marked
         // OR if PI is marked but status is not "BNS Internally Transferred"
         if (frm.doc.docstatus == 1) {

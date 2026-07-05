@@ -232,6 +232,8 @@ def _get_bns_transfer_rate_for_pr_sle(sle):
         return None
     if not getattr(sle, "voucher_detail_no", None):
         return None
+    # Forward receipts only; RETURN legs (outgoing) use ERPNext's own
+    # return_against valuation. See [[_get_bns_transfer_rate_for_pi_sle]].
     if flt(getattr(sle, "actual_qty", 0)) <= 0:
         return None
 
@@ -324,6 +326,13 @@ def _get_bns_transfer_rate_for_pi_sle(sle):
         return None
     if not getattr(sle, "voucher_detail_no", None):
         return None
+    # Only forward receipts (incoming) are force-valued to the transfer rate.
+    # RETURN legs (outgoing, actual_qty < 0) are deliberately left to ERPNext's
+    # own return valuation, which reads the ORIGINAL receipt's rate via
+    # return_against (compulsory for internal returns -- see
+    # [[validate_internal_purchase_return_linkage]]). That "value from
+    # return_against" is what keeps the return reversing at the rate the goods
+    # actually came in at.
     if flt(getattr(sle, "actual_qty", 0)) <= 0:
         return None
 
@@ -1103,6 +1112,11 @@ def validate_internal_purchase_receipt_linkage(doc, method: Optional[str] = None
     """
     if doc.doctype != "Purchase Receipt":
         return
+    # Returns link via return_against, not a forward DN/SI ref -- govern them with
+    # the return rules ([[validate_internal_purchase_return_linkage]]), not the
+    # forward linkage rule below.
+    if cint(doc.get("is_return")):
+        return
     source_ref = (doc.get("bns_inter_company_reference") or "").strip()
     if source_ref:
         _validate_internal_ref_requires_internal_party(doc)
@@ -1809,6 +1823,12 @@ def validate_internal_purchase_invoice_si_parity(doc, method: Optional[str] = No
     Drafts can be edited freely; only submission is gated.
     """
     if doc.doctype != "Purchase Invoice":
+        return
+    # Returns are governed by the return rules (return_against + credit-note
+    # pairing), NOT the forward SI-parity rule -- a debit note links via
+    # return_against, and comparing its negative amounts to a forward SI would
+    # spuriously fail. See [[validate_internal_purchase_return_linkage]].
+    if cint(doc.get("is_return")):
         return
     if not is_bns_internal_supplier(doc):
         return
@@ -9503,24 +9523,270 @@ def cancel_linked_purchase_docs_for_sales_invoice(doc, method: Optional[str] = N
         )
 
 
-def validate_bns_internal_customer_return(doc, method: Optional[str] = None) -> None:
-    """
-    Validate return entries (Credit Notes) for BNS internal customers.
+# Internal-transfer return pairing: the receiving branch leads a return with its
+# debit note (Purchase Invoice / Purchase Receipt, is_return); the sending
+# branch's credit note (Sales Invoice / Delivery Note, is_return) may only be
+# raised FROM that debit note. These maps pair the two sides.
+_INTERNAL_RETURN_DEBIT_TO_CREDIT = {
+    "Purchase Invoice": "Sales Invoice",
+    "Purchase Receipt": "Delivery Note",
+}
+_INTERNAL_RETURN_CREDIT_TO_DEBIT = {
+    "Sales Invoice": "Purchase Invoice",
+    "Delivery Note": "Purchase Receipt",
+}
 
-    Previously blocked all returns; now allows them so that
-    SI credit notes can be converted to PI debit notes.
+
+def _enforce_internal_sales_return_from_debit_note(doc) -> None:
+    """Block STANDALONE internal-transfer sales returns (credit notes).
+
+    Mirrors the forward rule (a receiver PI/PR cannot exist without its source
+    SI/DN) with roles reversed: on a return the receiver leads with a debit note,
+    so the sender's credit note must carry ``bns_inter_company_reference`` to that
+    submitted PI/PR return. Create it via [[make_bns_internal_return_credit_note]]
+    (the 'Internal Return Credit Note' action on the debit note), never directly.
+
+    Gated on the Internal Transfer cutoff; already-submitted historical credit
+    notes are untouched.
     """
-    pass
+    if getattr(doc, "doctype", None) not in _INTERNAL_RETURN_CREDIT_TO_DEBIT:
+        return
+    if not cint(doc.get("is_return")):
+        return
+    if not is_bns_internal_customer(doc):
+        return
+    if not is_after_internal_transfer_cutoff(doc.get("posting_date")):
+        return
+
+    counter_dt = _INTERNAL_RETURN_CREDIT_TO_DEBIT[doc.doctype]
+    ref = (doc.get("bns_inter_company_reference") or "").strip()
+    linked = bool(
+        ref
+        and frappe.db.exists(counter_dt, ref)
+        and cint(frappe.db.get_value(counter_dt, ref, "is_return"))
+        and cint(frappe.db.get_value(counter_dt, ref, "docstatus")) == 1
+    )
+    if not linked:
+        frappe.throw(
+            _(
+                "Internal transfer credit notes cannot be created directly. On the "
+                "linked {0} debit note (the receiving branch leads the return), use "
+                "Create &gt; Internal Return Credit Note."
+            ).format(counter_dt),
+            title=_("Create Internal Return From Debit Note"),
+        )
+
+
+def validate_internal_return_credit_note_parity(doc, method: Optional[str] = None) -> None:
+    """before_submit: an internal return credit note must match its debit note
+    1:1 by total. Drafts stay editable; only submission is gated (mirrors the
+    forward [[validate_internal_purchase_invoice_si_parity]])."""
+    if getattr(doc, "doctype", None) not in _INTERNAL_RETURN_CREDIT_TO_DEBIT:
+        return
+    if not cint(doc.get("is_return")):
+        return
+    if not is_bns_internal_customer(doc):
+        return
+    if not is_after_internal_transfer_cutoff(doc.get("posting_date")):
+        return
+
+    counter_dt = _INTERNAL_RETURN_CREDIT_TO_DEBIT[doc.doctype]
+    ref = (doc.get("bns_inter_company_reference") or "").strip()
+    if not ref or not frappe.db.exists(counter_dt, ref):
+        return  # linkage itself is enforced at validate by the standalone block
+
+    tolerance = flt(
+        frappe.db.get_single_value("BNS Branch Accounting Settings", "si_pi_amount_tolerance") or 0
+    )
+    debit_grand = abs(flt(frappe.db.get_value(counter_dt, ref, "base_grand_total") or 0))
+    credit_grand = abs(flt(doc.get("base_grand_total") or 0))
+    if abs(debit_grand - credit_grand) > tolerance:
+        frappe.throw(
+            _(
+                "Internal return credit note total ({0}) must match its debit note {1} "
+                "total ({2}) one-to-one."
+            ).format(credit_grand, ref, debit_grand),
+            title=_("Internal Return Parity Failed"),
+        )
+
+
+def validate_bns_internal_customer_return(doc, method: Optional[str] = None) -> None:
+    """Block standalone internal Sales Invoice credit notes -- see
+    [[_enforce_internal_sales_return_from_debit_note]]."""
+    _enforce_internal_sales_return_from_debit_note(doc)
 
 
 def validate_bns_internal_delivery_note_return(doc, method: Optional[str] = None) -> None:
-    """
-    Validate return entries for Delivery Notes with BNS internal customers.
+    """Block standalone internal Delivery Note returns -- see
+    [[_enforce_internal_sales_return_from_debit_note]]."""
+    _enforce_internal_sales_return_from_debit_note(doc)
 
-    Previously blocked all returns; now allows them so that
-    DN returns can be converted to PR returns.
+
+def backlink_internal_return_debit_note(doc, method: Optional[str] = None) -> None:
+    """After an internal return credit note submits, set the back-reference on its
+    debit note so the return pair is linked both ways (the credit->debit link is
+    set at creation by [[make_bns_internal_return_credit_note]])."""
+    if getattr(doc, "doctype", None) not in _INTERNAL_RETURN_CREDIT_TO_DEBIT:
+        return
+    if not cint(doc.get("is_return")) or not is_bns_internal_customer(doc):
+        return
+    counter_dt = _INTERNAL_RETURN_CREDIT_TO_DEBIT[doc.doctype]
+    ref = (doc.get("bns_inter_company_reference") or "").strip()
+    if not ref or not frappe.db.exists(counter_dt, ref):
+        return
+    existing = (frappe.db.get_value(counter_dt, ref, "bns_inter_company_reference") or "").strip()
+    if existing != doc.name:
+        frappe.db.set_value(
+            counter_dt, ref, "bns_inter_company_reference", doc.name, update_modified=False
+        )
+
+
+@frappe.whitelist()
+def make_bns_internal_return_credit_note(debit_note: str, debit_note_type: str = "Purchase Invoice"):
+    """Create the sender-side internal RETURN credit note (Sales Invoice / Delivery
+    Note, is_return) FROM a submitted receiver-side debit note (Purchase Invoice /
+    Purchase Receipt, is_return).
+
+    The credit note is built as ERPNext's own return of the ORIGINAL forward sale
+    (so party, company, and valuation come from native return logic), then matched
+    1:1 to the debit note's items/quantities and cross-linked. This is the ONLY
+    sanctioned way to raise an internal credit note -- standalone creation is
+    refused by [[_enforce_internal_sales_return_from_debit_note]].
     """
-    pass
+    credit_dt = _INTERNAL_RETURN_DEBIT_TO_CREDIT.get(debit_note_type)
+    if not credit_dt:
+        frappe.throw(_("Unsupported debit note type {0}.").format(debit_note_type))
+    _bns_require_doctype_write(credit_dt)
+
+    dn = frappe.get_doc(debit_note_type, debit_note)
+    if dn.docstatus != 1:
+        frappe.throw(_("Debit note {0} must be submitted first.").format(debit_note))
+    if not cint(dn.get("is_return")):
+        frappe.throw(_("{0} {1} is not a return.").format(debit_note_type, debit_note))
+    if not is_bns_internal_supplier(dn):
+        frappe.throw(_("{0} {1} is not an internal-transfer return.").format(debit_note_type, debit_note))
+
+    original_receipt = (dn.get("return_against") or "").strip()
+    if not original_receipt:
+        frappe.throw(
+            _("Debit note {0} has no 'Return Against' -- link the original internal receipt first.").format(debit_note),
+            title=_("Missing Return Against"),
+        )
+    original_sale = (
+        frappe.db.get_value(debit_note_type, original_receipt, "bns_inter_company_reference") or ""
+    ).strip()
+    if not original_sale or not frappe.db.exists(credit_dt, original_sale):
+        frappe.throw(
+            _("Cannot resolve the original {0} behind {1}. Ensure the forward transfer is linked.").format(
+                credit_dt, original_receipt
+            ),
+            title=_("Original Transfer Not Found"),
+        )
+    if cint(frappe.db.get_value(credit_dt, original_sale, "is_return")):
+        frappe.throw(_("Resolved original {0} {1} is itself a return.").format(credit_dt, original_sale))
+
+    existing = frappe.db.get_value(
+        credit_dt,
+        {"bns_inter_company_reference": debit_note, "is_return": 1, "docstatus": ["<", 2]},
+        "name",
+    )
+    if existing:
+        frappe.throw(
+            _("Internal return credit note {0} already exists for {1}.").format(existing, debit_note),
+            title=_("Credit Note Already Exists"),
+        )
+
+    from erpnext.controllers.sales_and_purchase_return import make_return_doc
+
+    credit = make_return_doc(credit_dt, original_sale)
+
+    # Match the credit note 1:1 to the debit note (also supports partial returns):
+    # keep only items present on the debit note and set each qty (already negative
+    # on both sides) to the debit note's returned qty for that item.
+    dn_qty_by_code: Dict[str, float] = {}
+    for it in dn.get("items") or []:
+        code = it.get("item_code")
+        if code:
+            dn_qty_by_code[code] = dn_qty_by_code.get(code, 0.0) + flt(it.get("qty") or 0)
+
+    kept = []
+    for it in credit.get("items") or []:
+        code = it.get("item_code")
+        if code in dn_qty_by_code:
+            it.qty = dn_qty_by_code[code]
+            kept.append(it)
+    credit.set("items", kept)
+    if not credit.get("items"):
+        frappe.throw(
+            _("No matching items between debit note {0} and original {1}.").format(debit_note, original_sale)
+        )
+
+    credit.is_bns_internal_customer = 1
+    credit.bns_inter_company_reference = debit_note
+    credit.run_method("set_missing_values")
+    credit.run_method("calculate_taxes_and_totals")
+    return credit
+
+
+def validate_internal_purchase_return_linkage(doc, method: Optional[str] = None) -> None:
+    """Enforce that an internal-transfer PURCHASE return (debit note: Purchase
+    Invoice or Purchase Receipt with is_return=1) names the specific original
+    forward internal receipt it reverses, via ``return_against``.
+
+    This mirrors the forward receiver-side rule (a PI/PR cannot exist without its
+    source SI/DN) with the lead/follow roles reversed: on a return the receiving
+    branch leads, so its debit note MUST point at the exact original transfer.
+    That link is what makes the transfer rate unambiguous -- without it, when the
+    same item was transferred several times at different rates, there is no way
+    to know which rate to reverse at and ``bns_transfer_rate`` resolves to 0. See
+    [[_get_bns_transfer_rate_for_pi_sle]] and [[get_rate_for_return]] (ERPNext),
+    both of which read the ORIGINAL receipt's rate through ``return_against``.
+
+    Gated on the Internal Transfer cutoff so historical/out-of-scope returns are
+    untouched (past transactions are repaired separately, not blocked live).
+    """
+    if getattr(doc, "doctype", None) not in ("Purchase Invoice", "Purchase Receipt"):
+        return
+    if not cint(doc.get("is_return")):
+        return
+    if not is_bns_internal_supplier(doc):
+        return
+    if not is_after_internal_transfer_cutoff(doc.get("posting_date")):
+        return
+
+    return_against = (doc.get("return_against") or "").strip()
+    if not return_against:
+        frappe.throw(
+            _(
+                "Internal transfer returns must be created against the original {0} "
+                "they reverse -- set 'Return Against'. Raise the return from the "
+                "original internal receipt's 'Create > Return / Debit Note' action so "
+                "the transfer rate is unambiguous (the same item may have been "
+                "transferred more than once at different rates)."
+            ).format(doc.doctype),
+            title=_("Internal Return Linkage Required"),
+        )
+
+    original = frappe.db.get_value(
+        doc.doctype,
+        return_against,
+        ["docstatus", "is_return", "is_bns_internal_supplier"],
+        as_dict=True,
+    )
+    if (
+        not original
+        or cint(original.get("docstatus")) != 1
+        or cint(original.get("is_return"))
+        or not original.get("is_bns_internal_supplier")
+    ):
+        frappe.throw(
+            _(
+                "'Return Against' {0} must be a submitted internal-transfer {1} that is "
+                "not itself a return. Each internal return reverses exactly one original "
+                "transfer (one-to-one), so a single return cannot span multiple originals."
+            ).format(return_against, doc.doctype),
+            title=_("Internal Return Linkage Required"),
+        )
 
 
 @frappe.whitelist()
