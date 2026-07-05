@@ -1393,7 +1393,12 @@ def _is_internal_transfer_sales_invoice(si_name: str) -> bool:
     """
     if not si_name:
         return False
-    return bool(frappe.db.get_value("Sales Invoice", si_name, "is_bns_internal_customer"))
+    # A return credit note is never a forward source -- exclude is_return so a
+    # forward PI can't resolve its "source SI" to a credit note sharing a bill_no.
+    meta = frappe.db.get_value(
+        "Sales Invoice", si_name, ["is_bns_internal_customer", "is_return"], as_dict=True
+    )
+    return bool(meta and meta.get("is_bns_internal_customer") and not cint(meta.get("is_return")))
 
 
 def _resolve_si_name_for_internal_pi(doc) -> Optional[str]:
@@ -1757,6 +1762,12 @@ def apply_internal_pi_transfer_rates_from_si(doc, si_name: Optional[str] = None)
 def validate_internal_purchase_invoice_transfer_rate(doc, method: Optional[str] = None) -> None:
     """Require PI item transfer-rate for internal SI-linked update-stock PI rows."""
     if doc.doctype != "Purchase Invoice":
+        return
+    # Returns don't carry a forward transfer rate -- they reverse at the original
+    # receipt's rate via return_against (enforced by
+    # [[validate_internal_purchase_return_linkage]]). Requiring bns_transfer_rate
+    # on a return would wrongly block it. Governed by the return rules instead.
+    if cint(doc.get("is_return")):
         return
     if not cint(doc.get("update_stock")):
         return
@@ -2399,6 +2410,32 @@ def _make_bns_gl_entry(doc, account: str, debit: float = 0.0, credit: float = 0.
     return doc.get_gl_dict(args)
 
 
+def _throw_bns_internal_gl_imbalance(doc, debit_total: float, credit_total: float) -> None:
+    """Hard-fail an unbalanced BNS internal GL rewrite instead of silently
+    falling back to standard accounts.
+
+    Previously the rewrites logged and returned ERPNext's own (standard) entries
+    on any imbalance -- which silently masked bugs (e.g. the return tax-sign
+    issue) by posting a bogus COGS margin to standard accounts. A real imbalance
+    is a data/logic error that must be fixed, not hidden.
+
+    Safe for empty GL: an all-zero rewrite has debit==credit==0, so this is only
+    reached when there is actual, genuinely unbalanced GL (diff > 0.5). Callers
+    only invoke it inside the `> 0.5` branch.
+    """
+    frappe.throw(
+        _(
+            "BNS internal GL rewrite for {0} {1} is unbalanced: debit {2} vs credit {3} "
+            "(difference {4}). This must be corrected -- the entry will not be silently "
+            "posted to standard accounts."
+        ).format(
+            _(doc.doctype), doc.name, flt(debit_total, 2), flt(credit_total, 2),
+            flt(abs(debit_total - credit_total), 2),
+        ),
+        title=_("Internal GL Rewrite Imbalanced"),
+    )
+
+
 def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Rewrite DN GL entries into BNS internal branch-accounting pattern."""
     if not _is_bns_internal_delivery_note(doc):
@@ -2482,8 +2519,7 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
     credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
     if abs(debit_total - credit_total) > 0.5:
-        logger.error("Skipping DN GL rewrite for %s due to balance mismatch %s vs %s", doc.name, debit_total, credit_total)
-        return gl_entries
+        _throw_bns_internal_gl_imbalance(doc, debit_total, credit_total)
 
     return rewritten
 
@@ -2567,8 +2603,7 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
     credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
     if abs(debit_total - credit_total) > 0.5:
-        logger.error("Skipping PR GL rewrite for %s due to balance mismatch %s vs %s", doc.name, debit_total, credit_total)
-        return gl_entries
+        _throw_bns_internal_gl_imbalance(doc, debit_total, credit_total)
 
     return rewritten
 
@@ -2805,8 +2840,7 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
     credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
     if abs(debit_total - credit_total) > 0.5:
-        logger.error("Skipping PI GL rewrite for %s due to balance mismatch %s vs %s", doc.name, debit_total, credit_total)
-        return gl_entries
+        _throw_bns_internal_gl_imbalance(doc, debit_total, credit_total)
 
     return rewritten
 
@@ -2989,13 +3023,7 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
     credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
     if abs(debit_total - credit_total) > 0.5:
-        logger.error(
-            "Skipping SI GL rewrite for %s due to balance mismatch %s vs %s",
-            doc.name,
-            debit_total,
-            credit_total,
-        )
-        return gl_entries
+        _throw_bns_internal_gl_imbalance(doc, debit_total, credit_total)
 
     logger.info(
         "Applied BNS SI GL rewrite for %s (update_stock=%s, grand=%s, taxable=%s)",
@@ -9524,16 +9552,17 @@ def cancel_linked_purchase_docs_for_sales_invoice(doc, method: Optional[str] = N
 
 
 # Internal-transfer return pairing: the receiving branch leads a return with its
-# debit note (Purchase Invoice / Purchase Receipt, is_return); the sending
-# branch's credit note (Sales Invoice / Delivery Note, is_return) may only be
-# raised FROM that debit note. These maps pair the two sides.
+# Purchase Invoice debit note (is_return); the sending branch's Sales Invoice
+# credit note (is_return) may only be raised FROM that debit note.
+#
+# INVOICE CHAIN ONLY. The stock-only return path (Purchase Receipt -> Delivery
+# Note) is intentionally NOT managed by BNS -- stock returns fall through to
+# native ERPNext. Do not add PR/DN here without a deliberate decision.
 _INTERNAL_RETURN_DEBIT_TO_CREDIT = {
     "Purchase Invoice": "Sales Invoice",
-    "Purchase Receipt": "Delivery Note",
 }
 _INTERNAL_RETURN_CREDIT_TO_DEBIT = {
     "Sales Invoice": "Purchase Invoice",
-    "Delivery Note": "Purchase Receipt",
 }
 
 
@@ -9729,23 +9758,23 @@ def make_bns_internal_return_credit_note(debit_note: str, debit_note_type: str =
 
 
 def validate_internal_purchase_return_linkage(doc, method: Optional[str] = None) -> None:
-    """Enforce that an internal-transfer PURCHASE return (debit note: Purchase
-    Invoice or Purchase Receipt with is_return=1) names the specific original
-    forward internal receipt it reverses, via ``return_against``.
+    """Enforce that an internal-transfer PURCHASE INVOICE return (debit note,
+    is_return=1) names the specific original forward internal PI it reverses, via
+    ``return_against``.
 
-    This mirrors the forward receiver-side rule (a PI/PR cannot exist without its
-    source SI/DN) with the lead/follow roles reversed: on a return the receiving
-    branch leads, so its debit note MUST point at the exact original transfer.
-    That link is what makes the transfer rate unambiguous -- without it, when the
-    same item was transferred several times at different rates, there is no way
-    to know which rate to reverse at and ``bns_transfer_rate`` resolves to 0. See
-    [[_get_bns_transfer_rate_for_pi_sle]] and [[get_rate_for_return]] (ERPNext),
-    both of which read the ORIGINAL receipt's rate through ``return_against``.
+    Mirrors the forward receiver-side rule (a PI cannot exist without its source
+    SI) with the lead/follow roles reversed: on a return the receiving branch
+    leads, so its debit note MUST point at the exact original transfer. That link
+    is what makes the transfer rate unambiguous -- without it, when the same item
+    was transferred several times at different rates, there is no way to know
+    which rate to reverse at. ERPNext's return valuation reads the ORIGINAL
+    receipt's rate through ``return_against`` (see [[get_rate_for_return]]).
 
-    Gated on the Internal Transfer cutoff so historical/out-of-scope returns are
-    untouched (past transactions are repaired separately, not blocked live).
+    INVOICE CHAIN ONLY -- the stock-only path (Purchase Receipt returns) is not
+    managed by BNS. Gated on the Internal Transfer cutoff so historical returns
+    are untouched (repaired separately, not blocked live).
     """
-    if getattr(doc, "doctype", None) not in ("Purchase Invoice", "Purchase Receipt"):
+    if getattr(doc, "doctype", None) != "Purchase Invoice":
         return
     if not cint(doc.get("is_return")):
         return
