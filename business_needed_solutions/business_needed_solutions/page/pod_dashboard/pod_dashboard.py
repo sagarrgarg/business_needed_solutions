@@ -59,7 +59,7 @@ def _default_company():
 
 
 @frappe.whitelist()
-def get_pending_pod_invoices(company=None, from_date=None, to_date=None, customer=None, gst_category=None, pod_status=None):
+def get_pending_pod_invoices(company=None, fiscal_year=None, from_date=None, to_date=None, customer=None, gst_category=None, pod_status=None):
 	"""
 	Return submitted Sales Invoices where at least one POD field is empty.
 
@@ -73,17 +73,28 @@ def get_pending_pod_invoices(company=None, from_date=None, to_date=None, custome
 	_require_dashboard_read()
 
 	company = company or _default_company()
+	
+	if fiscal_year and not (from_date and to_date):
+		year_start_date, year_end_date = frappe.db.get_value(
+			"Fiscal Year", fiscal_year, ["year_start_date", "year_end_date"]
+		)
+		if year_start_date and year_end_date:
+			from_date = year_start_date
+			to_date = year_end_date
 
-	# Build base filters — always submitted, always for selected company
+	# Build base filters — always submitted, always for selected company, and always exclude Unregistered GST category
 	filters = [
 		["Sales Invoice", "docstatus", "=", 1],
+		["Sales Invoice", "gst_category", "!=", "Unregistered"]
 	]
 	if company:
 		filters.append(["Sales Invoice", "company", "=", company])
+	
 	if from_date:
 		filters.append(["Sales Invoice", "posting_date", ">=", from_date])
 	if to_date:
 		filters.append(["Sales Invoice", "posting_date", "<=", to_date])
+
 	if customer:
 		filters.append(["Sales Invoice", "customer", "=", customer])
 	if gst_category:
@@ -100,6 +111,7 @@ def get_pending_pod_invoices(company=None, from_date=None, to_date=None, custome
 		fields=[
 			"name",
 			"customer",
+			"customer_name",
 			"posting_date",
 			"grand_total",
 			"currency",
@@ -112,7 +124,6 @@ def get_pending_pod_invoices(company=None, from_date=None, to_date=None, custome
 		limit=500,
 	)
 
-	# Filter: keep only those missing at least one POD field
 	pending = [
 		inv for inv in invoices
 		if not (inv.get("bns_pod_status") and inv.get("bns_pod_date") and inv.get("bns_pod_attachment"))

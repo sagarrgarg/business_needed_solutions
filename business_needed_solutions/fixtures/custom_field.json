@@ -3235,6 +3235,7 @@
   "label": "POD Details",
   "insert_after": "customer_address",
   "collapsible": 1,
+  "depends_on": "eval:doc.docstatus==1",
   "module": "Business Needed Solutions",
   "name": "Sales Invoice-bns_pod_section"
  },
@@ -3247,6 +3248,7 @@
   "options": "\nDelivered\nIn-Transit\nIssue",
   "insert_after": "bns_pod_section",
   "allow_on_submit": 1,
+  "depends_on": "eval:doc.docstatus==1",
   "in_list_view": 0,
   "in_standard_filter": 1,
   "module": "Business Needed Solutions",
@@ -3260,6 +3262,7 @@
   "label": "POD Date",
   "insert_after": "bns_pod_status",
   "allow_on_submit": 1,
+  "depends_on": "eval:doc.docstatus==1",
   "module": "Business Needed Solutions",
   "name": "Sales Invoice-bns_pod_date"
  },
@@ -3271,6 +3274,7 @@
   "label": "POD Attachment",
   "insert_after": "bns_pod_date",
   "allow_on_submit": 1,
+  "depends_on": "eval:doc.docstatus==1",
   "module": "Business Needed Solutions",
   "name": "Sales Invoice-bns_pod_attachment"
  }

@@ -33,6 +33,7 @@ class PODDashboard {
 		this.wrapper = $(page.body);
 		this.data = [];
 		this.filters = {};
+		this.in_filter_change = false;
 		this.init();
 	}
 
@@ -49,6 +50,10 @@ class PODDashboard {
 
 	get_company() {
 		return this.get_filter_value("company") || frappe.defaults.get_user_default("Company") || frappe.defaults.get_global_default("company");
+	}
+
+	get_fiscal_year() {
+		return this.get_filter_value("fiscal_year");
 	}
 
 	get_from_date() {
@@ -132,6 +137,7 @@ class PODDashboard {
 	setup_filters() {
 		const self = this;
 		this.filters = {};
+		this.in_filter_change = false;
 
 		const filter_fields = [
 			{
@@ -151,7 +157,7 @@ class PODDashboard {
 				fieldname: "gst_category",
 				label: __("GST Category"),
 				fieldtype: "Select",
-				options: "\nRegistered Regular\nRegistered Composition\nUnregistered\nSEZ\nOverseas\nDeemed Export\nUIN Holders\nTax Deductor\nTax Collector\nInput Service Distributor"
+				options: "\nRegistered Regular\nRegistered Composition\nSEZ\nOverseas\nDeemed Export\nUIN Holders\nTax Deductor\nTax Collector\nInput Service Distributor"
 			},
 			{
 				fieldname: "pod_status",
@@ -160,24 +166,30 @@ class PODDashboard {
 				options: "\nMissing\nDelivered\nIn-Transit\nIssue"
 			},
 			{
+				fieldname: "fiscal_year",
+				label: __("Fiscal Year"),
+				fieldtype: "Link",
+				options: "Fiscal Year",
+				default: frappe.defaults.get_user_default("fiscal_year") || frappe.defaults.get_global_default("fiscal_year")
+			},
+			{
 				fieldname: "from_date",
 				label: __("From Date"),
-				fieldtype: "Date",
-				default: frappe.datetime.add_months(frappe.datetime.get_today(), -3)
+				fieldtype: "Date"
 			},
 			{
 				fieldname: "to_date",
 				label: __("To Date"),
-				fieldtype: "Date",
-				default: frappe.datetime.get_today()
+				fieldtype: "Date"
 			}
 		];
 
 		const parent = this.wrapper.find("#pod-filters-row");
 		parent.empty();
 
+		// Create all control inputs
 		filter_fields.forEach(df => {
-			const col = $(`<div class="col-sm-2 pod-filter-col"></div>`).appendTo(parent);
+			const col = $(`<div class="pod-filter-col"></div>`).appendTo(parent);
 			
 			const control = frappe.ui.form.make_control({
 				df: {
@@ -191,15 +203,73 @@ class PODDashboard {
 				render_input: true
 			});
 			
-			if (df.default) {
-				control.set_value(df.default);
-			}
-			
-			control.df.change = function() {
-				self.refresh();
-			};
-			
 			self.filters[df.fieldname] = control;
+		});
+
+		// Resolve initial values
+		const default_fy = frappe.defaults.get_user_default("fiscal_year") || frappe.defaults.get_global_default("fiscal_year");
+		const default_co = frappe.defaults.get_user_default("Company") || frappe.defaults.get_global_default("company");
+
+		if (this.filters.company && default_co) {
+			this.filters.company.set_value(default_co);
+		}
+
+		if (this.filters.fiscal_year && default_fy) {
+			this.filters.fiscal_year.set_value(default_fy);
+			
+			// Resolve start & end date of default fiscal year asynchronously, then bind change handlers
+			frappe.db.get_value("Fiscal Year", default_fy, ["year_start_date", "year_end_date"]).then(r => {
+				if (r && r.message) {
+					if (self.filters.from_date) {
+						self.filters.from_date.set_value(r.message.year_start_date);
+					}
+					if (self.filters.to_date) {
+						self.filters.to_date.set_value(r.message.year_end_date);
+					}
+				}
+				self.bind_filter_events();
+			});
+		} else {
+			this.bind_filter_events();
+		}
+	}
+
+	// ── Bind Change Handlers to Filters ──────────────────────────────
+
+	bind_filter_events() {
+		const self = this;
+		Object.entries(this.filters).forEach(([fieldname, control]) => {
+			if (fieldname === "fiscal_year") {
+				control.df.change = function() {
+					const val = control.get_value();
+					if (val) {
+						self.in_filter_change = true;
+						frappe.db.get_value("Fiscal Year", val, ["year_start_date", "year_end_date"]).then(r => {
+							if (r && r.message) {
+								if (self.filters.from_date) {
+									self.filters.from_date.set_value(r.message.year_start_date);
+								}
+								if (self.filters.to_date) {
+									self.filters.to_date.set_value(r.message.year_end_date);
+								}
+								self.in_filter_change = false;
+								self.refresh();
+							} else {
+								self.in_filter_change = false;
+								self.refresh();
+							}
+						});
+					} else {
+						self.refresh();
+					}
+				};
+			} else {
+				control.df.change = function() {
+					if (!self.in_filter_change) {
+						self.refresh();
+					}
+				};
+			}
 		});
 	}
 
@@ -219,6 +289,7 @@ class PODDashboard {
 			method: "business_needed_solutions.business_needed_solutions.page.pod_dashboard.pod_dashboard.get_pending_pod_invoices",
 			args: {
 				company: this.get_company(),
+				fiscal_year: this.get_fiscal_year(),
 				from_date: this.get_from_date(),
 				to_date: this.get_to_date(),
 				customer: this.get_customer(),
@@ -288,15 +359,26 @@ class PODDashboard {
 				<table class="table pod-table">
 					<thead>
 						<tr>
-							<th style="width:140px">${__("Sales Invoice")}</th>
+							<th style="width:130px">${__("Sales Invoice")}</th>
 							<th>${__("Customer")}</th>
-							<th style="width:150px">${__("GST Category")}</th>
+							<th style="width:130px">${__("GST Category")}</th>
 							<th style="width:110px">${__("Date")}</th>
 							<th style="width:115px">${__("Grand Total")}</th>
-							<th style="width:150px">${__("POD Status")}</th>
-							<th style="width:140px">${__("POD Date")}</th>
-							<th style="width:220px">${__("POD Attachment")}</th>
+							<th style="width:130px">${__("POD Status")}</th>
+							<th style="width:130px">${__("POD Date")}</th>
+							<th style="width:180px">${__("POD Attachment")}</th>
 							<th style="width:85px">${__("Action")}</th>
+						</tr>
+						<tr class="pod-search-row">
+							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="name" placeholder="${__("Search…")}"></th>
+							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="customer" placeholder="${__("Search…")}"></th>
+							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="gst_category" placeholder="${__("Search…")}"></th>
+							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="posting_date" placeholder="${__("Search…")}"></th>
+							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="grand_total" placeholder="${__("Search…")}"></th>
+							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="pod_status" placeholder="${__("Search…")}"></th>
+							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="pod_date" placeholder="${__("Search…")}"></th>
+							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="pod_attachment" placeholder="${__("Search…")}"></th>
+							<th></th>
 						</tr>
 					</thead>
 					<tbody id="pod-table-body">
@@ -309,17 +391,16 @@ class PODDashboard {
 
 			const rowClass = "pod-row-pending";
 
-			// GST Category Badge
+			// GST Category Badge (Note: 'Unregistered' is excluded in the backend query)
 			let gstBadge = "";
 			if (inv.gst_category) {
-				const isUnregistered = inv.gst_category === "Unregistered";
-				gstBadge = `<span class="pod-gst-badge ${isUnregistered ? 'gst-unregistered' : 'gst-registered'}">${frappe.utils.escape_html(inv.gst_category)}</span>`;
+				gstBadge = `<span class="pod-gst-badge gst-registered">${frappe.utils.escape_html(inv.gst_category)}</span>`;
 			} else {
 				gstBadge = `<span class="text-muted" style="font-size:0.75rem;">—</span>`;
 			}
 
 			const escName = frappe.utils.escape_html(inv.name);
-			const escCustomer = frappe.utils.escape_html(inv.customer || "");
+			const escCustomerName = frappe.utils.escape_html(inv.customer_name || inv.customer || "");
 			const escDate = frappe.utils.escape_html(inv.posting_date || "");
 			const grandTotal = format_currency(inv.grand_total, inv.currency);
 			const currentAttach = frappe.utils.escape_html(inv.bns_pod_attachment || "");
@@ -335,7 +416,7 @@ class PODDashboard {
 					</td>
 					<td>
 						<div class="pod-customer-cell">
-							<span class="customer-name">${escCustomer}</span>
+							<span class="customer-name" title="${frappe.utils.escape_html(inv.customer || '')}">${escCustomerName}</span>
 						</div>
 					</td>
 					<td>${gstBadge}</td>
@@ -392,6 +473,11 @@ class PODDashboard {
 	bind_events(container) {
 		const self = this;
 
+		// Quick Search inputs
+		container.off("input", ".pod-search-input").on("input", ".pod-search-input", function () {
+			self.apply_search_filters(container);
+		});
+
 		// File Upload Button
 		container.off("click", ".pod-attach-btn").on("click", ".pod-attach-btn", function () {
 			const siName = $(this).data("name");
@@ -431,6 +517,58 @@ class PODDashboard {
 
 		container.off("input change", ".pod-attach-input").on("input change", ".pod-attach-input", function () {
 			self.toggle_input_style($(this), !!$(this).val().trim());
+		});
+	}
+
+	// ── Apply Client-Side Search Filters ──────────────────────────────
+
+	apply_search_filters(container) {
+		const rowFilters = {};
+		container.find(".pod-search-input").each(function () {
+			const col = $(this).data("col");
+			const val = $(this).val().toLowerCase().trim();
+			if (val) {
+				rowFilters[col] = val;
+			}
+		});
+
+		const rows = container.find("#pod-table-body tr");
+		
+		rows.each(function () {
+			const row = $(this);
+			let matches = true;
+
+			for (const [col, val] of Object.entries(rowFilters)) {
+				let cellText = "";
+				if (col === "name") {
+					cellText = row.find(".pod-si-link").text();
+				} else if (col === "customer") {
+					cellText = row.find(".customer-name").text();
+				} else if (col === "gst_category") {
+					cellText = row.find(".pod-gst-badge").text();
+				} else if (col === "posting_date") {
+					cellText = row.find("td:nth-child(4)").text();
+				} else if (col === "grand_total") {
+					cellText = row.find(".pod-total-amount").text();
+				} else if (col === "pod_status") {
+					cellText = row.find(".pod-status-input").val() || "";
+				} else if (col === "pod_date") {
+					cellText = row.find(".pod-date-input").val() || "";
+				} else if (col === "pod_attachment") {
+					cellText = row.find(".pod-attach-input").val() || "";
+				}
+
+				if (!cellText.toLowerCase().includes(val)) {
+					matches = false;
+					break;
+				}
+			}
+
+			if (matches) {
+				row.show();
+			} else {
+				row.hide();
+			}
 		});
 	}
 
@@ -553,85 +691,104 @@ class PODDashboard {
 
 			/* ─── Container ─────────────────────────────────────────── */
 			.pod-dashboard-container {
-				padding: 20px 24px;
+				padding: 16px 20px;
 				font-family: var(--font-stack, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif);
 				background-color: #f8fafc;
 				min-height: 100vh;
 			}
 
-			/* ─── Summary Cards ─────────────────────────────────────── */
+			/* ─── Summary Cards (Compact Size) ──────────────────────── */
 			.pod-summary-row {
 				display: grid;
-				grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-				gap: 20px;
-				margin-bottom: 24px;
+				grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+				gap: 12px;
+				margin-bottom: 16px;
 			}
 			.pod-metric-card {
 				background: #ffffff;
 				border: 1px solid #e2e8f0;
-				border-radius: 12px;
-				padding: 20px 24px;
+				border-radius: 8px;
+				padding: 10px 16px;
 				text-align: center;
-				box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
-				transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-				border-left: 6px solid #e2e8f0;
+				box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+				transition: all 0.2s ease;
+				border-left: 4px solid #e2e8f0;
 			}
 			.pod-metric-card:hover {
-				transform: translateY(-2px);
-				box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+				transform: translateY(-1px);
+				box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
 			}
 			.pod-metric-card.pod-card-ok      { border-left-color: #10b981; }
 			.pod-metric-card.pod-card-warning { border-left-color: #f59e0b; }
 			.pod-metric-card.pod-card-danger  { border-left-color: #ef4444; }
 			
 			.pod-metric-value {
-				font-size: 2.25rem;
+				font-size: 1.5rem;
 				font-weight: 800;
 				color: #1e293b;
 				line-height: 1.2;
 			}
 			.pod-metric-label {
-				font-size: 0.875rem;
+				font-size: 0.75rem;
 				color: #64748b;
-				margin-top: 6px;
+				margin-top: 4px;
 				font-weight: 600;
 			}
 
-			/* ─── Filters Section ───────────────────────────────────── */
+			/* ─── Filters Section (Overflow Visible for Link dropdowns) ─ */
 			.pod-filters-card {
 				background: #ffffff;
 				border: 1px solid #e2e8f0;
 				border-radius: 12px;
-				padding: 20px 24px;
-				margin-bottom: 24px;
+				padding: 16px 20px;
+				margin-bottom: 16px;
 				box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+				z-index: 20;
+				position: relative;
+				overflow: visible !important;
 			}
 			.pod-filters-header {
-				font-size: 1rem;
+				font-size: 0.95rem;
 				font-weight: 700;
 				color: #1e293b;
-				margin-bottom: 16px;
+				margin-bottom: 12px;
 				display: flex;
 				align-items: center;
 				gap: 8px;
 			}
 			.pod-filters-row {
-				margin-left: -8px;
-				margin-right: -8px;
+				display: flex;
+				flex-wrap: wrap;
+				gap: 12px;
+				overflow: visible !important;
 			}
 			.pod-filter-col {
-				padding-left: 8px;
-				padding-right: 8px;
-				margin-bottom: 12px;
+				flex: 1 1 160px;
+				min-width: 140px;
+				overflow: visible !important;
 			}
 			.pod-filter-col .frappe-control {
 				margin-bottom: 0px !important;
+				overflow: visible !important;
 			}
 			.pod-filter-col label {
 				font-size: 0.75rem !important;
 				font-weight: 600 !important;
 				color: #475569 !important;
 				margin-bottom: 4px !important;
+			}
+			
+			/* Ensure Awesomplete autocomplete results overlay correctly */
+			.awesomplete {
+				overflow: visible !important;
+			}
+			.awesomplete > ul {
+				z-index: 9999 !important;
+				position: absolute !important;
+				background: #ffffff !important;
+				border: 1px solid #e2e8f0 !important;
+				border-radius: 6px !important;
+				box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05) !important;
 			}
 
 			/* ─── Main Section ──────────────────────────────────────── */
@@ -644,9 +801,9 @@ class PODDashboard {
 			}
 			.pod-section-header {
 				background: #f8fafc;
-				padding: 16px 24px;
+				padding: 14px 20px;
 				font-weight: 700;
-				font-size: 1.05rem;
+				font-size: 0.95rem;
 				color: #1e293b;
 				border-bottom: 1px solid #e2e8f0;
 				display: flex;
@@ -655,14 +812,14 @@ class PODDashboard {
 			}
 			.pod-hint {
 				font-weight: 500;
-				font-size: 0.8rem;
+				font-size: 0.75rem;
 				color: #94a3b8;
 				margin-left: auto;
 			}
 
 			/* ─── Table ─────────────────────────────────────────────── */
 			.pod-table-wrapper {
-				max-height: calc(100vh - 360px);
+				max-height: calc(100vh - 300px);
 				overflow-y: auto;
 			}
 			.pod-table {
@@ -680,16 +837,41 @@ class PODDashboard {
 				text-transform: uppercase;
 				letter-spacing: 0.05em;
 				white-space: nowrap;
-				padding: 12px 16px;
+				padding: 10px 14px;
 				border-bottom: 2px solid #e2e8f0;
 				position: sticky;
 				top: 0;
 				z-index: 10;
 				box-shadow: inset 0 -1px 0 #e2e8f0;
 			}
+			
+			/* Search Row styling */
+			.pod-search-row th {
+				padding: 4px 10px !important;
+				background: #f1f5f9 !important;
+				border-bottom: 2px solid #cbd5e1 !important;
+				position: sticky;
+				top: 38px; /* Offset for main sticky header */
+				z-index: 9;
+				box-shadow: inset 0 -1px 0 #cbd5e1;
+			}
+			.pod-search-input {
+				height: 26px !important;
+				padding: 2px 6px !important;
+				font-size: 0.75rem !important;
+				border: 1px solid #cbd5e1 !important;
+				border-radius: 4px !important;
+				background-color: #ffffff !important;
+				width: 100%;
+			}
+			.pod-search-input::placeholder {
+				color: #94a3b8;
+				opacity: 0.8;
+			}
+
 			.pod-table td {
 				vertical-align: middle;
-				padding: 12px 16px;
+				padding: 10px 14px;
 				border-bottom: 1px solid #f1f5f9;
 				background-color: #ffffff;
 			}
@@ -719,10 +901,6 @@ class PODDashboard {
 				background-color: #dcfce7;
 				color: #166534;
 			}
-			.gst-unregistered {
-				background-color: #f1f5f9;
-				color: #475569;
-			}
 
 			/* ─── Inputs ────────────────────────────────────────────── */
 			.pod-field-wrap {
@@ -733,9 +911,9 @@ class PODDashboard {
 			.pod-status-input,
 			.pod-date-input,
 			.pod-attach-input {
-				height: 32px !important;
-				font-size: 0.8125rem !important;
-				border-radius: 6px !important;
+				height: 28px !important;
+				font-size: 0.78rem !important;
+				border-radius: 5px !important;
 				transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
 			}
 			.pod-input-missing {
@@ -754,7 +932,7 @@ class PODDashboard {
 			}
 			.pod-attach-wrap {
 				display: flex;
-				gap: 6px;
+				gap: 4px;
 				align-items: center;
 			}
 			.pod-attach-wrap .pod-attach-input {
@@ -763,13 +941,13 @@ class PODDashboard {
 			}
 			.pod-attach-btn {
 				flex-shrink: 0;
-				height: 32px;
-				width: 32px;
+				height: 28px;
+				width: 28px;
 				padding: 0 !important;
 				display: flex;
 				align-items: center;
 				justify-content: center;
-				border-radius: 6px !important;
+				border-radius: 5px !important;
 				background-color: #f1f5f9;
 				border: 1px solid #cbd5e1;
 				color: #475569;
@@ -780,23 +958,24 @@ class PODDashboard {
 			}
 			
 			.btn-pod-save {
-				height: 32px;
-				padding: 0 12px !important;
+				height: 28px;
+				padding: 0 10px !important;
 				font-weight: 600;
-				border-radius: 6px !important;
+				border-radius: 5px !important;
+				font-size: 0.78rem !important;
 			}
 
 			/* ─── Empty / Loading ───────────────────────────────────── */
 			.pod-loading, .pod-empty {
 				text-align: center;
 				color: #64748b;
-				padding: 48px 24px;
-				font-size: 0.95rem;
+				padding: 40px 20px;
+				font-size: 0.9rem;
 				font-weight: 500;
 			}
 			.pod-empty i {
 				display: block;
-				margin-bottom: 12px;
+				margin-bottom: 10px;
 			}
 
 			</style>
