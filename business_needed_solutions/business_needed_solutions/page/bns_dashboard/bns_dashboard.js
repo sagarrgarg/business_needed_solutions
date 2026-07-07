@@ -720,9 +720,10 @@ class BNSDashboard {
 	// =====================================================================
 
 	_tds_fixables_html() {
-		if (!this.is_system_manager) return "";
+		// Rendered for everyone; visibility is decided after get_fixables_config
+		// (BNS Settings toggle + System Manager or an Additional Backfill Role).
 		return `
-			<!-- TDS Category Fixables (gated: BNS Settings + System Manager) -->
+			<!-- TDS Category Fixables (gated: BNS Settings toggle + SysMgr / Backfill Role) -->
 			<div class="row mt-0" id="row-tds-fixables" style="display: none;">
 				<div class="col-lg-12">
 					<div class="frappe-card" id="section-tds-fixables">
@@ -733,12 +734,12 @@ class BNSDashboard {
 								<i class="fa fa-chevron-down section-toggle collapsed" id="toggle-tds-fixables"></i>
 								<i class="fa fa-percent text-muted mr-2"></i>
 								${__("TDS Category Fixables")}
-								<span class="badge badge-danger ml-2">${__("System Manager")}</span>
+								<span class="badge badge-danger ml-2">${__("SysMgr / Backfill Role")}</span>
 							</h5>
 						</div>
 						<div class="card-body section-content" id="content-tds-fixables" style="display: none;">
 							<p class="text-muted small mb-3">
-								${__("Fill missing Tax Withholding (TDS) Categories on suppliers, and correct the TDS Category on this fiscal year's Purchase Invoices where it disagrees with the supplier. Correcting a PI here updates the category field only — it does not recompute TDS amounts.")}
+								${__("Fill missing Tax Withholding (TDS) Categories on suppliers, and apply/correct TDS on Purchase Invoices where it disagrees with the supplier. Current fiscal year is available to allowed roles; only a System Manager can reach back into prior fiscal years.")}
 							</p>
 
 							<div class="sub-section mb-3" id="subsection-suppliers-missing-tds">
@@ -764,7 +765,7 @@ class BNSDashboard {
 									 data-subsection="pi-wrong-tds">
 									<strong>
 										<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-pi-wrong-tds"></i>
-										${__("Purchase Invoices Needing TDS Fix (Current FY)")}
+										${__("Purchase Invoices Needing TDS Fix")}
 										<span class="badge badge-warning ml-2" id="badge-pi-wrong-tds">0</span>
 									</strong>
 								</div>
@@ -776,6 +777,9 @@ class BNSDashboard {
 										<button class="btn btn-secondary btn-xs ml-2" id="btn-select-all-tds">
 											${__("Select All")}
 										</button>
+										<label class="ml-3" id="wrap-include-prior-fy-tds" style="display: none; font-weight: normal;">
+											<input type="checkbox" id="chk-include-prior-fy-tds"> ${__("Include prior fiscal years (System Manager)")}
+										</label>
 									</div>
 									<div id="table-pi-wrong-tds">
 										<p class="text-muted">${__("Loading...")}</p>
@@ -942,9 +946,10 @@ class BNSDashboard {
 
 	async load_pi_wrong_tds() {
 		try {
+			const include_prior = this.wrapper.find("#chk-include-prior-fy-tds").is(":checked") ? 1 : 0;
 			const result = await frappe.call({
 				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_pis_needing_tds_fix",
-				args: { company: this.get_company() },
+				args: { company: this.get_company(), include_prior_fy: include_prior },
 			});
 			const data = result.message || {};
 			this.wrapper.find("#badge-pi-wrong-tds").text(data.count || 0);
@@ -971,7 +976,11 @@ class BNSDashboard {
 			html += '<td><input type="checkbox" class="pi-tds-checkbox" data-pi="' + frappe.utils.escape_html(it.purchase_invoice) + '" data-correct-category="' + frappe.utils.escape_html(it.supplier_category) + '"></td>';
 			html += '<td><a href="/app/purchase-invoice/' + encodeURIComponent(it.purchase_invoice) + '" target="_blank">' + frappe.utils.escape_html(it.purchase_invoice) + "</a>";
 			html += '<br><small class="text-muted">' + frappe.utils.escape_html(it.supplier_name || it.supplier) + " · " + frappe.utils.escape_html(String(it.posting_date || "")) + "</small></td>";
-			html += '<td><span class="badge badge-warning">' + frappe.utils.escape_html(it.reason || "") + "</span></td>";
+			html += '<td><span class="badge badge-warning">' + frappe.utils.escape_html(it.reason || "") + "</span>";
+			if (parseInt(it.prior_fy)) {
+				html += ' <span class="badge badge-danger" title="' + __("Prior fiscal year — System Manager only") + '">' + __("Prior FY") + "</span>";
+			}
+			html += "</td>";
 			html += "<td><small>";
 			if (frappe.utils.escape_html(it.pi_category || "") !== frappe.utils.escape_html(it.supplier_category || "")) {
 				html += '<span class="text-danger">' + frappe.utils.escape_html(it.pi_category || "—") + '</span> → <span class="text-success">' + frappe.utils.escape_html(it.supplier_category) + "</span>";
@@ -1372,13 +1381,17 @@ class BNSDashboard {
 			self.update_bulk_fix_button();
 		});
 
-		// TDS Category Fixables (System Manager only; elements absent otherwise)
+		// TDS Category Fixables (SysMgr / Backfill Role; elements absent otherwise)
 		this.wrapper.find("#btn-bulk-fix-tds").on("click", function () {
 			self.bulk_fix_tds_selected();
 		});
 		this.wrapper.find("#btn-select-all-tds").on("click", function () {
 			self.wrapper.find(".pi-tds-checkbox:not(:disabled)").prop("checked", true);
 			self.update_tds_bulk_button();
+		});
+		// System-Manager-only: reload the list to include prior fiscal years
+		this.wrapper.find("#chk-include-prior-fy-tds").on("change", function () {
+			self.load_pi_wrong_tds();
 		});
 
 		this.wrapper.find("#btn-prepare-mismatch-report").on("click", function () {
@@ -1533,8 +1546,12 @@ class BNSDashboard {
 	_apply_fixables_gating() {
 		// Expense Item Fixables card (hide its whole column when off)
 		this.wrapper.find("#col-expense-fixables").toggle(this._expense_fixables_on());
-		// TDS Category Fixables row (only present in the DOM for System Managers)
+		// TDS Category Fixables row: shown when the toggle is on AND the user is a
+		// System Manager or holds an Additional Backfill Role.
 		this.wrapper.find("#row-tds-fixables").toggle(this._tds_fixables_on());
+		// The "include prior fiscal years" control is System Manager only.
+		const sysmgr = !!(this.fixables_config && this.fixables_config.is_system_manager);
+		this.wrapper.find("#wrap-include-prior-fy-tds").toggle(this._tds_fixables_on() && sysmgr);
 	}
 
 	// =====================================================================

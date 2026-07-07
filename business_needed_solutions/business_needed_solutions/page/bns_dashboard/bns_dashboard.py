@@ -80,23 +80,31 @@ def _require_expense_fixables():
 
 
 def _require_tds_fixables():
-	"""Gate for every TDS Category Fixables endpoint: System Manager role AND
-	the BNS Settings toggle. Invoice edits are additionally clamped to the
-	current fiscal year at query/worker level."""
-	_require_system_manager()
-	_require_fixables_enabled("enable_tds_category_fixables", _("TDS Category Fixables"))
+	"""Gate for every TDS Category Fixables endpoint: the BNS Settings toggle AND
+	(System Manager OR an Additional Backfill Role) -- same access as the per-PI
+	backfill (can_backfill_tds). Backfilling invoices PRIOR to the current fiscal
+	year is additionally restricted to System Manager, enforced per-invoice."""
+	from business_needed_solutions.business_needed_solutions.overrides.tds_backfill import can_backfill_tds
+	if not can_backfill_tds():
+		frappe.throw(
+			_("TDS Category Fixables is disabled, or you don't hold an allowed role."),
+			frappe.PermissionError,
+		)
 
 
 @frappe.whitelist()
 def get_fixables_config():
 	"""Frontend gate helper: which dashboard fixables the current user may see.
-	Both tools require the BNS Settings toggle AND the System Manager role."""
+	Expense Item Fixables = System Manager + its toggle. TDS Category Fixables =
+	its toggle + (System Manager OR an Additional Backfill Role); prior-fiscal-year
+	backfill within it stays System Manager only."""
 	_require_dashboard_read()
+	from business_needed_solutions.business_needed_solutions.overrides.tds_backfill import can_backfill_tds
 	is_sys_mgr = "System Manager" in frappe.get_roles()
 	return {
 		"is_system_manager": is_sys_mgr,
 		"expense_enabled": bool(frappe.db.get_single_value("BNS Settings", "enable_expense_item_fixables")) and is_sys_mgr,
-		"tds_enabled": bool(frappe.db.get_single_value("BNS Settings", "enable_tds_category_fixables")) and is_sys_mgr,
+		"tds_enabled": bool(can_backfill_tds()),
 	}
 
 
@@ -652,23 +660,31 @@ def set_supplier_tds_category(supplier, tax_withholding_category):
 
 
 @frappe.whitelist()
-def get_pis_needing_tds_fix(company=None):
-	"""Submitted Purchase Invoices in the CURRENT fiscal year whose TDS is not
-	fully applied yet -- shown until every field and the GL are fixed. A PI needs
-	fixing when the supplier has a TDS Category AND any of:
+def get_pis_needing_tds_fix(company=None, include_prior_fy=0):
+	"""Submitted Purchase Invoices whose TDS is not fully applied yet -- shown
+	until every field and the GL are fixed. A PI needs fixing when the supplier
+	has a TDS Category AND any of:
 	  - the PI's category disagrees with the supplier's, OR
 	  - apply_tds is off (TDS never applied), OR
 	  - a TDS row exists but taxes_and_charges_deducted is 0 (old-backfill bug).
-	Applying the fix (below) sets the category, applies TDS via ERPNext's
-	cumulative logic, posts the incremental GL, and marks nothing-due PIs done --
-	so they drop off this list."""
+	By default only the CURRENT fiscal year is listed. A System Manager may pass
+	include_prior_fy=1 to also see older invoices (they alone may fix those)."""
 	_require_tds_fixables()
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
 
 	fy_start, fy_end = _current_fiscal_year(company)
+	# Prior-fiscal-year backfill is System Manager only; ignore the flag otherwise.
+	show_prior = cint(include_prior_fy) and ("System Manager" in frappe.get_roles())
 
-	rows = frappe.db.sql("""
+	params = {"company": company, "fy_end": fy_end}
+	if show_prior:
+		date_condition = "AND pi.posting_date <= %(fy_end)s"
+	else:
+		date_condition = "AND pi.posting_date >= %(fy_start)s AND pi.posting_date <= %(fy_end)s"
+		params["fy_start"] = fy_start
+
+	rows = frappe.db.sql(f"""
 		SELECT
 			pi.name AS purchase_invoice,
 			pi.posting_date,
@@ -687,8 +703,7 @@ def get_pis_needing_tds_fix(company=None):
 		WHERE
 			pi.docstatus = 1
 			AND pi.company = %(company)s
-			AND pi.posting_date >= %(fy_start)s
-			AND pi.posting_date <= %(fy_end)s
+			{date_condition}
 			AND s.tax_withholding_category IS NOT NULL
 			AND s.tax_withholding_category != ''
 			AND (
@@ -705,10 +720,11 @@ def get_pis_needing_tds_fix(company=None):
 			)
 		ORDER BY pi.supplier, pi.posting_date, pi.name
 		LIMIT 2000
-	""", {"company": company, "fy_start": fy_start, "fy_end": fy_end}, as_dict=True)
+	""", params, as_dict=True)
 
 	for r in rows:
 		r["correct_category"] = r["supplier_category"]
+		r["prior_fy"] = 1 if str(r.get("posting_date")) < str(fy_start) else 0
 		if cstr(r.get("pi_category") or "") != cstr(r["supplier_category"]):
 			r["reason"] = _("Wrong / missing category")
 		elif not cint(r.get("apply_tds")):
@@ -722,14 +738,17 @@ def get_pis_needing_tds_fix(company=None):
 		"company": company,
 		"fiscal_year_start": str(fy_start),
 		"fiscal_year_end": str(fy_end),
+		"showing_prior_fy": bool(show_prior),
+		"is_system_manager": "System Manager" in frappe.get_roles(),
 	}
 
 
 def _fix_one_pi_tds(name):
-	"""Fully fix TDS on one submitted PI (current-FY guarded): align the category
-	to the supplier, then either repair the header split (a TDS row already
-	exists) or run the full backfill -- add the TDS row + incremental GL, or mark
-	a nothing-due invoice as applied. Returns the backfill/repair result dict."""
+	"""Fully fix TDS on one submitted PI: align the category to the supplier, then
+	either repair the header split (a TDS row already exists) or run the full
+	backfill -- add the TDS row + incremental GL, or mark a nothing-due invoice as
+	applied. Current FY is open to all allowed roles; invoices outside it (prior
+	year) are System Manager only. Returns the backfill/repair result dict."""
 	from business_needed_solutions.business_needed_solutions.overrides.tds_backfill import (
 		backfill_tds_on_pi, repair_tds_totals_on_pi, _existing_tds_row,
 	)
@@ -738,9 +757,12 @@ def _fix_one_pi_tds(name):
 	if pi.docstatus != 1:
 		return {"changed": False, "reason": _("Not submitted")}
 
+	# Current fiscal year is open to all allowed roles; anything outside it
+	# (prior year in particular) is System Manager only.
 	fy_start, fy_end = _current_fiscal_year(pi.company)
 	if not (str(fy_start) <= str(pi.posting_date) <= str(fy_end)):
-		return {"changed": False, "reason": _("Outside current fiscal year")}
+		if "System Manager" not in frappe.get_roles():
+			return {"changed": False, "reason": _("Outside current fiscal year — System Manager only")}
 
 	supplier_cat = frappe.db.get_value("Supplier", pi.supplier, "tax_withholding_category")
 	if not supplier_cat:
@@ -765,8 +787,9 @@ def fix_selected_pis_tds(items):
 	+ incremental GL, via the shared backfill core). A single selection runs
 	inline for immediate feedback; more than one is dispatched to a background job
 	that processes in posting-date order (so ERPNext's cumulative-threshold logic
-	sees earlier invoices already applied), in batches of 10. System Manager only,
-	current fiscal year only."""
+	sees earlier invoices already applied), in batches of 10. Requires the toggle +
+	(System Manager or an Additional Backfill Role); prior-fiscal-year invoices are
+	fixed only when the caller is a System Manager (enforced per invoice)."""
 	_require_tds_fixables()
 	import json
 	if isinstance(items, str):
