@@ -31,6 +31,8 @@ class BNSDashboard {
 		this.page = page;
 		this.wrapper = $(page.body);
 		this.expense_accounts = [];
+		this.tds_categories = [];
+		this.is_system_manager = frappe.user.has_role("System Manager");
 		this.init();
 	}
 
@@ -518,6 +520,8 @@ class BNSDashboard {
 					</div>
 				</div>
 
+				${this._tds_fixables_html()}
+
 				<!-- Food Company Addresses -->
 				<div class="row mt-0" id="row-food-addresses" style="display: none;">
 					<div class="col-lg-6">
@@ -709,6 +713,380 @@ class BNSDashboard {
 		`);
 
 		this.bind_events();
+	}
+
+	// =====================================================================
+	// TDS Category Fixables (System Manager only)
+	// =====================================================================
+
+	_tds_fixables_html() {
+		if (!this.is_system_manager) return "";
+		return `
+			<!-- TDS Category Fixables (System Manager only) -->
+			<div class="row mt-0" id="row-tds-fixables">
+				<div class="col-lg-12">
+					<div class="frappe-card" id="section-tds-fixables">
+						<div class="card-header d-flex justify-content-between align-items-center section-header"
+							 style="cursor: pointer; padding: 12px 15px; background: var(--subtle-bg);"
+							 data-section="tds-fixables">
+							<h5 class="mb-0">
+								<i class="fa fa-chevron-down section-toggle collapsed" id="toggle-tds-fixables"></i>
+								<i class="fa fa-percent text-muted mr-2"></i>
+								${__("TDS Category Fixables")}
+								<span class="badge badge-danger ml-2">${__("System Manager")}</span>
+							</h5>
+						</div>
+						<div class="card-body section-content" id="content-tds-fixables" style="display: none;">
+							<p class="text-muted small mb-3">
+								${__("Fill missing Tax Withholding (TDS) Categories on suppliers, and correct the TDS Category on this fiscal year's Purchase Invoices where it disagrees with the supplier. Correcting a PI here updates the category field only — it does not recompute TDS amounts.")}
+							</p>
+
+							<div class="sub-section mb-3" id="subsection-suppliers-missing-tds">
+								<div class="sub-section-header d-flex justify-content-between align-items-center"
+									 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
+									 data-subsection="suppliers-missing-tds">
+									<strong>
+										<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-suppliers-missing-tds"></i>
+										${__("Suppliers Missing TDS Category")}
+										<span class="badge badge-secondary ml-2" id="badge-suppliers-missing-tds">0</span>
+									</strong>
+								</div>
+								<div class="sub-section-content" id="subcontent-suppliers-missing-tds" style="display: none; padding-top: 10px;">
+									<div id="table-suppliers-missing-tds">
+										<p class="text-muted">${__("Loading...")}</p>
+									</div>
+								</div>
+							</div>
+
+							<div class="sub-section mb-3" id="subsection-pi-wrong-tds">
+								<div class="sub-section-header d-flex justify-content-between align-items-center"
+									 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
+									 data-subsection="pi-wrong-tds">
+									<strong>
+										<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-pi-wrong-tds"></i>
+										${__("Purchase Invoices with Wrong TDS Category (Current FY)")}
+										<span class="badge badge-warning ml-2" id="badge-pi-wrong-tds">0</span>
+									</strong>
+								</div>
+								<div class="sub-section-content" id="subcontent-pi-wrong-tds" style="display: none; padding-top: 10px;">
+									<div class="mb-2">
+										<button class="btn btn-primary btn-xs" id="btn-bulk-fix-tds" disabled>
+											<i class="fa fa-wrench"></i> ${__("Bulk Fix Selected")}
+										</button>
+										<button class="btn btn-secondary btn-xs ml-2" id="btn-select-all-tds">
+											${__("Select All")}
+										</button>
+									</div>
+									<div id="table-pi-wrong-tds">
+										<p class="text-muted">${__("Loading...")}</p>
+									</div>
+								</div>
+							</div>
+
+							<div class="sub-section" id="subsection-all-suppliers-tds">
+								<div class="sub-section-header d-flex justify-content-between align-items-center"
+									 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
+									 data-subsection="all-suppliers-tds">
+									<strong>
+										<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-all-suppliers-tds"></i>
+										${__("All Suppliers with TDS Category")}
+										<span class="badge badge-info ml-2" id="badge-all-suppliers-tds">0</span>
+									</strong>
+								</div>
+								<div class="sub-section-content" id="subcontent-all-suppliers-tds" style="display: none; padding-top: 10px;">
+									<div id="table-all-suppliers-tds">
+										<p class="text-muted">${__("Loading...")}</p>
+									</div>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+		`;
+	}
+
+	async load_tds_fixables() {
+		if (!this.is_system_manager) return;
+		await this.load_tax_withholding_categories();
+		await Promise.all([
+			this.load_suppliers_missing_tds(),
+			this.load_pi_wrong_tds(),
+			this.load_all_suppliers_tds(),
+		]);
+	}
+
+	async load_tax_withholding_categories() {
+		if (!this.is_system_manager) return;
+		try {
+			const result = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_tax_withholding_categories",
+			});
+			this.tds_categories = result.message || [];
+		} catch (e) {
+			console.error("Failed to load TDS categories:", e);
+		}
+	}
+
+	_tds_category_options(selected) {
+		let opts = '<option value="">' + __("Select...") + "</option>";
+		this.tds_categories.forEach(function (c) {
+			const sel = selected && selected === c.name ? " selected" : "";
+			opts += '<option value="' + frappe.utils.escape_html(c.name) + '"' + sel + ">" + frappe.utils.escape_html(c.name) + "</option>";
+		});
+		return opts;
+	}
+
+	async load_suppliers_missing_tds() {
+		try {
+			const result = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_suppliers_missing_tds_category",
+			});
+			const data = result.message || {};
+			this.wrapper.find("#badge-suppliers-missing-tds").text(data.count || 0);
+			this.render_suppliers_missing_tds_table(data.suppliers || []);
+		} catch (e) {
+			console.error("Failed to load suppliers missing TDS:", e);
+			this.wrapper.find("#table-suppliers-missing-tds").html('<p class="text-danger">' + __("Failed to load data") + "</p>");
+		}
+	}
+
+	render_suppliers_missing_tds_table(suppliers) {
+		const container = this.wrapper.find("#table-suppliers-missing-tds");
+		if (!suppliers || suppliers.length === 0) {
+			container.html('<p class="text-success mb-0">' + __("All suppliers have a TDS Category set!") + "</p>");
+			return;
+		}
+		const self = this;
+		let html = '<table class="table table-sm"><thead><tr>';
+		html += "<th>" + __("Supplier") + "</th><th>" + __("TDS Category") + '</th><th style="width: 60px;"></th></tr></thead><tbody>';
+		suppliers.forEach(function (s) {
+			html += '<tr data-supplier="' + frappe.utils.escape_html(s.supplier) + '">';
+			html += '<td><a href="/app/supplier/' + encodeURIComponent(s.supplier) + '" target="_blank">' + frappe.utils.escape_html(s.supplier_name || s.supplier) + "</a>";
+			if (s.pan) html += '<br><small class="text-muted">PAN: ' + frappe.utils.escape_html(s.pan) + "</small>";
+			html += "</td>";
+			html += '<td><select class="form-control tds-category-select" data-supplier="' + frappe.utils.escape_html(s.supplier) + '">' + self._tds_category_options() + "</select></td>";
+			html += '<td><button class="btn btn-primary btn-xs btn-set-tds" data-supplier="' + frappe.utils.escape_html(s.supplier) + '">' + __("Set") + "</button></td>";
+			html += "</tr>";
+		});
+		html += "</tbody></table>";
+		container.html(html);
+
+		container.find(".btn-set-tds").on("click", function () {
+			const supplier = $(this).data("supplier");
+			const category = container.find('.tds-category-select[data-supplier="' + supplier + '"]').val();
+			self.set_supplier_tds_category(supplier, category, $(this));
+		});
+	}
+
+	async set_supplier_tds_category(supplier, category, btn) {
+		if (!category) {
+			frappe.msgprint(__("Please select a TDS Category"));
+			return;
+		}
+		btn.prop("disabled", true).text(__("..."));
+		try {
+			await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.set_supplier_tds_category",
+				args: { supplier: supplier, tax_withholding_category: category },
+			});
+			frappe.show_alert({ message: __("Set for {0}", [supplier]), indicator: "green" });
+			btn.closest("tr").fadeOut(300, function () { $(this).remove(); });
+			this.load_all_suppliers_tds();
+		} catch (e) {
+			frappe.msgprint(__("Failed: {0}", [e.message || e]));
+			btn.prop("disabled", false).text(__("Set"));
+		}
+	}
+
+	async load_all_suppliers_tds() {
+		try {
+			const result = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_all_suppliers_with_tds_category",
+			});
+			const data = result.message || {};
+			this.wrapper.find("#badge-all-suppliers-tds").text(data.count || 0);
+			this.render_all_suppliers_tds_table(data.suppliers || []);
+		} catch (e) {
+			console.error("Failed to load all suppliers TDS:", e);
+			this.wrapper.find("#table-all-suppliers-tds").html('<p class="text-danger">' + __("Failed to load data") + "</p>");
+		}
+	}
+
+	render_all_suppliers_tds_table(suppliers) {
+		const container = this.wrapper.find("#table-all-suppliers-tds");
+		if (!suppliers || suppliers.length === 0) {
+			container.html('<p class="text-muted mb-0">' + __("No suppliers found.") + "</p>");
+			return;
+		}
+		const self = this;
+		let html = '<table class="table table-sm"><thead><tr>';
+		html += "<th>" + __("Supplier") + "</th><th>" + __("Group") + "</th><th>" + __("TDS Category") + '</th><th style="width: 60px;"></th></tr></thead><tbody>';
+		suppliers.forEach(function (s) {
+			html += "<tr>";
+			html += '<td><a href="/app/supplier/' + encodeURIComponent(s.supplier) + '" target="_blank">' + frappe.utils.escape_html(s.supplier_name || s.supplier) + "</a></td>";
+			html += "<td><small>" + frappe.utils.escape_html(s.supplier_group || "-") + "</small></td>";
+			html += '<td><select class="form-control tds-category-select-all" data-supplier="' + frappe.utils.escape_html(s.supplier) + '">' + self._tds_category_options(s.tax_withholding_category) + "</select></td>";
+			html += '<td><button class="btn btn-secondary btn-xs btn-set-tds-all" data-supplier="' + frappe.utils.escape_html(s.supplier) + '">' + __("Set") + "</button></td>";
+			html += "</tr>";
+		});
+		html += "</tbody></table>";
+		container.html(html);
+
+		container.find(".btn-set-tds-all").on("click", function () {
+			const supplier = $(this).data("supplier");
+			const category = container.find('.tds-category-select-all[data-supplier="' + supplier + '"]').val();
+			self.set_supplier_tds_category(supplier, category, $(this));
+		});
+	}
+
+	async load_pi_wrong_tds() {
+		try {
+			const result = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_pis_with_wrong_tds_category",
+				args: { company: this.get_company() },
+			});
+			const data = result.message || {};
+			this.wrapper.find("#badge-pi-wrong-tds").text(data.count || 0);
+			this.render_pi_wrong_tds_table(data.items || []);
+		} catch (e) {
+			console.error("Failed to load PI wrong TDS:", e);
+			this.wrapper.find("#table-pi-wrong-tds").html('<p class="text-danger">' + __("Failed to load data") + "</p>");
+		}
+	}
+
+	render_pi_wrong_tds_table(items) {
+		const container = this.wrapper.find("#table-pi-wrong-tds");
+		if (!items || items.length === 0) {
+			container.html('<p class="text-success mb-0">' + __("All current-FY Purchase Invoices match their supplier's TDS Category!") + "</p>");
+			this.wrapper.find("#btn-bulk-fix-tds").prop("disabled", true);
+			return;
+		}
+		const self = this;
+		let html = '<table class="table table-sm"><thead><tr>';
+		html += '<th style="width: 30px;"><input type="checkbox" id="check-all-pi-tds"></th>';
+		html += "<th>" + __("PI / Supplier") + "</th><th>" + __("PI Category") + "</th><th>" + __("Correct (Supplier)") + "</th><th>" + __("Apply TDS") + "</th></tr></thead><tbody>";
+		items.forEach(function (it) {
+			html += '<tr class="row-tds-fixable">';
+			html += '<td><input type="checkbox" class="pi-tds-checkbox" data-pi="' + frappe.utils.escape_html(it.purchase_invoice) + '" data-correct-category="' + frappe.utils.escape_html(it.supplier_category) + '"></td>';
+			html += '<td><a href="/app/purchase-invoice/' + encodeURIComponent(it.purchase_invoice) + '" target="_blank">' + frappe.utils.escape_html(it.purchase_invoice) + "</a>";
+			html += '<br><small class="text-muted">' + frappe.utils.escape_html(it.supplier_name || it.supplier) + " · " + frappe.utils.escape_html(String(it.posting_date || "")) + "</small></td>";
+			html += '<td><small class="text-danger">' + frappe.utils.escape_html(it.pi_category || "—") + "</small></td>";
+			html += '<td><small class="text-success">' + frappe.utils.escape_html(it.supplier_category) + "</small></td>";
+			html += "<td>" + (parseInt(it.apply_tds) ? '<span class="badge badge-success">' + __("Yes") + "</span>" : '<span class="badge badge-secondary">' + __("No") + "</span>") + "</td>";
+			html += "</tr>";
+		});
+		html += "</tbody></table>";
+		container.html(html);
+
+		container.find(".pi-tds-checkbox").on("change", function () { self.update_tds_bulk_button(); });
+		container.find("#check-all-pi-tds").on("change", function () {
+			container.find(".pi-tds-checkbox:not(:disabled)").prop("checked", $(this).is(":checked"));
+			self.update_tds_bulk_button();
+		});
+		this.update_tds_bulk_button();
+	}
+
+	update_tds_bulk_button() {
+		const checked = this.wrapper.find(".pi-tds-checkbox:checked").length;
+		const btn = this.wrapper.find("#btn-bulk-fix-tds");
+		btn.prop("disabled", checked === 0);
+		btn.html('<i class="fa fa-wrench"></i> ' + (checked > 0 ? __("Fix ({0})", [checked]) : __("Bulk Fix Selected")));
+	}
+
+	async bulk_fix_tds_selected() {
+		const selected = [];
+		this.wrapper.find(".pi-tds-checkbox:checked").each(function () {
+			selected.push({ purchase_invoice: $(this).data("pi"), correct_category: $(this).data("correct-category") });
+		});
+		if (selected.length === 0) {
+			frappe.msgprint(__("No invoices selected"));
+			return;
+		}
+		const self = this;
+		frappe.confirm(
+			__("Correct the TDS Category on {0} Purchase Invoices to match their suppliers? This updates the category field only (no TDS recompute) and runs in the background.", [selected.length]),
+			async function () {
+				const btn = self.wrapper.find("#btn-bulk-fix-tds");
+				btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> ' + __("Queuing..."));
+				try {
+					const result = await frappe.call({
+						method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.bulk_fix_pi_tds_category",
+						args: { items: selected },
+					});
+					const data = result.message;
+					if (data.status === "error") {
+						frappe.msgprint({ title: __("Validation failed"), message: __("No fixable invoices found."), indicator: "red" });
+						btn.prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix Selected"));
+						return;
+					}
+					self.show_tds_fix_progress(data.total_invoices);
+				} catch (e) {
+					let msg = "";
+					try {
+						if (e && e._server_messages) {
+							const arr = JSON.parse(e._server_messages);
+							if (arr && arr.length) { const first = JSON.parse(arr[0]); msg = first.message || arr[0]; }
+						}
+					} catch (_) { /* fall through */ }
+					if (!msg) msg = (e && (e.message || e.statusText)) || "";
+					if (msg) frappe.show_alert({ message: __("Bulk fix failed: {0}", [frappe.utils.escape_html(String(msg))]), indicator: "red" }, 8);
+					btn.prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix Selected"));
+				}
+			}
+		);
+	}
+
+	show_tds_fix_progress(total) {
+		const btn = this.wrapper.find("#btn-bulk-fix-tds");
+		btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> ' + __("Processing..."));
+		this.wrapper.find("#btn-select-all-tds").prop("disabled", true);
+
+		const container = this.wrapper.find("#table-pi-wrong-tds");
+		container.before(`
+			<div id="tds-fix-progress" class="mb-3" style="padding: 10px; background: var(--control-bg); border-radius: 6px;">
+				<div class="d-flex justify-content-between align-items-center mb-1">
+					<span class="text-muted" style="font-size: 0.85rem;" id="tds-fix-status">
+						<i class="fa fa-spinner fa-spin"></i> ${__("Processing 0 / {0} invoices...", [total])}
+					</span>
+					<span class="text-muted" style="font-size: 0.8rem;" id="tds-fix-pct">0%</span>
+				</div>
+				<div class="progress" style="height: 8px;">
+					<div class="progress-bar bg-primary progress-bar-striped progress-bar-animated"
+						 id="tds-fix-bar" role="progressbar" style="width: 0%; transition: width 0.4s ease;"></div>
+				</div>
+			</div>
+		`);
+
+		const self = this;
+		this._onTdsFixProgress = function (data) {
+			const pct = Math.round((data.done / data.total) * 100);
+			self.wrapper.find("#tds-fix-bar").css("width", pct + "%");
+			self.wrapper.find("#tds-fix-pct").text(pct + "%");
+			self.wrapper.find("#tds-fix-status").html('<i class="fa fa-spinner fa-spin"></i> ' + __("Processing {0} / {1} invoices... ({2} fixed)", [data.done, data.total, data.success_count]));
+		};
+		this._onTdsFixComplete = function (data) {
+			self.hide_tds_fix_progress();
+			if (data.success_count > 0) {
+				frappe.show_alert({ message: __("Corrected TDS Category on {0} invoices", [data.success_count]), indicator: "green" });
+			}
+			if (data.error_count > 0) {
+				let errorMsg = "";
+				(data.errors || []).forEach(function (e) { errorMsg += (e.purchase_invoice || "?") + ": " + e.error + "<br>"; });
+				frappe.msgprint({ title: __("{0} invoices failed", [data.error_count]), message: errorMsg, indicator: "orange" });
+			}
+			self.load_tds_fixables();
+		};
+		frappe.realtime.on("bns_tds_fix_progress", this._onTdsFixProgress);
+		frappe.realtime.on("bns_tds_fix_complete", this._onTdsFixComplete);
+	}
+
+	hide_tds_fix_progress() {
+		this.wrapper.find("#tds-fix-progress").remove();
+		this.wrapper.find("#btn-bulk-fix-tds").prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix Selected"));
+		this.wrapper.find("#btn-select-all-tds").prop("disabled", false);
+		if (this._onTdsFixProgress) { frappe.realtime.off("bns_tds_fix_progress", this._onTdsFixProgress); this._onTdsFixProgress = null; }
+		if (this._onTdsFixComplete) { frappe.realtime.off("bns_tds_fix_complete", this._onTdsFixComplete); this._onTdsFixComplete = null; }
 	}
 
 	get_styles() {
@@ -972,6 +1350,15 @@ class BNSDashboard {
 			self.update_bulk_fix_button();
 		});
 
+		// TDS Category Fixables (System Manager only; elements absent otherwise)
+		this.wrapper.find("#btn-bulk-fix-tds").on("click", function () {
+			self.bulk_fix_tds_selected();
+		});
+		this.wrapper.find("#btn-select-all-tds").on("click", function () {
+			self.wrapper.find(".pi-tds-checkbox:not(:disabled)").prop("checked", true);
+			self.update_tds_bulk_button();
+		});
+
 		this.wrapper.find("#btn-prepare-mismatch-report").on("click", function () {
 			self.prepare_mismatch_report();
 		});
@@ -1080,6 +1467,7 @@ class BNSDashboard {
 			this.load_unlinked_pan(),
 			this.load_transfer_mismatches(),
 			this.load_srbnb_reconciliation(),
+			this.load_tds_fixables(),
 		]);
 	}
 

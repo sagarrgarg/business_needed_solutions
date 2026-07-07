@@ -259,6 +259,8 @@ def _persist_tds_row_and_totals(pi, tds_row):
     tds_row.db_insert()
 
     header_fields = [
+        "taxes_and_charges_added", "base_taxes_and_charges_added",
+        "taxes_and_charges_deducted", "base_taxes_and_charges_deducted",
         "total_taxes_and_charges", "base_total_taxes_and_charges",
         "grand_total", "base_grand_total",
         "rounding_adjustment", "base_rounding_adjustment",

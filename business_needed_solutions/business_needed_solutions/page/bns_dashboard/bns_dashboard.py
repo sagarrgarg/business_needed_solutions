@@ -489,6 +489,255 @@ def get_all_expense_items(company=None):
 	}
 
 
+# ===================================================================
+# TDS Category Fixables (System Manager only)
+#
+# Mirrors the Expense Item Fixables tools but for Tax Withholding
+# ("TDS") Category on Suppliers and Purchase Invoices:
+#   1. Suppliers missing a TDS Category  -> fill whichever empty
+#   2. Purchase Invoices (current FY) whose tax_withholding_category
+#      disagrees with the supplier's  -> bulk correct the field
+#   3. Full supplier list with their current TDS Category
+#
+# Every endpoint here is gated to the System Manager role, per the
+# requirement that this whole area is disabled for everyone else.
+# ===================================================================
+
+
+def _require_system_manager():
+	"""Hard gate: only System Manager may read or act on the TDS Category
+	Fixables tools. Enforced server-side so hiding the UI is not the only
+	line of defence."""
+	if "System Manager" not in frappe.get_roles():
+		frappe.throw(
+			_("The TDS Category Fixables tools are restricted to the System Manager role."),
+			frappe.PermissionError,
+		)
+
+
+def _current_fiscal_year(company):
+	"""Return (start_date, end_date) of the fiscal year containing today for
+	the given company. Falls back to the global FY if company has none."""
+	from erpnext.accounts.utils import get_fiscal_year
+	from frappe.utils import nowdate
+
+	fy = get_fiscal_year(nowdate(), company=company, as_dict=True)
+	return fy.year_start_date, fy.year_end_date
+
+
+@frappe.whitelist()
+def get_tax_withholding_categories():
+	"""List of Tax Withholding Category names for the fill/fix dropdowns."""
+	_require_system_manager()
+	return frappe.get_all(
+		"Tax Withholding Category",
+		fields=["name"],
+		order_by="name",
+		limit=500,
+	)
+
+
+@frappe.whitelist()
+def get_suppliers_missing_tds_category():
+	"""Enabled suppliers with no tax_withholding_category set."""
+	_require_system_manager()
+	suppliers = frappe.db.sql("""
+		SELECT
+			s.name AS supplier,
+			s.supplier_name,
+			s.supplier_group,
+			s.pan
+		FROM `tabSupplier` s
+		WHERE
+			s.disabled = 0
+			AND (s.tax_withholding_category IS NULL OR s.tax_withholding_category = '')
+		ORDER BY s.supplier_name
+		LIMIT 1000
+	""", as_dict=True)
+	return {"count": len(suppliers), "suppliers": suppliers}
+
+
+@frappe.whitelist()
+def get_all_suppliers_with_tds_category():
+	"""All enabled suppliers with their current TDS Category (blank if unset)."""
+	_require_system_manager()
+	suppliers = frappe.db.sql("""
+		SELECT
+			s.name AS supplier,
+			s.supplier_name,
+			s.supplier_group,
+			s.tax_withholding_category,
+			s.pan
+		FROM `tabSupplier` s
+		WHERE s.disabled = 0
+		ORDER BY s.supplier_name
+		LIMIT 2000
+	""", as_dict=True)
+	return {"count": len(suppliers), "suppliers": suppliers}
+
+
+@frappe.whitelist()
+def set_supplier_tds_category(supplier, tax_withholding_category):
+	"""Set the tax_withholding_category on one supplier."""
+	_require_system_manager()
+	if not tax_withholding_category:
+		frappe.throw(_("Tax Withholding Category is required"))
+	if not frappe.db.exists("Tax Withholding Category", tax_withholding_category):
+		frappe.throw(_("Tax Withholding Category {0} does not exist").format(tax_withholding_category))
+
+	supplier_doc = frappe.get_doc("Supplier", supplier)
+	supplier_doc.tax_withholding_category = tax_withholding_category
+	supplier_doc.save(ignore_permissions=True)
+
+	return {
+		"success": True,
+		"message": _("TDS Category set for {0}").format(supplier),
+	}
+
+
+@frappe.whitelist()
+def get_pis_with_wrong_tds_category(company=None):
+	"""Submitted Purchase Invoices in the CURRENT fiscal year whose
+	tax_withholding_category disagrees with the supplier's configured
+	category (covers both blank-on-PI and genuinely-different)."""
+	_require_system_manager()
+	if not company:
+		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
+
+	fy_start, fy_end = _current_fiscal_year(company)
+
+	rows = frappe.db.sql("""
+		SELECT
+			pi.name AS purchase_invoice,
+			pi.posting_date,
+			pi.supplier,
+			pi.supplier_name,
+			pi.apply_tds,
+			pi.tax_withholding_category AS pi_category,
+			s.tax_withholding_category AS supplier_category
+		FROM `tabPurchase Invoice` pi
+		INNER JOIN `tabSupplier` s ON s.name = pi.supplier
+		WHERE
+			pi.docstatus = 1
+			AND pi.company = %(company)s
+			AND pi.posting_date >= %(fy_start)s
+			AND pi.posting_date <= %(fy_end)s
+			AND s.tax_withholding_category IS NOT NULL
+			AND s.tax_withholding_category != ''
+			AND COALESCE(pi.tax_withholding_category, '') != s.tax_withholding_category
+		ORDER BY pi.posting_date DESC, pi.name
+		LIMIT 2000
+	""", {"company": company, "fy_start": fy_start, "fy_end": fy_end}, as_dict=True)
+
+	return {
+		"count": len(rows),
+		"items": rows,
+		"company": company,
+		"fiscal_year_start": str(fy_start),
+		"fiscal_year_end": str(fy_end),
+	}
+
+
+@frappe.whitelist()
+def bulk_fix_pi_tds_category(items):
+	"""Enqueue a background job that corrects the tax_withholding_category
+	header field on submitted Purchase Invoices to match the supplier's
+	configured category. This is a metadata correction only -- it does NOT
+	recompute TDS amounts or touch GL (use the per-PI TDS backfill tool for
+	that). Current-fiscal-year PIs only; System Manager only."""
+	_require_system_manager()
+	import json
+	if isinstance(items, str):
+		items = json.loads(items)
+
+	validation_errors = []
+	pi_updates = {}
+	for item in items:
+		pi_name = item.get("purchase_invoice")
+		correct_category = item.get("correct_category")
+		if not pi_name or not correct_category:
+			validation_errors.append({
+				"purchase_invoice": pi_name,
+				"error": _("Missing purchase_invoice or correct_category"),
+			})
+			continue
+		pi_updates[pi_name] = correct_category
+
+	if not pi_updates:
+		return {"status": "error", "validation_errors": validation_errors, "total_invoices": 0}
+
+	frappe.enqueue(
+		_process_pi_tds_category_fix,
+		queue="long",
+		timeout=1500,
+		pi_updates=pi_updates,
+		company=frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company"),
+		user=frappe.session.user,
+	)
+
+	return {
+		"status": "queued",
+		"total_invoices": len(pi_updates),
+		"validation_errors": validation_errors,
+	}
+
+
+def _process_pi_tds_category_fix(pi_updates, company, user):
+	"""Background worker: db_set tax_withholding_category on each PI header
+	(current-FY guarded), committing per batch and emitting realtime progress."""
+	total = len(pi_updates)
+	done = 0
+	success_count = 0
+	errors = []
+
+	# Re-derive the FY window in the worker so a stale client can't push
+	# out-of-year invoices through.
+	pi_list = list(pi_updates.items())
+
+	for idx, (pi_name, correct_category) in enumerate(pi_list, 1):
+		try:
+			pi = frappe.db.get_value(
+				"Purchase Invoice", pi_name,
+				["docstatus", "company", "posting_date"], as_dict=True,
+			)
+			if not pi:
+				errors.append({"purchase_invoice": pi_name, "error": _("Not found")})
+			elif pi.docstatus != 1:
+				errors.append({"purchase_invoice": pi_name, "error": _("Not submitted")})
+			else:
+				fy_start, fy_end = _current_fiscal_year(pi.company or company)
+				if not (str(fy_start) <= str(pi.posting_date) <= str(fy_end)):
+					errors.append({"purchase_invoice": pi_name, "error": _("Outside current fiscal year")})
+				elif not frappe.db.exists("Tax Withholding Category", correct_category):
+					errors.append({"purchase_invoice": pi_name, "error": _("Category {0} missing").format(correct_category)})
+				else:
+					frappe.db.set_value(
+						"Purchase Invoice", pi_name,
+						"tax_withholding_category", correct_category,
+						update_modified=True,
+					)
+					success_count += 1
+		except Exception as e:
+			errors.append({"purchase_invoice": pi_name, "error": cstr(e)})
+
+		done += 1
+		if idx % PI_FIX_BATCH_SIZE == 0:
+			frappe.db.commit()
+
+		frappe.publish_realtime(
+			"bns_tds_fix_progress",
+			{"done": done, "total": total, "current_pi": pi_name, "success_count": success_count, "error_count": len(errors)},
+			user=user,
+		)
+
+	frappe.db.commit()
+	frappe.publish_realtime(
+		"bns_tds_fix_complete",
+		{"success_count": success_count, "error_count": len(errors), "errors": errors[:50]},
+		user=user,
+	)
+
+
 @frappe.whitelist()
 def get_dashboard_summary(company=None):
 	"""
