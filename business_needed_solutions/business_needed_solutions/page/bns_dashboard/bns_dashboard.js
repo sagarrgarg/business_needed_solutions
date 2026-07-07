@@ -33,12 +33,12 @@ class BNSDashboard {
 		this.expense_accounts = [];
 		this.tds_categories = [];
 		this.is_system_manager = frappe.user.has_role("System Manager");
+		this.fixables_config = null;
 		this.init();
 	}
 
 	init() {
 		this.render_layout();
-		this.load_expense_accounts();
 		this.refresh();
 	}
 
@@ -280,8 +280,8 @@ class BNSDashboard {
 
 				<!-- ======= DETAIL SECTIONS (collapsible) ======= -->
 				<div class="row">
-					<!-- Left Column - Expense Item Fixables -->
-					<div class="col-lg-6">
+					<!-- Left Column - Expense Item Fixables (gated: BNS Settings + System Manager) -->
+					<div class="col-lg-6" id="col-expense-fixables" style="display: none;">
 						<div class="frappe-card" id="section-expense-fixables">
 							<div class="card-header d-flex justify-content-between align-items-center section-header"
 								 style="cursor: pointer; padding: 12px 15px; background: var(--subtle-bg);"
@@ -722,8 +722,8 @@ class BNSDashboard {
 	_tds_fixables_html() {
 		if (!this.is_system_manager) return "";
 		return `
-			<!-- TDS Category Fixables (System Manager only) -->
-			<div class="row mt-0" id="row-tds-fixables">
+			<!-- TDS Category Fixables (gated: BNS Settings + System Manager) -->
+			<div class="row mt-0" id="row-tds-fixables" style="display: none;">
 				<div class="col-lg-12">
 					<div class="frappe-card" id="section-tds-fixables">
 						<div class="card-header d-flex justify-content-between align-items-center section-header"
@@ -1456,19 +1456,63 @@ class BNSDashboard {
 	}
 
 	async refresh() {
-		await Promise.all([
-			this.load_expense_accounts(),
+		// Resolve which fixables the user may see (BNS Settings toggle + System
+		// Manager) BEFORE loading them, then show/hide the sections accordingly.
+		await this.load_fixables_config();
+		const exp = this._expense_fixables_on();
+		const tds = this._tds_fixables_on();
+
+		const tasks = [
 			this.load_health_overview(),
 			this.load_summary(),
-			this.load_items_missing_expense_account(),
-			this.load_pi_wrong_expense_account(),
-			this.load_all_expense_items(),
 			this.load_food_company_addresses(),
 			this.load_unlinked_pan(),
 			this.load_transfer_mismatches(),
 			this.load_srbnb_reconciliation(),
-			this.load_tds_fixables(),
-		]);
+		];
+		if (exp) {
+			tasks.push(
+				this.load_expense_accounts(),
+				this.load_items_missing_expense_account(),
+				this.load_pi_wrong_expense_account(),
+				this.load_all_expense_items()
+			);
+		}
+		if (tds) {
+			tasks.push(this.load_tds_fixables());
+		}
+		await Promise.all(tasks);
+	}
+
+	// =====================================================================
+	// Dashboard Fixables gating (BNS Settings toggle + System Manager)
+	// =====================================================================
+
+	async load_fixables_config() {
+		try {
+			const result = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_fixables_config",
+			});
+			this.fixables_config = result.message || {};
+		} catch (e) {
+			this.fixables_config = {};
+		}
+		this._apply_fixables_gating();
+	}
+
+	_expense_fixables_on() {
+		return !!(this.fixables_config && this.fixables_config.expense_enabled);
+	}
+
+	_tds_fixables_on() {
+		return !!(this.fixables_config && this.fixables_config.tds_enabled);
+	}
+
+	_apply_fixables_gating() {
+		// Expense Item Fixables card (hide its whole column when off)
+		this.wrapper.find("#col-expense-fixables").toggle(this._expense_fixables_on());
+		// TDS Category Fixables row (only present in the DOM for System Managers)
+		this.wrapper.find("#row-tds-fixables").toggle(this._tds_fixables_on());
 	}
 
 	// =====================================================================

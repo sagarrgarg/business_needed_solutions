@@ -38,6 +38,9 @@
   "tds_backfill_section",
   "enable_tds_backfill",
   "tds_backfill_roles",
+  "dashboard_fixables_section",
+  "enable_expense_item_fixables",
+  "enable_tds_category_fixables",
   "purchase_attachment_section",
   "enforce_purchase_document_attachments",
   "purchase_attachment_cutoff_date",
@@ -294,6 +297,25 @@
    "label": "Allowed Roles",
    "options": "Has Role",
    "description": "Roles that may backfill TDS on submitted PIs, in addition to System Manager."
+  },
+  {
+   "fieldname": "dashboard_fixables_section",
+   "fieldtype": "Section Break",
+   "label": "BNS Dashboard Fixables"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_expense_item_fixables",
+   "fieldtype": "Check",
+   "label": "Enable Expense Item Fixables",
+   "description": "When ON, the Expense Item Fixables tools on the BNS Dashboard are available to System Manager only. Purchase Invoice expense-account corrections are restricted to the current fiscal year; older invoices are never listed and are refused server-side."
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_tds_category_fixables",
+   "fieldtype": "Check",
+   "label": "Enable TDS Category Fixables",
+   "description": "When ON, the TDS Category Fixables tools on the BNS Dashboard are available to System Manager only. Purchase Invoice TDS-category corrections are restricted to the current fiscal year; older invoices are never listed and are refused server-side."
   },
   {
    "fieldname": "purchase_attachment_section",

@@ -27,7 +27,7 @@ app_license = "Commercial"
 # include js, css files in header of desk.html
 # app_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
 app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=122",
-                  "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=218",
+                  "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=219",
                   "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=52",
                   "/assets/business_needed_solutions/js/delivery_note.js?v=137",
                   "/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=38",
@@ -36,7 +36,6 @@ app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=
                   "/assets/business_needed_solutions/js/pan_gstin_mismatch_banner.js?v=1",
                   "/assets/business_needed_solutions/js/bulk_cancel.js?v=1",
                   "/assets/business_needed_solutions/js/posting_time_edit.js?v=1",
-                  "/assets/business_needed_solutions/js/tds_backfill.js?v=1",
                 ]
 
 # include js, css files in header of web template
