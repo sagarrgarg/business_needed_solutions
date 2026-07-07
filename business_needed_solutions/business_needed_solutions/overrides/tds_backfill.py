@@ -12,8 +12,8 @@ Paid / partly-paid PIs are UNRECONCILED first (native Unreconcile Payment) so th
 outstanding is free before TDS reduces it. The category comes from the supplier's
 `tax_withholding_category`.
 
-Gated by BNS Settings `enable_tds_backfill` + `tds_backfill_roles` (System Manager
-always allowed). Frozen accounting periods are refused. PREVIEW first.
+Gated by BNS Settings `enable_tds_category_fixables` + `tds_backfill_roles` (System
+Manager always allowed). Frozen accounting periods are refused. PREVIEW first.
 """
 
 import frappe
@@ -22,7 +22,9 @@ from frappe.utils import cint, flt, getdate
 
 
 def _feature_enabled() -> bool:
-    return bool(frappe.db.get_single_value("BNS Settings", "enable_tds_backfill", cache=True))
+    # Merged toggle: one BNS Settings switch governs both the dashboard TDS
+    # Category Fixables and the per-PI TDS backfill API.
+    return bool(frappe.db.get_single_value("BNS Settings", "enable_tds_category_fixables", cache=True))
 
 
 def _get_roles():
