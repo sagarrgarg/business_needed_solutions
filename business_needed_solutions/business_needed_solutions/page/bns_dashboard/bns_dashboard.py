@@ -9,7 +9,7 @@ Provides data and actions for the BNS Dashboard page.
 
 import frappe
 from frappe import _
-from frappe.utils import flt, cstr
+from frappe.utils import flt, cstr, cint
 
 
 # -------------------------------------------------------------------
@@ -652,10 +652,16 @@ def set_supplier_tds_category(supplier, tax_withholding_category):
 
 
 @frappe.whitelist()
-def get_pis_with_wrong_tds_category(company=None):
-	"""Submitted Purchase Invoices in the CURRENT fiscal year whose
-	tax_withholding_category disagrees with the supplier's configured
-	category (covers both blank-on-PI and genuinely-different)."""
+def get_pis_needing_tds_fix(company=None):
+	"""Submitted Purchase Invoices in the CURRENT fiscal year whose TDS is not
+	fully applied yet -- shown until every field and the GL are fixed. A PI needs
+	fixing when the supplier has a TDS Category AND any of:
+	  - the PI's category disagrees with the supplier's, OR
+	  - apply_tds is off (TDS never applied), OR
+	  - a TDS row exists but taxes_and_charges_deducted is 0 (old-backfill bug).
+	Applying the fix (below) sets the category, applies TDS via ERPNext's
+	cumulative logic, posts the incremental GL, and marks nothing-due PIs done --
+	so they drop off this list."""
 	_require_tds_fixables()
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
@@ -670,7 +676,12 @@ def get_pis_with_wrong_tds_category(company=None):
 			pi.supplier_name,
 			pi.apply_tds,
 			pi.tax_withholding_category AS pi_category,
-			s.tax_withholding_category AS supplier_category
+			pi.taxes_and_charges_deducted,
+			s.tax_withholding_category AS supplier_category,
+			EXISTS(
+				SELECT 1 FROM `tabPurchase Taxes and Charges` t
+				WHERE t.parent = pi.name AND t.is_tax_withholding_account = 1
+			) AS has_tds_row
 		FROM `tabPurchase Invoice` pi
 		INNER JOIN `tabSupplier` s ON s.name = pi.supplier
 		WHERE
@@ -680,10 +691,30 @@ def get_pis_with_wrong_tds_category(company=None):
 			AND pi.posting_date <= %(fy_end)s
 			AND s.tax_withholding_category IS NOT NULL
 			AND s.tax_withholding_category != ''
-			AND COALESCE(pi.tax_withholding_category, '') != s.tax_withholding_category
-		ORDER BY pi.posting_date DESC, pi.name
+			AND (
+				COALESCE(pi.tax_withholding_category, '') != s.tax_withholding_category
+				OR pi.apply_tds = 0
+				OR (
+					pi.apply_tds = 1
+					AND IFNULL(pi.taxes_and_charges_deducted, 0) = 0
+					AND EXISTS(
+						SELECT 1 FROM `tabPurchase Taxes and Charges` t
+						WHERE t.parent = pi.name AND t.is_tax_withholding_account = 1
+					)
+				)
+			)
+		ORDER BY pi.supplier, pi.posting_date, pi.name
 		LIMIT 2000
 	""", {"company": company, "fy_start": fy_start, "fy_end": fy_end}, as_dict=True)
+
+	for r in rows:
+		r["correct_category"] = r["supplier_category"]
+		if cstr(r.get("pi_category") or "") != cstr(r["supplier_category"]):
+			r["reason"] = _("Wrong / missing category")
+		elif not cint(r.get("apply_tds")):
+			r["reason"] = _("TDS not applied")
+		else:
+			r["reason"] = _("Deducted total missing")
 
 	return {
 		"count": len(rows),
@@ -694,87 +725,104 @@ def get_pis_with_wrong_tds_category(company=None):
 	}
 
 
+def _fix_one_pi_tds(name):
+	"""Fully fix TDS on one submitted PI (current-FY guarded): align the category
+	to the supplier, then either repair the header split (a TDS row already
+	exists) or run the full backfill -- add the TDS row + incremental GL, or mark
+	a nothing-due invoice as applied. Returns the backfill/repair result dict."""
+	from business_needed_solutions.business_needed_solutions.overrides.tds_backfill import (
+		backfill_tds_on_pi, repair_tds_totals_on_pi, _existing_tds_row,
+	)
+
+	pi = frappe.get_doc("Purchase Invoice", name)
+	if pi.docstatus != 1:
+		return {"changed": False, "reason": _("Not submitted")}
+
+	fy_start, fy_end = _current_fiscal_year(pi.company)
+	if not (str(fy_start) <= str(pi.posting_date) <= str(fy_end)):
+		return {"changed": False, "reason": _("Outside current fiscal year")}
+
+	supplier_cat = frappe.db.get_value("Supplier", pi.supplier, "tax_withholding_category")
+	if not supplier_cat:
+		return {"changed": False, "reason": _("Supplier has no TDS Category")}
+
+	# Align the PI category to the supplier's before computing/applying TDS.
+	if cstr(pi.tax_withholding_category or "") != cstr(supplier_cat):
+		frappe.db.set_value("Purchase Invoice", name, "tax_withholding_category", supplier_cat, update_modified=False)
+
+	if _existing_tds_row(pi):
+		# TDS row already present -> only repair the header split totals if needed.
+		return repair_tds_totals_on_pi(name)
+
+	# No TDS row -> full backfill (unreconcile + row + incremental GL + outstanding,
+	# or mark as applied when nothing is due).
+	return backfill_tds_on_pi(name)
+
+
 @frappe.whitelist()
-def bulk_fix_pi_tds_category(items):
-	"""Enqueue a background job that corrects the tax_withholding_category
-	header field on submitted Purchase Invoices to match the supplier's
-	configured category. This is a metadata correction only -- it does NOT
-	recompute TDS amounts or touch GL (use the per-PI TDS backfill tool for
-	that). Current-fiscal-year PIs only; System Manager only."""
+def fix_selected_pis_tds(items):
+	"""Apply TDS to the selected Purchase Invoices (category + apply_tds + TDS row
+	+ incremental GL, via the shared backfill core). A single selection runs
+	inline for immediate feedback; more than one is dispatched to a background job
+	that processes in posting-date order (so ERPNext's cumulative-threshold logic
+	sees earlier invoices already applied), in batches of 10. System Manager only,
+	current fiscal year only."""
 	_require_tds_fixables()
 	import json
 	if isinstance(items, str):
 		items = json.loads(items)
 
-	validation_errors = []
-	pi_updates = {}
-	for item in items:
-		pi_name = item.get("purchase_invoice")
-		correct_category = item.get("correct_category")
-		if not pi_name or not correct_category:
-			validation_errors.append({
-				"purchase_invoice": pi_name,
-				"error": _("Missing purchase_invoice or correct_category"),
-			})
-			continue
-		pi_updates[pi_name] = correct_category
+	names = []
+	for it in items:
+		n = it.get("purchase_invoice") if isinstance(it, dict) else it
+		if n:
+			names.append(n)
+	names = list(dict.fromkeys(names))  # de-dupe, preserve order
 
-	if not pi_updates:
-		return {"status": "error", "validation_errors": validation_errors, "total_invoices": 0}
+	if not names:
+		return {"status": "error", "total_invoices": 0}
 
+	if len(names) == 1:
+		# Single invoice -> run inline and return the result immediately.
+		result = _fix_one_pi_tds(names[0])
+		return {"status": "done", "total_invoices": 1, "result": result}
+
+	# More than one -> background job, batch size 10, with realtime progress.
 	frappe.enqueue(
-		_process_pi_tds_category_fix,
+		_process_pi_tds_fix,
 		queue="long",
-		timeout=1500,
-		pi_updates=pi_updates,
-		company=frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company"),
+		timeout=3600,
+		pi_names=names,
 		user=frappe.session.user,
 	)
-
-	return {
-		"status": "queued",
-		"total_invoices": len(pi_updates),
-		"validation_errors": validation_errors,
-	}
+	return {"status": "queued", "total_invoices": len(names)}
 
 
-def _process_pi_tds_category_fix(pi_updates, company, user):
-	"""Background worker: db_set tax_withholding_category on each PI header
-	(current-FY guarded), committing per batch and emitting realtime progress."""
-	total = len(pi_updates)
+def _process_pi_tds_fix(pi_names, user):
+	"""Background worker: apply TDS to each PI in (supplier, posting-date) order so
+	the cumulative-threshold logic sees earlier invoices already applied. Commits
+	and emits realtime progress every PI_FIX_BATCH_SIZE (10)."""
+	ordered = frappe.get_all(
+		"Purchase Invoice",
+		filters={"name": ["in", pi_names]},
+		fields=["name"],
+		order_by="supplier asc, posting_date asc, name asc",
+	)
+	names = [r.name for r in ordered] or list(pi_names)
+
+	total = len(names)
 	done = 0
 	success_count = 0
 	errors = []
 
-	# Re-derive the FY window in the worker so a stale client can't push
-	# out-of-year invoices through.
-	pi_list = list(pi_updates.items())
-
-	for idx, (pi_name, correct_category) in enumerate(pi_list, 1):
+	for idx, name in enumerate(names, 1):
 		try:
-			pi = frappe.db.get_value(
-				"Purchase Invoice", pi_name,
-				["docstatus", "company", "posting_date"], as_dict=True,
-			)
-			if not pi:
-				errors.append({"purchase_invoice": pi_name, "error": _("Not found")})
-			elif pi.docstatus != 1:
-				errors.append({"purchase_invoice": pi_name, "error": _("Not submitted")})
-			else:
-				fy_start, fy_end = _current_fiscal_year(pi.company or company)
-				if not (str(fy_start) <= str(pi.posting_date) <= str(fy_end)):
-					errors.append({"purchase_invoice": pi_name, "error": _("Outside current fiscal year")})
-				elif not frappe.db.exists("Tax Withholding Category", correct_category):
-					errors.append({"purchase_invoice": pi_name, "error": _("Category {0} missing").format(correct_category)})
-				else:
-					frappe.db.set_value(
-						"Purchase Invoice", pi_name,
-						"tax_withholding_category", correct_category,
-						update_modified=True,
-					)
-					success_count += 1
+			res = _fix_one_pi_tds(name)
+			if res.get("changed"):
+				success_count += 1
 		except Exception as e:
-			errors.append({"purchase_invoice": pi_name, "error": cstr(e)})
+			frappe.db.rollback()
+			errors.append({"purchase_invoice": name, "error": cstr(e)})
 
 		done += 1
 		if idx % PI_FIX_BATCH_SIZE == 0:
@@ -782,7 +830,7 @@ def _process_pi_tds_category_fix(pi_updates, company, user):
 
 		frappe.publish_realtime(
 			"bns_tds_fix_progress",
-			{"done": done, "total": total, "current_pi": pi_name, "success_count": success_count, "error_count": len(errors)},
+			{"done": done, "total": total, "current_pi": name, "success_count": success_count, "error_count": len(errors)},
 			user=user,
 		)
 

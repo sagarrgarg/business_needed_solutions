@@ -764,7 +764,7 @@ class BNSDashboard {
 									 data-subsection="pi-wrong-tds">
 									<strong>
 										<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-pi-wrong-tds"></i>
-										${__("Purchase Invoices with Wrong TDS Category (Current FY)")}
+										${__("Purchase Invoices Needing TDS Fix (Current FY)")}
 										<span class="badge badge-warning ml-2" id="badge-pi-wrong-tds">0</span>
 									</strong>
 								</div>
@@ -943,7 +943,7 @@ class BNSDashboard {
 	async load_pi_wrong_tds() {
 		try {
 			const result = await frappe.call({
-				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_pis_with_wrong_tds_category",
+				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_pis_needing_tds_fix",
 				args: { company: this.get_company() },
 			});
 			const data = result.message || {};
@@ -958,21 +958,27 @@ class BNSDashboard {
 	render_pi_wrong_tds_table(items) {
 		const container = this.wrapper.find("#table-pi-wrong-tds");
 		if (!items || items.length === 0) {
-			container.html('<p class="text-success mb-0">' + __("All current-FY Purchase Invoices match their supplier's TDS Category!") + "</p>");
+			container.html('<p class="text-success mb-0">' + __("All current-FY Purchase Invoices have TDS fully applied!") + "</p>");
 			this.wrapper.find("#btn-bulk-fix-tds").prop("disabled", true);
 			return;
 		}
 		const self = this;
 		let html = '<table class="table table-sm"><thead><tr>';
 		html += '<th style="width: 30px;"><input type="checkbox" id="check-all-pi-tds"></th>';
-		html += "<th>" + __("PI / Supplier") + "</th><th>" + __("PI Category") + "</th><th>" + __("Correct (Supplier)") + "</th><th>" + __("Apply TDS") + "</th></tr></thead><tbody>";
+		html += "<th>" + __("PI / Supplier") + "</th><th>" + __("Reason") + "</th><th>" + __("Category") + "</th><th>" + __("Apply TDS") + "</th></tr></thead><tbody>";
 		items.forEach(function (it) {
 			html += '<tr class="row-tds-fixable">';
 			html += '<td><input type="checkbox" class="pi-tds-checkbox" data-pi="' + frappe.utils.escape_html(it.purchase_invoice) + '" data-correct-category="' + frappe.utils.escape_html(it.supplier_category) + '"></td>';
 			html += '<td><a href="/app/purchase-invoice/' + encodeURIComponent(it.purchase_invoice) + '" target="_blank">' + frappe.utils.escape_html(it.purchase_invoice) + "</a>";
 			html += '<br><small class="text-muted">' + frappe.utils.escape_html(it.supplier_name || it.supplier) + " · " + frappe.utils.escape_html(String(it.posting_date || "")) + "</small></td>";
-			html += '<td><small class="text-danger">' + frappe.utils.escape_html(it.pi_category || "—") + "</small></td>";
-			html += '<td><small class="text-success">' + frappe.utils.escape_html(it.supplier_category) + "</small></td>";
+			html += '<td><span class="badge badge-warning">' + frappe.utils.escape_html(it.reason || "") + "</span></td>";
+			html += "<td><small>";
+			if (frappe.utils.escape_html(it.pi_category || "") !== frappe.utils.escape_html(it.supplier_category || "")) {
+				html += '<span class="text-danger">' + frappe.utils.escape_html(it.pi_category || "—") + '</span> → <span class="text-success">' + frappe.utils.escape_html(it.supplier_category) + "</span>";
+			} else {
+				html += frappe.utils.escape_html(it.supplier_category || "—");
+			}
+			html += "</small></td>";
 			html += "<td>" + (parseInt(it.apply_tds) ? '<span class="badge badge-success">' + __("Yes") + "</span>" : '<span class="badge badge-secondary">' + __("No") + "</span>") + "</td>";
 			html += "</tr>";
 		});
@@ -1004,20 +1010,36 @@ class BNSDashboard {
 			return;
 		}
 		const self = this;
+		const multi = selected.length > 1;
 		frappe.confirm(
-			__("Correct the TDS Category on {0} Purchase Invoices to match their suppliers? This updates the category field only (no TDS recompute) and runs in the background.", [selected.length]),
+			__("Apply TDS to {0} Purchase Invoice(s)? This sets the supplier's TDS category, adds the TDS row and posts the incremental GL (unreconciling any payments first). {1}", [
+				selected.length,
+				multi ? __("Runs in the background in batches of 10, in posting-date order.") : __("Runs now."),
+			]),
 			async function () {
 				const btn = self.wrapper.find("#btn-bulk-fix-tds");
-				btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> ' + __("Queuing..."));
+				btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> ' + (multi ? __("Queuing...") : __("Applying...")));
 				try {
 					const result = await frappe.call({
-						method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.bulk_fix_pi_tds_category",
+						method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.fix_selected_pis_tds",
 						args: { items: selected },
 					});
-					const data = result.message;
+					const data = result.message || {};
 					if (data.status === "error") {
-						frappe.msgprint({ title: __("Validation failed"), message: __("No fixable invoices found."), indicator: "red" });
+						frappe.msgprint({ title: __("Nothing to fix"), message: __("No fixable invoices found."), indicator: "red" });
 						btn.prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix Selected"));
+						return;
+					}
+					if (data.status === "done") {
+						// Single invoice ran inline -> immediate feedback.
+						const r = data.result || {};
+						if (r.changed) {
+							frappe.show_alert({ message: __("TDS applied ({0})", [r.reason || __("done")]), indicator: "green" });
+						} else {
+							frappe.show_alert({ message: __("No change: {0}", [r.reason || ""]), indicator: "orange" }, 6);
+						}
+						btn.prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix Selected"));
+						self.load_tds_fixables();
 						return;
 					}
 					self.show_tds_fix_progress(data.total_invoices);

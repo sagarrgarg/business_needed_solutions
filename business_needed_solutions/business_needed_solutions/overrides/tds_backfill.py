@@ -170,17 +170,38 @@ def apply_tds_backfill(name):
             frappe.PermissionError,
         )
 
+    return backfill_tds_on_pi(name)
+
+
+def backfill_tds_on_pi(name):
+    """Core TDS backfill on a submitted PI. NO permission gate -- every caller
+    (the whitelisted apply_tds_backfill, and the BNS Dashboard TDS fixer) applies
+    its own gate first. Adds the TDS row, recomputes/persists totals (including
+    taxes_and_charges_deducted), posts only the incremental TDS GL, and refreshes
+    outstanding. Returns a result dict; never throws for the 'already has TDS' or
+    'nothing due' cases -- those are normal outcomes when sweeping many PIs."""
     pi = frappe.get_doc("Purchase Invoice", name)
     if pi.docstatus != 1:
         frappe.throw(_("Purchase Invoice {0} is not submitted.").format(name))
     _check_not_frozen(pi.posting_date)
     if _existing_tds_row(pi):
-        frappe.throw(_("{0} already has a tax-withholding row.").format(name))
+        return {"changed": False, "reason": _("Already has a tax-withholding row.")}
 
     category = _resolve_category(pi)
     _tax_row, tds = _compute_tds(pi, category)
     if flt(tds) <= 0:
-        return {"changed": False, "reason": "TDS computes to 0 (threshold not crossed)."}
+        # No TDS due (cumulative threshold not crossed). Mark as processed so the
+        # invoice drops off the "needs fix" list -- no TDS row, no GL posted.
+        frappe.db.set_value(
+            "Purchase Invoice", name,
+            {"apply_tds": 1, "tax_withholding_category": category},
+            update_modified=True,
+        )
+        frappe.db.commit()
+        return {
+            "changed": True, "tds_amount": 0.0,
+            "reason": _("No TDS due (threshold not crossed); marked as applied."),
+        }
 
     # 1) unreconcile any payment/JE allocated against this PI
     unrec = _unreconcile_paying_vouchers(pi)
@@ -221,6 +242,36 @@ def apply_tds_backfill(name):
         "unreconciled": unrec,
         "new_grand_total": flt(pi.grand_total),
     }
+
+
+def repair_tds_totals_on_pi(name):
+    """Fix an invoice that already carries a TDS row but whose header split fields
+    (taxes_and_charges_deducted / added) were never persisted by the old backfill.
+    Recomputes the split from the existing tax rows -- no new row, no GL change."""
+    pi = frappe.get_doc("Purchase Invoice", name)
+    if not _existing_tds_row(pi):
+        return {"changed": False, "reason": _("No TDS row to repair.")}
+    added = sum(flt(t.tax_amount) for t in pi.taxes if t.add_deduct_tax == "Add")
+    base_added = sum(flt(t.base_tax_amount) for t in pi.taxes if t.add_deduct_tax == "Add")
+    deducted = sum(flt(t.tax_amount) for t in pi.taxes if t.add_deduct_tax == "Deduct")
+    base_deducted = sum(flt(t.base_tax_amount) for t in pi.taxes if t.add_deduct_tax == "Deduct")
+    if flt(pi.taxes_and_charges_deducted) == deducted and cint(pi.apply_tds):
+        return {"changed": False, "reason": _("Totals already correct.")}
+    frappe.db.set_value(
+        "Purchase Invoice", name,
+        {
+            "taxes_and_charges_added": added,
+            "base_taxes_and_charges_added": base_added,
+            "taxes_and_charges_deducted": deducted,
+            "base_taxes_and_charges_deducted": base_deducted,
+            "total_taxes_and_charges": added - deducted,
+            "base_total_taxes_and_charges": base_added - base_deducted,
+            "apply_tds": 1,
+        },
+        update_modified=True,
+    )
+    frappe.db.commit()
+    return {"changed": True, "taxes_and_charges_deducted": deducted}
 
 
 def _unreconcile_paying_vouchers(pi):
