@@ -253,6 +253,7 @@ def _persist_tds_row_and_totals(pi, tds_row):
     tds_row.parent = pi.name
     tds_row.parenttype = "Purchase Invoice"
     tds_row.parentfield = "taxes"
+    tds_row.docstatus = 1  # child of a submitted parent
     if not tds_row.get("idx"):
         tds_row.idx = len(pi.get("taxes") or [])
     tds_row.db_insert()
@@ -265,6 +266,15 @@ def _persist_tds_row_and_totals(pi, tds_row):
         "outstanding_amount",
     ]
     updates = {f: pi.get(f) for f in header_fields if pi.get(f) is not None}
+    # Persist the flags too, else the DB shows apply_tds=0 with a TDS row present
+    # -- which also excludes this PI from ERPNext's cumulative query (it filters
+    # apply_tds=1) for later invoices in the FY.
+    updates["apply_tds"] = 1
+    updates["tax_withholding_category"] = pi.get("tax_withholding_category")
+    if pi.get("round_off_applicable_accounts_for_tax_withholding"):
+        updates["round_off_applicable_accounts_for_tax_withholding"] = pi.get(
+            "round_off_applicable_accounts_for_tax_withholding"
+        )
     frappe.db.set_value("Purchase Invoice", pi.name, updates, update_modified=True)
 
 
@@ -287,7 +297,6 @@ def _post_incremental_tds_gl(pi, tds_account, tds_amt):
                 "cost_center": pi.get("cost_center"),
                 "remarks": _("TDS backfill"),
             },
-            item=pi,
         ),
         pi.get_gl_dict(
             {
@@ -298,7 +307,6 @@ def _post_incremental_tds_gl(pi, tds_account, tds_amt):
                 "cost_center": pi.get("cost_center"),
                 "remarks": _("TDS backfill"),
             },
-            item=pi,
         ),
     ]
     make_gl_entries(gl, merge_entries=False)
