@@ -117,6 +117,37 @@ def bns_update_posting_time(doctype: str, docname: str, posting_date: str, posti
     if old_dt == new_dt:
         return {"changed": False}
 
+    # Guards (checked BEFORE the header is touched, so a rejected edit leaves the
+    # document untouched). The rebuild uses ERPNext's native recreate, which:
+    #   - requires stock movement (RIV rejects update_stock=off invoices), and
+    #   - rejects serial/batch items (recreate_stock_ledgers is disallowed there).
+    has_sle = bool(
+        frappe.db.exists(
+            "Stock Ledger Entry",
+            {"voucher_type": doctype, "voucher_no": docname, "is_cancelled": 0},
+        )
+    )
+    if not has_sle:
+        frappe.throw(
+            _("{0} {1} has no stock movement (Update Stock is off). Posting-time "
+              "rebuild applies to stock vouchers only.").format(doctype, docname)
+        )
+    item_codes = list(
+        {(it.get("item_code") or "").strip() for it in (doc.get("items") or []) if it.get("item_code")}
+    )
+    if item_codes:
+        serial_batch = frappe.get_all(
+            "Item",
+            filters={"name": ("in", item_codes)},
+            or_filters={"has_serial_no": 1, "has_batch_no": 1},
+            pluck="name",
+        )
+        if serial_batch:
+            frappe.throw(
+                _("Posting-time rebuild is not supported for serial/batch items ({0}); "
+                  "use cancel &amp; amend for these.").format(", ".join(serial_batch))
+            )
+
     # 1) Move the voucher header to the new posting datetime. The reposting job
     #    reloads the doc, so recreate uses this new time.
     frappe.db.set_value(
