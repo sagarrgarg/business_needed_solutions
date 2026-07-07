@@ -184,6 +184,13 @@ frappe.query_reports["Party GL"] = {
 			depends_on: "eval:doc.itemised",
 			description: __("Show combined GST % per item (CGST+SGST or IGST). Itemised View must be on."),
 		},
+		{
+			fieldname: "show_tds_breakup",
+			label: __("Show TDS/TCS Breakup"),
+			fieldtype: "Check",
+			default: 1,
+			description: __("In Consolidated view, split each invoice's TDS/TCS out of the merged party line into its own labelled line (invoice shown at gross)."),
+		},
 	],
 	
 	onload: function(report) {

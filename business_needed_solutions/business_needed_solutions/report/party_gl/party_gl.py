@@ -8,7 +8,7 @@ from collections import OrderedDict
 import frappe
 from frappe import _, _dict
 from frappe.query_builder import Criterion
-from frappe.utils import cstr, fmt_money, getdate
+from frappe.utils import cstr, flt, fmt_money, getdate
 
 from erpnext import get_company_currency, get_default_company
 from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
@@ -157,6 +157,12 @@ def get_result(filters, account_details):
 
 	data = get_data_with_opening_closing(filters, account_details, accounting_dimensions, gl_entries)
 
+	# Split each invoice's tax-withholding (TDS/TCS) leg out of the merged party
+	# row into its own labelled line -- BEFORE the running balance is computed, so
+	# the balance flows gross -> net correctly.
+	if filters.get("show_tds_breakup", 1):
+		data = inject_tds_breakup(data, filters)
+
 	result = get_result_as_list(data, filters)
 
 	if filters.get("itemised"):
@@ -251,6 +257,10 @@ def inject_item_rows(result, filters):
 	new_result = []
 	for d in result:
 		new_result.append(d)
+		# TDS/TCS breakup rows carry an invoice voucher_no but must NOT get item
+		# sub-rows appended under them.
+		if d.get("is_tds_row"):
+			continue
 		vno = d.get("voucher_no")
 		if vno and vno in items_map:
 			currency = d.get("account_currency")
@@ -340,6 +350,131 @@ def _fetch_gst_rates(tax_table, parents):
 			elif isinstance(val, dict):
 				rate = val.get("tax_rate") or 0
 			parent_map[item_code] = parent_map.get(item_code, 0) + (rate or 0)
+	return out
+
+
+def _section_code(category):
+	"""Extract a short section label from a Tax Withholding Category name, e.g.
+	'TDS - 194I(b) - Individual' -> '194I(b)', 'TCS - Section 206C(H)' -> 'Section
+	206C(H)'. Falls back to the full name."""
+	if not category:
+		return ""
+	parts = [p.strip() for p in str(category).split(" - ") if p.strip()]
+	return parts[1] if len(parts) >= 2 else str(category)
+
+
+def _load_withholding(wh, tax_table, inv_table, parents):
+	"""Populate `wh` {voucher_no: {amount, account, section, is_return}} for the
+	given invoices, using ONLY tax rows flagged is_tax_withholding_account = 1 --
+	ERPNext's authoritative TDS/TCS marker (not taxes_and_charges_deducted, which
+	is any deduction, nor the raw GL debit, which could be a return/payment)."""
+	if not parents:
+		return
+	rows = frappe.db.sql(
+		f"""select parent, sum(base_tax_amount) as amount, max(account_head) as account
+		from `{tax_table}`
+		where parent in %(p)s and is_tax_withholding_account = 1
+		group by parent having amount > 0""",
+		{"p": list(parents)},
+		as_dict=1,
+	)
+	if not rows:
+		return
+	meta = {
+		m.name: m
+		for m in frappe.db.sql(
+			f"""select name, tax_withholding_category as section, is_return
+			from `{inv_table}` where name in %(p)s""",
+			{"p": [r.parent for r in rows]},
+			as_dict=1,
+		)
+	}
+	for r in rows:
+		m = meta.get(r.parent, {})
+		wh[r.parent] = {
+			"amount": flt(r.amount),
+			"account": r.account,
+			"section": _section_code(m.get("section")),
+			"is_return": m.get("is_return"),
+		}
+
+
+def inject_tds_breakup(data, filters):
+	"""Consolidated view merges an invoice's tax-withholding leg into the invoice's
+	party row (a debit sitting next to the credit, unlabelled). Split it into the
+	gross invoice line + a clearly-labelled 'TDS/TCS u/s <section>' line.
+
+	The split is balance-neutral: for any invoice with withholding W we present the
+	party's normal-side line grossed up by whatever part of W was netted into it,
+	and a separate withholding line carrying W as a party debit. Only applied in
+	Consolidated mode (where the merge happens); returns are left untouched.
+	"""
+	if filters.get("group_by") != "Group by Voucher (Consolidated)":
+		return data
+
+	pi_nos, si_nos = set(), set()
+	for d in data:
+		vno, vt = d.get("voucher_no"), d.get("voucher_type")
+		if not vno:
+			continue
+		if vt == "Purchase Invoice":
+			pi_nos.add(vno)
+		elif vt == "Sales Invoice":
+			si_nos.add(vno)
+	if not pi_nos and not si_nos:
+		return data
+
+	wh = {}
+	_load_withholding(wh, "tabPurchase Taxes and Charges", "tabPurchase Invoice", pi_nos)
+	_load_withholding(wh, "tabSales Taxes and Charges", "tabSales Invoice", si_nos)
+	if not wh:
+		return data
+
+	out = []
+	for d in data:
+		out.append(d)
+		vno, vt = d.get("voucher_no"), d.get("voucher_type")
+		info = wh.get(vno) if vno else None
+		if not info or vt not in ("Purchase Invoice", "Sales Invoice") or d.get("is_tds_row"):
+			continue
+		W = flt(info.get("amount"))
+		# Skip nothing-due and returns (sign reversal on returns -- handled later).
+		if W <= 0 or info.get("is_return"):
+			continue
+
+		# Move the withholding portion off the invoice's party row: whatever part of
+		# W currently sits in the debit is removed; the rest is added back to the
+		# credit so the invoice shows gross. (Works whether TDS was posted as a
+		# separate party debit -- backfill -- or netted into the credit -- native.)
+		def _degross(dr_key, cr_key):
+			dr, cr = flt(d.get(dr_key)), flt(d.get(cr_key))
+			taken = min(dr, W)
+			d[dr_key] = dr - taken
+			d[cr_key] = cr + (W - taken)
+
+		_degross("debit", "credit")
+		_degross("debit_in_account_currency", "credit_in_account_currency")
+
+		kind = "TCS" if vt == "Sales Invoice" else "TDS"
+		section = info.get("section")
+		label = f"{kind} u/s {section}" if section else kind
+		out.append(_dict({
+			"is_tds_row": 1,
+			"posting_date": d.get("posting_date"),
+			"voucher_no": vno,
+			"voucher_type": "",  # not an invoice -> skip relabel / item-inject / collection
+			"voucher_subtype": label,
+			"account": d.get("account"),
+			"party": d.get("party"),
+			"party_type": d.get("party_type"),
+			"debit": W,
+			"credit": 0.0,
+			"debit_in_account_currency": W,
+			"credit_in_account_currency": 0.0,
+			"account_currency": d.get("account_currency"),
+			"remarks": _("Withheld against {0}").format(vno),
+			"cost_center": d.get("cost_center"),
+		}))
 	return out
 
 
