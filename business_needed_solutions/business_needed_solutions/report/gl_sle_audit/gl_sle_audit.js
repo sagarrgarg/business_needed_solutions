@@ -92,8 +92,56 @@ frappe.query_reports["GL SLE Audit"] = {
             () => bns_repair_action(report, false, { fix_missing: 0, fix_imbalanced: 0, fix_cancelled_active: 1 }),
             __("Repair"),
         );
+
+        report.page.add_inner_button(
+            __("Preview Posting Mismatch Heal"),
+            () => bns_heal_posting_mismatch(report, true),
+            __("Repair"),
+        );
+
+        report.page.add_inner_button(
+            __("Heal Posting Mismatch"),
+            () => bns_heal_posting_mismatch(report, false),
+            __("Repair"),
+        );
     },
 };
+
+function bns_heal_posting_mismatch(report, dry_run) {
+    const rows = (report.data || []).filter(
+        (r) => r && r.doctype && r.name && (r.status || "").indexOf("Posting Date/Time Mismatch") !== -1
+    );
+    if (!rows.length) {
+        frappe.msgprint(__("No 'Posting Date/Time Mismatch' rows in the current report."));
+        return;
+    }
+    const docs = rows.map((r) => ({ doctype: r.doctype, name: r.name }));
+    const msg = dry_run
+        ? __("Preview posting-datetime heal for {0} document(s)?", [docs.length])
+        : __("Sync GL/SLE posting datetime to the header and repost for {0} document(s)? This rewrites ledgers.", [docs.length]);
+    frappe.confirm(msg, function () {
+        frappe.call({
+            method: "business_needed_solutions.business_needed_solutions.gl_sle_audit.heal_posting_mismatch",
+            args: { docs: JSON.stringify(docs), dry_run: dry_run ? 1 : 0 },
+            freeze: true,
+            freeze_message: dry_run ? __("Previewing...") : __("Healing &amp; reposting..."),
+            callback: function (r) {
+                const m = r.message || {};
+                const lines = (m.results || []).slice(0, 40).map(function (x) {
+                    if (x.error) return `${x.doctype} ${x.name}: ERROR ${x.error}`;
+                    if (dry_run) return `${x.doctype} ${x.name}: ${x.mismatch || "—"}`;
+                    return `${x.doctype} ${x.name}: ${(x.actions_run || []).join(", ") || "no change"}`;
+                });
+                frappe.msgprint({
+                    title: dry_run ? __("Posting Mismatch — Preview") : __("Posting Mismatch — Healed"),
+                    message: `<div>${__("Attempted")}: ${m.attempted || 0}</div><pre style="white-space:pre-wrap">${frappe.utils.escape_html(lines.join("\n"))}</pre>`,
+                    indicator: dry_run ? "blue" : "green",
+                });
+                if (!dry_run) report.refresh();
+            },
+        });
+    });
+}
 
 function bns_repair_action(report, dry_run, fixFlags) {
     fixFlags = fixFlags || { fix_missing: 1, fix_imbalanced: 0 };
