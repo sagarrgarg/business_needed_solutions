@@ -1,5 +1,8 @@
 frappe.ui.form.on('Purchase Receipt', {
     refresh: function(frm) {
+        // Post-submit posting-time edit (role-gated via BNS Settings)
+        bns_maybe_add_posting_time_button(frm);
+
         // Show button to convert to BNS Internal if supplier_delivery_note exists and GSTIN matches
         // Only for same GSTIN transfers (from DN)
         if (frm.doc.docstatus == 1 && frm.doc.supplier_delivery_note) {

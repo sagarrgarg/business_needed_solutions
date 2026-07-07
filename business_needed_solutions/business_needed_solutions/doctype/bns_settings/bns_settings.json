@@ -32,6 +32,9 @@
   "negative_stock_cutoff_date",
   "column_break_ns_override",
   "negative_stock_override_roles",
+  "posting_time_edit_section",
+  "enable_posting_time_edit",
+  "posting_time_edit_roles",
   "purchase_attachment_section",
   "enforce_purchase_document_attachments",
   "purchase_attachment_cutoff_date",
@@ -248,6 +251,26 @@
    "fieldtype": "Table MultiSelect",
    "label": "Override Roles",
    "options": "Has Role"
+  },
+  {
+   "fieldname": "posting_time_edit_section",
+   "fieldtype": "Section Break",
+   "label": "Post-Submit Posting Time Edit"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_posting_time_edit",
+   "fieldtype": "Check",
+   "label": "Allow Editing Posting Time After Submit",
+   "description": "When ON, users with the roles below (and System Manager) can change posting date/time on a submitted stock voucher; the change reposts the stock ledger so it re-sorts and re-values. Frozen accounting periods are always refused. Use for the 'purchase keyed in the evening, sales all day' negative-stock pattern."
+  },
+  {
+   "depends_on": "eval:doc.enable_posting_time_edit",
+   "fieldname": "posting_time_edit_roles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Allowed Roles",
+   "options": "Has Role",
+   "description": "Roles that may edit posting time after submit, in addition to System Manager."
   },
   {
    "fieldname": "purchase_attachment_section",

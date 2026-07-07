@@ -71,6 +71,9 @@ frappe.ui.form.on('Purchase Invoice', {
             }, __('Create'));
         }
 
+        // Post-submit posting-time edit (role-gated via BNS Settings)
+        bns_maybe_add_posting_time_button(frm);
+
         // Show button to convert to BNS Internal if supplier is BNS internal but PI is not marked
         // OR if PI is marked but status is not "BNS Internally Transferred"
         if (frm.doc.docstatus == 1) {
