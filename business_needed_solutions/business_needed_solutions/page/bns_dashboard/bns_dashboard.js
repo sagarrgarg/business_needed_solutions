@@ -289,6 +289,7 @@ class BNSDashboard {
 								<h5 class="mb-0">
 									<i class="fa fa-chevron-down section-toggle collapsed" id="toggle-expense-fixables"></i>
 									${__("Expense Item Fixables")}
+									<span class="badge badge-danger ml-2">${__("SysMgr / Expense Role")}</span>
 								</h5>
 							</div>
 							<div class="card-body section-content" id="content-expense-fixables" style="display: none;">
@@ -338,6 +339,9 @@ class BNSDashboard {
 											<button class="btn btn-secondary btn-xs ml-2" id="btn-select-all-fixable">
 												${__("Select All Fixable")}
 											</button>
+											<label class="ml-3" id="wrap-include-prior-fy-expense" style="display: none; font-weight: normal;">
+												<input type="checkbox" id="chk-include-prior-fy-expense"> ${__("Include prior fiscal years (System Manager)")}
+											</label>
 										</div>
 										<div id="table-pi-wrong">
 											<p class="text-muted">${__("Loading...")}</p>
@@ -1380,6 +1384,10 @@ class BNSDashboard {
 			self.wrapper.find(".pi-fix-checkbox:not(:disabled)").prop("checked", true);
 			self.update_bulk_fix_button();
 		});
+		// System-Manager-only: reload the expense list to include prior fiscal years
+		this.wrapper.find("#chk-include-prior-fy-expense").on("change", function () {
+			self.load_pi_wrong_expense_account();
+		});
 
 		// TDS Category Fixables (SysMgr / Backfill Role; elements absent otherwise)
 		this.wrapper.find("#btn-bulk-fix-tds").on("click", function () {
@@ -1544,14 +1552,16 @@ class BNSDashboard {
 	}
 
 	_apply_fixables_gating() {
-		// Expense Item Fixables card (hide its whole column when off)
+		// Expense Item Fixables card (hide its whole column when off). Shown when
+		// the toggle is on AND the user is a System Manager or Additional Expense Role.
 		this.wrapper.find("#col-expense-fixables").toggle(this._expense_fixables_on());
 		// TDS Category Fixables row: shown when the toggle is on AND the user is a
 		// System Manager or holds an Additional Backfill Role.
 		this.wrapper.find("#row-tds-fixables").toggle(this._tds_fixables_on());
-		// The "include prior fiscal years" control is System Manager only.
+		// The "include prior fiscal years" controls are System Manager only.
 		const sysmgr = !!(this.fixables_config && this.fixables_config.is_system_manager);
 		this.wrapper.find("#wrap-include-prior-fy-tds").toggle(this._tds_fixables_on() && sysmgr);
+		this.wrapper.find("#wrap-include-prior-fy-expense").toggle(this._expense_fixables_on() && sysmgr);
 	}
 
 	// =====================================================================
@@ -1821,9 +1831,10 @@ class BNSDashboard {
 
 	async load_pi_wrong_expense_account() {
 		try {
+			const include_prior = this.wrapper.find("#chk-include-prior-fy-expense").is(":checked") ? 1 : 0;
 			const result = await frappe.call({
 				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_purchase_invoices_with_wrong_expense_account",
-				args: { company: this.get_company() },
+				args: { company: this.get_company(), include_prior_fy: include_prior },
 			});
 			this.render_pi_wrong_table(result.message);
 		} catch (e) {
@@ -1862,7 +1873,11 @@ class BNSDashboard {
 			html += '<br><small>' + item.item_code + '</small></td>';
 			html += '<td><small class="text-danger">' + (item.pi_expense_account || "-") + '</small></td>';
 			html += '<td><small class="text-success">' + item.item_default_expense_account + '</small></td>';
-			html += '<td><span class="badge badge-success">' + __("Fixable") + '</span></td>';
+			html += '<td><span class="badge badge-success">' + __("Fixable") + '</span>';
+			if (parseInt(item.prior_fy)) {
+				html += ' <span class="badge badge-danger" title="' + __("Prior fiscal year — System Manager only") + '">' + __("Prior FY") + '</span>';
+			}
+			html += '</td>';
 			html += '</tr>';
 		});
 

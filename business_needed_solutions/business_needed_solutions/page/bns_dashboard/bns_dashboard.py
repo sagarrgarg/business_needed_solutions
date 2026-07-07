@@ -71,12 +71,40 @@ def _require_fixables_enabled(field, label):
 		)
 
 
+def _expense_roles():
+	"""Roles (besides System Manager) allowed to use Expense Item Fixables, from
+	BNS Settings > Additional Expense Fix Roles. Cached per request."""
+	key = "_bns_expense_fixables_roles"
+	if key not in frappe.flags:
+		frappe.flags[key] = set(
+			frappe.get_all(
+				"Has Role",
+				filters={"parenttype": "BNS Settings", "parentfield": "expense_fixables_roles"},
+				pluck="role",
+			)
+		)
+	return frappe.flags[key]
+
+
+def can_fix_expense():
+	"""True when Expense Item Fixables is enabled AND the user is a System Manager
+	or holds an Additional Expense Fix Role. Prior-fiscal-year edits are further
+	restricted to System Manager, enforced per-invoice."""
+	if not frappe.db.get_single_value("BNS Settings", "enable_expense_item_fixables", cache=True):
+		return False
+	roles = set(frappe.get_roles())
+	return "System Manager" in roles or bool(_expense_roles() & roles)
+
+
 def _require_expense_fixables():
-	"""Gate for every Expense Item Fixables endpoint: System Manager role AND
-	the BNS Settings toggle. Invoice edits are additionally clamped to the
-	current fiscal year at query/worker level."""
-	_require_system_manager()
-	_require_fixables_enabled("enable_expense_item_fixables", _("Expense Item Fixables"))
+	"""Gate for every Expense Item Fixables endpoint: the BNS Settings toggle AND
+	(System Manager OR an Additional Expense Fix Role). Invoices prior to the
+	current fiscal year are System Manager only, enforced at query/worker level."""
+	if not can_fix_expense():
+		frappe.throw(
+			_("Expense Item Fixables is disabled, or you don't hold an allowed role."),
+			frappe.PermissionError,
+		)
 
 
 def _require_tds_fixables():
@@ -103,7 +131,7 @@ def get_fixables_config():
 	is_sys_mgr = "System Manager" in frappe.get_roles()
 	return {
 		"is_system_manager": is_sys_mgr,
-		"expense_enabled": bool(frappe.db.get_single_value("BNS Settings", "enable_expense_item_fixables")) and is_sys_mgr,
+		"expense_enabled": bool(can_fix_expense()),
 		"tds_enabled": bool(can_backfill_tds()),
 	}
 
@@ -168,11 +196,13 @@ def set_item_expense_account(item_code, expense_account, company=None):
 	Returns:
 		dict with success status
 	"""
-	_require_dashboard_write("Item")
+	# Access is the fixables gate (toggle + System Manager or Additional Expense
+	# Role); the save runs with ignore_permissions, so we don't also require raw
+	# doctype write here (parity with the TDS fixer).
 	_require_expense_fixables()
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
-	
+
 	if not expense_account:
 		frappe.throw(_("Expense Account is required"))
 	
@@ -207,7 +237,7 @@ def set_item_expense_account(item_code, expense_account, company=None):
 
 
 @frappe.whitelist()
-def get_purchase_invoices_with_wrong_expense_account(company=None, from_date=None, to_date=None):
+def get_purchase_invoices_with_wrong_expense_account(company=None, from_date=None, to_date=None, include_prior_fy=0):
 	"""
 	Get Purchase Invoices where non-stock items have wrong or missing expense accounts.
 
@@ -232,11 +262,17 @@ def get_purchase_invoices_with_wrong_expense_account(company=None, from_date=Non
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
 
-	# Restrict to the CURRENT fiscal year -- older invoices are never listed
-	# and are refused by the background worker too. System Manager only.
+	# Default: current fiscal year only. A System Manager may include prior years
+	# (the flag is ignored otherwise); the background worker re-guards too.
 	fy_start, fy_end = _current_fiscal_year(company)
-	date_conditions = " AND pi.posting_date >= %(fy_start)s AND pi.posting_date <= %(fy_end)s"
-	
+	show_prior = cint(include_prior_fy) and ("System Manager" in frappe.get_roles())
+	params = {"company": company, "fy_end": fy_end}
+	if show_prior:
+		date_conditions = " AND pi.posting_date <= %(fy_end)s"
+	else:
+		date_conditions = " AND pi.posting_date >= %(fy_start)s AND pi.posting_date <= %(fy_end)s"
+		params["fy_start"] = fy_start
+
 	# Query for PI items with non-stock items
 	query = """
 		SELECT 
@@ -277,28 +313,27 @@ def get_purchase_invoices_with_wrong_expense_account(company=None, from_date=Non
 		LIMIT 1000
 	""".format(date_conditions=date_conditions)
 	
-	items = frappe.db.sql(query, {
-		"company": company,
-		"fy_start": fy_start,
-		"fy_end": fy_end,
-	}, as_dict=True)
-	
+	items = frappe.db.sql(query, params, as_dict=True)
+
 	# Separate into two categories
 	items_without_default = []
 	items_with_wrong_account = []
-	
+
 	for item in items:
+		item["prior_fy"] = 1 if str(item.get("posting_date")) < str(fy_start) else 0
 		if not item.item_default_expense_account:
 			items_without_default.append(item)
 		else:
 			items_with_wrong_account.append(item)
-	
+
 	return {
 		"items_without_default": items_without_default,
 		"items_with_wrong_account": items_with_wrong_account,
 		"count_without_default": len(items_without_default),
 		"count_with_wrong_account": len(items_with_wrong_account),
-		"company": company
+		"company": company,
+		"showing_prior_fy": bool(show_prior),
+		"is_system_manager": "System Manager" in frappe.get_roles(),
 	}
 
 
@@ -319,12 +354,10 @@ def bulk_fix_pi_expense_accounts(items):
 	Returns:
 		dict with status and total_invoices (or validation_errors if any fail upfront)
 	"""
-	# Gate on Purchase Invoice write — repost_accounting_entries is a standard
-	# PI operation and handles the GL Entry writes internally with
-	# ignore_permissions=True. Requiring direct GL Entry write here would lock
-	# the action to System / Accounts Manager only, which is stricter than the
-	# underlying ERPNext flow needs.
-	_require_dashboard_write("Purchase Invoice")
+	# Access is the fixables gate (toggle + System Manager or Additional Expense
+	# Role). repost_accounting_entries handles the GL writes internally with
+	# ignore_permissions, and the worker re-guards fiscal year per invoice, so we
+	# don't also require raw Purchase Invoice write here (parity with the TDS fixer).
 	_require_expense_fixables()
 	import json
 	if isinstance(items, str):
@@ -411,14 +444,15 @@ def _process_pi_expense_fix(pi_updates, user):
 				_publish_progress(done, total, pi_name, success_count, errors, user)
 				continue
 
-			# Current-fiscal-year guard: never mutate older invoices, even if a
-			# stale client pushed one through.
+			# Current fiscal year is open to allowed roles; anything outside it
+			# (prior year in particular) is System Manager only -- re-checked here so
+			# a stale client can't push an older invoice through.
 			fy_start, fy_end = _current_fiscal_year(pi_doc.company)
-			if not (str(fy_start) <= str(pi_doc.posting_date) <= str(fy_end)):
+			if not (str(fy_start) <= str(pi_doc.posting_date) <= str(fy_end)) and "System Manager" not in frappe.get_roles():
 				for iu in item_updates:
 					errors.append({
 						"pi_item_name": iu["pi_item_name"],
-						"error": _("Purchase Invoice {0} is outside the current fiscal year").format(pi_name),
+						"error": _("Purchase Invoice {0} is outside the current fiscal year — System Manager only").format(pi_name),
 					})
 				done += 1
 				_publish_progress(done, total, pi_name, success_count, errors, user)

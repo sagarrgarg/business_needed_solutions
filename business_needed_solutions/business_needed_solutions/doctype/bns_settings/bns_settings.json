@@ -37,6 +37,7 @@
   "posting_time_edit_roles",
   "dashboard_fixables_section",
   "enable_expense_item_fixables",
+  "expense_fixables_roles",
   "enable_tds_category_fixables",
   "tds_backfill_roles",
   "purchase_attachment_section",
@@ -286,7 +287,15 @@
    "fieldname": "enable_expense_item_fixables",
    "fieldtype": "Check",
    "label": "Enable Expense Item Fixables",
-   "description": "When ON, the Expense Item Fixables tools on the BNS Dashboard are available to System Manager only. Purchase Invoice expense-account corrections are restricted to the current fiscal year; older invoices are never listed and are refused server-side."
+   "description": "When ON, the Expense Item Fixables tools on the BNS Dashboard are available to System Manager and the roles below. Purchase Invoice expense-account corrections are restricted to the current fiscal year; only a System Manager can reach prior fiscal years, enforced server-side."
+  },
+  {
+   "depends_on": "eval:doc.enable_expense_item_fixables",
+   "fieldname": "expense_fixables_roles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Additional Expense Fix Roles",
+   "options": "Has Role",
+   "description": "Roles that may use Expense Item Fixables for the current fiscal year, in addition to System Manager. Prior-fiscal-year edits remain System Manager only."
   },
   {
    "default": "0",
