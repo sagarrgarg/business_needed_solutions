@@ -73,6 +73,8 @@ frappe.ui.form.on('Purchase Invoice', {
 
         // Post-submit posting-time edit (role-gated via BNS Settings)
         bns_maybe_add_posting_time_button(frm);
+        // Backfill TDS onto a submitted PI (role-gated via BNS Settings)
+        bns_maybe_add_tds_backfill_button(frm);
 
         // Show button to convert to BNS Internal if supplier is BNS internal but PI is not marked
         // OR if PI is marked but status is not "BNS Internally Transferred"

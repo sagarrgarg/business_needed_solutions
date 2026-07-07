@@ -35,6 +35,9 @@
   "posting_time_edit_section",
   "enable_posting_time_edit",
   "posting_time_edit_roles",
+  "tds_backfill_section",
+  "enable_tds_backfill",
+  "tds_backfill_roles",
   "purchase_attachment_section",
   "enforce_purchase_document_attachments",
   "purchase_attachment_cutoff_date",
@@ -271,6 +274,26 @@
    "label": "Allowed Roles",
    "options": "Has Role",
    "description": "Roles that may edit posting time after submit, in addition to System Manager."
+  },
+  {
+   "fieldname": "tds_backfill_section",
+   "fieldtype": "Section Break",
+   "label": "TDS Backfill (Submitted PIs)"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_tds_backfill",
+   "fieldtype": "Check",
+   "label": "Allow Backfilling TDS on Submitted Purchase Invoices",
+   "description": "When ON, the roles below (and System Manager) can add Tax Withholding (TDS) to an already-submitted Purchase Invoice from the supplier's category. Paid/partly-paid PIs are unreconciled first. Only the incremental TDS GL is posted (GST/ITC is not re-booked). Frozen periods are refused."
+  },
+  {
+   "depends_on": "eval:doc.enable_tds_backfill",
+   "fieldname": "tds_backfill_roles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Allowed Roles",
+   "options": "Has Role",
+   "description": "Roles that may backfill TDS on submitted PIs, in addition to System Manager."
   },
   {
    "fieldname": "purchase_attachment_section",
