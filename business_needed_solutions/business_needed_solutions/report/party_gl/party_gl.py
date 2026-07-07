@@ -431,6 +431,12 @@ def inject_tds_breakup(data, filters):
 		return data
 
 	out = []
+	# Net effect on the debit/credit COLUMN sums (0 for backfill where the TDS
+	# was already a separate party debit; = the withheld amount for native TDS
+	# that was netted into the credit). Applied to the Closing/Total summary rows
+	# so their column totals stay consistent with the grossed-up lines.
+	bump = 0.0
+	bump_ac = 0.0
 	for d in data:
 		out.append(d)
 		vno, vt = d.get("voucher_no"), d.get("voucher_type")
@@ -451,9 +457,10 @@ def inject_tds_breakup(data, filters):
 			taken = min(dr, W)
 			d[dr_key] = dr - taken
 			d[cr_key] = cr + (W - taken)
+			return W - taken  # column-sum delta added to both debit and credit
 
-		_degross("debit", "credit")
-		_degross("debit_in_account_currency", "credit_in_account_currency")
+		bump += _degross("debit", "credit")
+		bump_ac += _degross("debit_in_account_currency", "credit_in_account_currency")
 
 		kind = "TCS" if vt == "Sales Invoice" else "TDS"
 		section = info.get("section")
@@ -475,6 +482,17 @@ def inject_tds_breakup(data, filters):
 			"remarks": _("Withheld against {0}").format(vno),
 			"cost_center": d.get("cost_center"),
 		}))
+
+	# Keep Closing/Total summary rows consistent (balance is unchanged since both
+	# sides move together; only native-TDS gross-up shifts the column totals).
+	if bump or bump_ac:
+		for r in out:
+			acct = str(r.get("account") or "")
+			if "Closing" in acct or "Total" in acct:
+				r["debit"] = flt(r.get("debit")) + bump
+				r["credit"] = flt(r.get("credit")) + bump
+				r["debit_in_account_currency"] = flt(r.get("debit_in_account_currency")) + bump_ac
+				r["credit_in_account_currency"] = flt(r.get("credit_in_account_currency")) + bump_ac
 	return out
 
 
