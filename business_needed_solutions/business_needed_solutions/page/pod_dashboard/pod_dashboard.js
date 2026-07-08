@@ -68,10 +68,6 @@ class PODDashboard {
 		return this.get_filter_value("customer");
 	}
 
-	get_gst_category() {
-		return this.get_filter_value("gst_category");
-	}
-
 	get_pod_status() {
 		return this.get_filter_value("pod_status");
 	}
@@ -152,12 +148,6 @@ class PODDashboard {
 				label: __("Customer"),
 				fieldtype: "Link",
 				options: "Customer"
-			},
-			{
-				fieldname: "gst_category",
-				label: __("GST Category"),
-				fieldtype: "Select",
-				options: "\nRegistered Regular\nRegistered Composition\nSEZ\nOverseas\nDeemed Export\nUIN Holders\nTax Deductor\nTax Collector\nInput Service Distributor"
 			},
 			{
 				fieldname: "pod_status",
@@ -293,7 +283,6 @@ class PODDashboard {
 				from_date: this.get_from_date(),
 				to_date: this.get_to_date(),
 				customer: this.get_customer(),
-				gst_category: this.get_gst_category(),
 				pod_status: this.get_pod_status(),
 			},
 			callback: function (r) {
@@ -359,20 +348,18 @@ class PODDashboard {
 				<table class="table pod-table">
 					<thead>
 						<tr>
-							<th style="width:130px">${__("Sales Invoice")}</th>
+							<th style="width:220px">${__("Sales Invoice")}</th>
 							<th>${__("Customer")}</th>
-							<th style="width:130px">${__("GST Category")}</th>
 							<th style="width:110px">${__("Date")}</th>
 							<th style="width:115px">${__("Grand Total")}</th>
-							<th style="width:130px">${__("POD Status")}</th>
-							<th style="width:130px">${__("POD Date")}</th>
-							<th style="width:180px">${__("POD Attachment")}</th>
+							<th style="width:130px">${__("Fully Accepted")}</th>
+							<th style="width:140px">${__("POD Date")}</th>
+							<th style="width:200px">${__("POD Attachment")}</th>
 							<th style="width:85px">${__("Action")}</th>
 						</tr>
 						<tr class="pod-search-row">
 							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="name" placeholder="${__("Search…")}"></th>
 							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="customer" placeholder="${__("Search…")}"></th>
-							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="gst_category" placeholder="${__("Search…")}"></th>
 							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="posting_date" placeholder="${__("Search…")}"></th>
 							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="grand_total" placeholder="${__("Search…")}"></th>
 							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="pod_status" placeholder="${__("Search…")}"></th>
@@ -391,14 +378,6 @@ class PODDashboard {
 
 			const rowClass = "pod-row-pending";
 
-			// GST Category Badge (Note: 'Unregistered' is excluded in the backend query)
-			let gstBadge = "";
-			if (inv.gst_category) {
-				gstBadge = `<span class="pod-gst-badge gst-registered">${frappe.utils.escape_html(inv.gst_category)}</span>`;
-			} else {
-				gstBadge = `<span class="text-muted" style="font-size:0.75rem;">—</span>`;
-			}
-
 			const escName = frappe.utils.escape_html(inv.name);
 			const escCustomerName = frappe.utils.escape_html(inv.customer_name || inv.customer || "");
 			const escDate = frappe.utils.escape_html(inv.posting_date || "");
@@ -407,29 +386,42 @@ class PODDashboard {
 			const currentStatus = frappe.utils.escape_html(inv.bns_pod_status || "");
 			const currentDate = frappe.utils.escape_html(inv.bns_pod_date || "");
 
+			// PO Details below Sales Invoice
+			let poDetailsHtml = "";
+			if (inv.po_no || inv.po_date) {
+				const escPoNo = inv.po_no ? frappe.utils.escape_html(inv.po_no) : "";
+				const escPoDate = inv.po_date ? frappe.datetime.str_to_user(inv.po_date) : "";
+				poDetailsHtml = `
+					<div class="pod-po-details">
+						<span class="po-label">PO:</span>
+						<span class="po-val">${escPoNo} ${escPoDate ? `(${escPoDate})` : ""}</span>
+					</div>
+				`;
+			}
+
 			html += `
 				<tr class="${rowClass}" data-name="${escName}">
 					<td>
 						<a href="/app/sales-invoice/${escName}" target="_blank" class="pod-si-link">
 							${escName}
 						</a>
+						${poDetailsHtml}
 					</td>
 					<td>
 						<div class="pod-customer-cell">
 							<span class="customer-name" title="${frappe.utils.escape_html(inv.customer || '')}">${escCustomerName}</span>
 						</div>
 					</td>
-					<td>${gstBadge}</td>
 					<td><span class="text-muted">${escDate}</span></td>
 					<td><span class="pod-total-amount">${grandTotal}</span></td>
 					<td>
 						<div class="pod-field-wrap">
-							<select class="form-control form-control-sm pod-status-input ${hasStatus ? 'pod-input-filled' : 'pod-input-missing'}" data-name="${escName}">
-								<option value="">— ${__("Select")} —</option>
-								<option value="Delivered" ${currentStatus === "Delivered" ? "selected" : ""}>${__("Delivered")}</option>
-								<option value="In-Transit" ${currentStatus === "In-Transit" ? "selected" : ""}>${__("In-Transit")}</option>
-								<option value="Issue" ${currentStatus === "Issue" ? "selected" : ""}>${__("Issue")}</option>
-							</select>
+							<div class="pod-checkbox-wrap">
+								<input type="checkbox" class="pod-status-checkbox ${hasStatus ? 'pod-input-filled' : 'pod-input-missing'}" 
+									data-name="${escName}"
+									${currentStatus === "Delivered" ? "checked" : ""}>
+								<label class="pod-checkbox-label">${__("Accepted")}</label>
+							</div>
 						</div>
 					</td>
 					<td>
@@ -506,15 +498,17 @@ class PODDashboard {
 			self.save_pod_row(siName, container, $(this));
 		});
 
-		// Update style on input changes
-		container.off("change", ".pod-status-input").on("change", ".pod-status-input", function () {
-			self.toggle_input_style($(this), !!$(this).val());
+		// Update style on status checkbox changes
+		container.off("change", ".pod-status-checkbox").on("change", ".pod-status-checkbox", function () {
+			self.toggle_input_style($(this), $(this).is(":checked"));
 		});
 
+		// Update style on date input changes
 		container.off("change", ".pod-date-input").on("change", ".pod-date-input", function () {
 			self.toggle_input_style($(this), !!$(this).val());
 		});
 
+		// Update style on attachment input changes
 		container.off("input change", ".pod-attach-input").on("input change", ".pod-attach-input", function () {
 			self.toggle_input_style($(this), !!$(this).val().trim());
 		});
@@ -541,17 +535,16 @@ class PODDashboard {
 			for (const [col, val] of Object.entries(rowFilters)) {
 				let cellText = "";
 				if (col === "name") {
-					cellText = row.find(".pod-si-link").text();
+					// Search invoice name & PO Details
+					cellText = row.find(".pod-si-link").text() + " " + row.find(".pod-po-details").text();
 				} else if (col === "customer") {
 					cellText = row.find(".customer-name").text();
-				} else if (col === "gst_category") {
-					cellText = row.find(".pod-gst-badge").text();
 				} else if (col === "posting_date") {
-					cellText = row.find("td:nth-child(4)").text();
+					cellText = row.find("td:nth-child(3)").text();
 				} else if (col === "grand_total") {
 					cellText = row.find(".pod-total-amount").text();
 				} else if (col === "pod_status") {
-					cellText = row.find(".pod-status-input").val() || "";
+					cellText = row.find(".pod-status-checkbox").is(":checked") ? "delivered accepted" : "missing";
 				} else if (col === "pod_date") {
 					cellText = row.find(".pod-date-input").val() || "";
 				} else if (col === "pod_attachment") {
@@ -578,7 +571,7 @@ class PODDashboard {
 		const self = this;
 		const row = container.find(`tr[data-name="${siName}"]`);
 
-		const pod_status = row.find(".pod-status-input").val();
+		const pod_status = row.find(".pod-status-checkbox").is(":checked") ? "Delivered" : "";
 		const pod_date = row.find(".pod-date-input").val();
 		const pod_attachment = row.find(".pod-attach-input").val().trim();
 
@@ -660,24 +653,33 @@ class PODDashboard {
 	// ── Update inputs in place after partial save ────────────────────
 
 	refresh_row_inputs(row, pod_status, pod_date, pod_attachment) {
-		const statusInput = row.find(".pod-status-input");
+		const statusCheckbox = row.find(".pod-status-checkbox");
 		const dateInput = row.find(".pod-date-input");
 		const attachInput = row.find(".pod-attach-input");
 
-		statusInput.val(pod_status || "");
+		statusCheckbox.prop("checked", pod_status === "Delivered");
 		dateInput.val(pod_date || "");
 		attachInput.val(pod_attachment || "");
 
-		this.toggle_input_style(statusInput, !!pod_status);
+		this.toggle_input_style(statusCheckbox, pod_status === "Delivered");
 		this.toggle_input_style(dateInput, !!pod_date);
 		this.toggle_input_style(attachInput, !!pod_attachment);
 	}
 
 	toggle_input_style(input, is_filled) {
-		if (is_filled) {
-			input.removeClass("pod-input-missing").addClass("pod-input-filled");
+		if (input.is(":checkbox")) {
+			const wrap = input.closest(".pod-checkbox-wrap");
+			if (is_filled) {
+				wrap.removeClass("pod-input-missing").addClass("pod-input-filled");
+			} else {
+				wrap.removeClass("pod-input-filled").addClass("pod-input-missing");
+			}
 		} else {
-			input.removeClass("pod-input-filled").addClass("pod-input-missing");
+			if (is_filled) {
+				input.removeClass("pod-input-missing").addClass("pod-input-filled");
+			} else {
+				input.removeClass("pod-input-filled").addClass("pod-input-missing");
+			}
 		}
 	}
 
@@ -879,7 +881,7 @@ class PODDashboard {
 				background-color: #f8fafc;
 			}
 
-			/* ─── SI Link ───────────────────────────────────────────── */
+			/* ─── SI Link & PO Details ──────────────────────────────── */
 			.pod-si-link {
 				font-weight: 700;
 				color: var(--primary-color, #1f6bff);
@@ -888,27 +890,22 @@ class PODDashboard {
 			.pod-si-link:hover {
 				text-decoration: underline;
 			}
-
-			/* ─── GST Badge ─────────────────────────────────────────── */
-			.pod-gst-badge {
-				display: inline-block;
-				padding: 2px 8px;
-				border-radius: 9999px;
-				font-size: 0.75rem;
+			.pod-po-details {
+				font-size: 0.72rem;
+				color: #64748b;
+				margin-top: 4px;
+				line-height: 1.2;
+			}
+			.po-label {
 				font-weight: 600;
 			}
-			.gst-registered {
-				background-color: #dcfce7;
-				color: #166534;
-			}
 
-			/* ─── Inputs ────────────────────────────────────────────── */
+			/* ─── Inputs & Checkbox ─────────────────────────────────── */
 			.pod-field-wrap {
 				display: flex;
 				flex-direction: column;
 				gap: 4px;
 			}
-			.pod-status-input,
 			.pod-date-input,
 			.pod-attach-input {
 				height: 28px !important;
@@ -916,6 +913,32 @@ class PODDashboard {
 				border-radius: 5px !important;
 				transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
 			}
+			
+			/* Checkbox styles */
+			.pod-checkbox-wrap {
+				display: flex;
+				align-items: center;
+				gap: 6px;
+				padding: 3px 8px;
+				border-radius: 5px;
+				height: 28px;
+				width: fit-content;
+			}
+			.pod-status-checkbox {
+				width: 15px;
+				height: 15px;
+				cursor: pointer;
+				margin: 0 !important;
+			}
+			.pod-checkbox-label {
+				font-size: 0.78rem;
+				font-weight: 600;
+				color: #475569;
+				margin: 0;
+				cursor: pointer;
+				user-select: none;
+			}
+
 			.pod-input-missing {
 				border: 1px solid #fecdd3 !important;
 				background-color: #fff1f2 !important;
@@ -924,12 +947,24 @@ class PODDashboard {
 				border: 1px solid #cbd5e1 !important;
 				background-color: #ffffff !important;
 			}
+			
+			/* Add styles for checkbox wrapper specifically */
+			div.pod-checkbox-wrap.pod-input-missing {
+				border: 1px solid #fecdd3 !important;
+				background-color: #fff1f2 !important;
+			}
+			div.pod-checkbox-wrap.pod-input-filled {
+				border: 1px solid #cbd5e1 !important;
+				background-color: #ffffff !important;
+			}
+
 			.pod-input-missing:focus,
 			.pod-input-filled:focus {
 				border-color: #a5b4fc !important;
 				box-shadow: 0 0 0 2px rgba(165, 180, 252, 0.2) !important;
 				outline: 0;
 			}
+			
 			.pod-attach-wrap {
 				display: flex;
 				gap: 4px;

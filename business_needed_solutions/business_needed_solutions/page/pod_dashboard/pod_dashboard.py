@@ -59,7 +59,7 @@ def _default_company():
 
 
 @frappe.whitelist()
-def get_pending_pod_invoices(company=None, fiscal_year=None, from_date=None, to_date=None, customer=None, gst_category=None, pod_status=None):
+def get_pending_pod_invoices(company=None, fiscal_year=None, from_date=None, to_date=None, customer=None, pod_status=None):
 	"""
 	Return submitted Sales Invoices where at least one POD field is empty.
 
@@ -82,6 +82,19 @@ def get_pending_pod_invoices(company=None, fiscal_year=None, from_date=None, to_
 			from_date = year_start_date
 			to_date = year_end_date
 
+	# Fetch internal customers to exclude
+	internal_customers = [
+		c.name for c in frappe.get_all(
+			"Customer",
+			filters=[
+				["Customer", "is_internal_customer", "=", 1],
+				["Customer", "is_bns_internal_customer", "=", 1]
+			],
+			or_filters=True,
+			fields=["name"]
+		)
+	]
+
 	# Build base filters — always submitted, always for selected company, and always exclude Unregistered GST category
 	filters = [
 		["Sales Invoice", "docstatus", "=", 1],
@@ -90,6 +103,9 @@ def get_pending_pod_invoices(company=None, fiscal_year=None, from_date=None, to_
 	if company:
 		filters.append(["Sales Invoice", "company", "=", company])
 	
+	if internal_customers:
+		filters.append(["Sales Invoice", "customer", "not in", internal_customers])
+
 	if from_date:
 		filters.append(["Sales Invoice", "posting_date", ">=", from_date])
 	if to_date:
@@ -97,8 +113,7 @@ def get_pending_pod_invoices(company=None, fiscal_year=None, from_date=None, to_
 
 	if customer:
 		filters.append(["Sales Invoice", "customer", "=", customer])
-	if gst_category:
-		filters.append(["Sales Invoice", "gst_category", "=", gst_category])
+
 	if pod_status:
 		if pod_status == "Missing":
 			filters.append(["Sales Invoice", "bns_pod_status", "in", ["", None]])
@@ -115,10 +130,11 @@ def get_pending_pod_invoices(company=None, fiscal_year=None, from_date=None, to_
 			"posting_date",
 			"grand_total",
 			"currency",
-			"gst_category",
 			"bns_pod_status",
 			"bns_pod_date",
 			"bns_pod_attachment",
+			"po_no",
+			"po_date"
 		],
 		order_by="posting_date desc",
 		limit=500,
