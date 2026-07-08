@@ -59,7 +59,23 @@ def _default_company():
 
 
 @frappe.whitelist()
-def get_pending_pod_invoices(company=None, fiscal_year=None, from_date=None, to_date=None, customer=None, pod_status=None):
+def get_pending_pod_invoices(
+	company=None,
+	fiscal_year=None,
+	from_date=None,
+	to_date=None,
+	customer=None,
+	pod_status=None,
+	start=0,
+	page_length=20,
+	search_name=None,
+	search_customer=None,
+	search_posting_date=None,
+	search_grand_total=None,
+	search_pod_status=None,
+	search_pod_date=None,
+	search_pod_attachment=None,
+):
 	"""
 	Return submitted Sales Invoices where at least one POD field is empty.
 
@@ -67,12 +83,12 @@ def get_pending_pod_invoices(company=None, fiscal_year=None, from_date=None, to_
 	  - bns_pod_status
 	  - bns_pod_date
 	  - bns_pod_attachment
-
-	Returns a list of dicts, ordered by posting_date descending.
 	"""
 	_require_dashboard_read()
 
 	company = company or _default_company()
+	start = frappe.utils.cint(start)
+	page_length = frappe.utils.cint(page_length) or 20
 	
 	if fiscal_year and not (from_date and to_date):
 		year_start_date, year_end_date = frappe.db.get_value(
@@ -119,9 +135,34 @@ def get_pending_pod_invoices(company=None, fiscal_year=None, from_date=None, to_
 		else:
 			filters.append(["Sales Invoice", "bns_pod_status", "=", pod_status])
 
+	# Add quick column searches
+	if search_name:
+		filters.append(["Sales Invoice", "name", "like", f"%{search_name}%"])
+	if search_customer:
+		filters.append(["Sales Invoice", "customer_name", "like", f"%{search_customer}%"])
+	if search_posting_date:
+		filters.append(["Sales Invoice", "posting_date", "like", f"%{search_posting_date}%"])
+	if search_grand_total:
+		filters.append(["Sales Invoice", "grand_total", "like", f"%{search_grand_total}%"])
+	if search_pod_status:
+		filters.append(["Sales Invoice", "bns_pod_status", "like", f"%{search_pod_status}%"])
+	if search_pod_date:
+		filters.append(["Sales Invoice", "bns_pod_date", "like", f"%{search_pod_date}%"])
+	if search_pod_attachment:
+		filters.append(["Sales Invoice", "bns_pod_attachment", "like", f"%{search_pod_attachment}%"])
+
+	# Base pending OR filters — at least one of the 3 fields must be missing
+	or_filters = [
+		["Sales Invoice", "bns_pod_status", "in", ["", None]],
+		["Sales Invoice", "bns_pod_date", "is", "not set"],
+		["Sales Invoice", "bns_pod_attachment", "in", ["", None]]
+	]
+
+	# Query matching records for current page
 	invoices = frappe.get_all(
 		"Sales Invoice",
 		filters=filters,
+		or_filters=or_filters,
 		fields=[
 			"name",
 			"customer",
@@ -136,17 +177,42 @@ def get_pending_pod_invoices(company=None, fiscal_year=None, from_date=None, to_
 			"po_date"
 		],
 		order_by="posting_date desc",
-		limit=500,
+		start=start,
+		page_length=page_length
 	)
 
-	pending = [
-		inv for inv in invoices
-		if not (inv.get("bns_pod_status") and inv.get("bns_pod_date") and inv.get("bns_pod_attachment"))
-	]
+	# Calculate counts dynamically at database level
+	total_pending = frappe.get_all(
+		"Sales Invoice",
+		filters=filters,
+		or_filters=or_filters,
+		fields=["count(name) as total"]
+	)[0].total
+
+	missing_status = frappe.get_all(
+		"Sales Invoice",
+		filters=filters + [["Sales Invoice", "bns_pod_status", "in", ["", None]]],
+		fields=["count(name) as total"]
+	)[0].total
+
+	missing_date = frappe.get_all(
+		"Sales Invoice",
+		filters=filters + [["Sales Invoice", "bns_pod_date", "is", "not set"]],
+		fields=["count(name) as total"]
+	)[0].total
+
+	missing_attach = frappe.get_all(
+		"Sales Invoice",
+		filters=filters + [["Sales Invoice", "bns_pod_attachment", "in", ["", None]]],
+		fields=["count(name) as total"]
+	)[0].total
 
 	return {
-		"invoices": pending,
-		"total": len(pending),
+		"invoices": invoices,
+		"total": total_pending,
+		"missing_status": missing_status,
+		"missing_date": missing_date,
+		"missing_attachment": missing_attach,
 	}
 
 

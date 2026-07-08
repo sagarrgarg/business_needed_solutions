@@ -34,6 +34,12 @@ class PODDashboard {
 		this.data = [];
 		this.filters = {};
 		this.in_filter_change = false;
+
+		// Pagination State
+		this.start = 0;
+		this.page_length = 20;
+		this.total = 0;
+
 		this.init();
 	}
 
@@ -243,19 +249,23 @@ class PODDashboard {
 									self.filters.to_date.set_value(r.message.year_end_date);
 								}
 								self.in_filter_change = false;
+								self.start = 0; // Reset pagination
 								self.refresh();
 							} else {
 								self.in_filter_change = false;
+								self.start = 0; // Reset pagination
 								self.refresh();
 							}
 						});
 					} else {
+						self.start = 0; // Reset pagination
 						self.refresh();
 					}
 				};
 			} else {
 				control.df.change = function() {
 					if (!self.in_filter_change) {
+						self.start = 0; // Reset pagination
 						self.refresh();
 					}
 				};
@@ -268,12 +278,27 @@ class PODDashboard {
 	refresh() {
 		const self = this;
 		const container = this.wrapper.find("#pod-table-container");
-		container.html(`
-			<div class="pod-loading">
-				<span class="spinner-border spinner-border-sm"></span>
-				${__("Loading…")}
-			</div>
-		`);
+
+		// Show loading spinner but preserve existing table structure to avoid UI jump if possible
+		const hasTable = container.find("table").length > 0;
+		if (!hasTable) {
+			container.html(`
+				<div class="pod-loading">
+					<span class="spinner-border spinner-border-sm"></span>
+					${__("Loading…")}
+				</div>
+			`);
+		}
+
+		// Read quick column search inputs
+		const search_args = {};
+		container.find(".pod-search-input").each(function () {
+			const col = $(this).data("col");
+			const val = $(this).val().trim();
+			if (val) {
+				search_args[`search_${col}`] = val;
+			}
+		});
 
 		frappe.call({
 			method: "business_needed_solutions.business_needed_solutions.page.pod_dashboard.pod_dashboard.get_pending_pod_invoices",
@@ -284,11 +309,21 @@ class PODDashboard {
 				to_date: this.get_to_date(),
 				customer: this.get_customer(),
 				pod_status: this.get_pod_status(),
+				start: this.start,
+				page_length: this.page_length,
+				...search_args
 			},
 			callback: function (r) {
 				if (r && r.message) {
 					self.data = r.message.invoices || [];
-					self.render_summary();
+					self.total = r.message.total || 0;
+
+					self.render_summary(
+						r.message.total,
+						r.message.missing_status,
+						r.message.missing_date,
+						r.message.missing_attachment
+					);
 					self.render_table(self.data, container);
 				} else {
 					container.html(`<div class="pod-empty">${__("No data returned.")}</div>`);
@@ -302,21 +337,16 @@ class PODDashboard {
 
 	// ── Summary ──────────────────────────────────────────────────────
 
-	render_summary() {
-		const total = this.data.length;
-		const missing_status = this.data.filter(d => !d.bns_pod_status).length;
-		const missing_date = this.data.filter(d => !d.bns_pod_date).length;
-		const missing_attach = this.data.filter(d => !d.bns_pod_attachment).length;
+	render_summary(total, missing_status, missing_date, missing_attach) {
+		this.wrapper.find("#pod-pending-count").text(total || 0);
+		this.wrapper.find("#pod-missing-status-count").text(missing_status || 0);
+		this.wrapper.find("#pod-missing-date-count").text(missing_date || 0);
+		this.wrapper.find("#pod-missing-attach-count").text(missing_attach || 0);
 
-		this.wrapper.find("#pod-pending-count").text(total);
-		this.wrapper.find("#pod-missing-status-count").text(missing_status);
-		this.wrapper.find("#pod-missing-date-count").text(missing_date);
-		this.wrapper.find("#pod-missing-attach-count").text(missing_attach);
-
-		this.update_card_style(this.wrapper.find("#pod-pending-card"), total);
-		this.update_card_style(this.wrapper.find("#pod-status-card"), missing_status);
-		this.update_card_style(this.wrapper.find("#pod-date-card"), missing_date);
-		this.update_card_style(this.wrapper.find("#pod-attach-card"), missing_attach);
+		this.update_card_style(this.wrapper.find("#pod-pending-card"), total || 0);
+		this.update_card_style(this.wrapper.find("#pod-status-card"), missing_status || 0);
+		this.update_card_style(this.wrapper.find("#pod-date-card"), missing_date || 0);
+		this.update_card_style(this.wrapper.find("#pod-attach-card"), missing_attach || 0);
 	}
 
 	update_card_style(card, count) {
@@ -333,13 +363,86 @@ class PODDashboard {
 	// ── Table ────────────────────────────────────────────────────────
 
 	render_table(invoices, container) {
+		const self = this;
+
+		// Save current search input values and focus state
+		const search_vals = {};
+		container.find(".pod-search-input").each(function () {
+			const col = $(this).data("col");
+			search_vals[col] = $(this).val();
+		});
+
+		const active_input = document.activeElement;
+		let active_col = null;
+		let selection_start = null;
+		let selection_end = null;
+		if (active_input && $(active_input).hasClass("pod-search-input")) {
+			active_col = $(active_input).data("col");
+			selection_start = active_input.selectionStart;
+			selection_end = active_input.selectionEnd;
+		}
+
 		if (!invoices || invoices.length === 0) {
-			container.html(`
+			let emptyHtml = `
 				<div class="pod-empty">
 					<i class="fa fa-check-circle text-success" style="font-size:2rem;"></i>
-					<p>${__("All Sales Invoices have complete POD details. Great job!")}</p>
+					<p>${__("No pending Sales Invoices match your filters. Great job!")}</p>
 				</div>
-			`);
+			`;
+			
+			// Keep headers if search values were typed
+			const hasSearchActive = Object.values(search_vals).some(val => !!val);
+			if (hasSearchActive) {
+				emptyHtml = `
+					<div class="pod-table-wrapper">
+						<table class="table pod-table">
+							<thead>
+								<tr>
+									<th style="width:220px">${__("Sales Invoice")}</th>
+									<th>${__("Customer")}</th>
+									<th style="width:110px">${__("Date")}</th>
+									<th style="width:115px">${__("Grand Total")}</th>
+									<th style="width:130px">${__("Fully Accepted")}</th>
+									<th style="width:140px">${__("POD Date")}</th>
+									<th style="width:200px">${__("POD Attachment")}</th>
+									<th style="width:85px">${__("Action")}</th>
+								</tr>
+								<tr class="pod-search-row">
+									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="name" placeholder="${__("Search…")}"></th>
+									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="customer" placeholder="${__("Search…")}"></th>
+									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="posting_date" placeholder="${__("Search…")}"></th>
+									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="grand_total" placeholder="${__("Search…")}"></th>
+									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="pod_status" placeholder="${__("Search…")}"></th>
+									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="pod_date" placeholder="${__("Search…")}"></th>
+									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="pod_attachment" placeholder="${__("Search…")}"></th>
+									<th></th>
+								</tr>
+							</thead>
+							<tbody>
+								<tr>
+									<td colspan="8" class="text-center text-muted">${__("No matching records found")}</td>
+								</tr>
+							</tbody>
+						</table>
+					</div>
+				`;
+			}
+			
+			container.html(emptyHtml);
+
+			// Restore search values & focus
+			Object.entries(search_vals).forEach(([col, val]) => {
+				if (val) container.find(`.pod-search-input[data-col="${col}"]`).val(val);
+			});
+			if (active_col) {
+				const input = container.find(`.pod-search-input[data-col="${active_col}"]`);
+				if (input.length) {
+					input.focus();
+					try { input[0].setSelectionRange(selection_start, selection_end); } catch(e) {}
+				}
+			}
+
+			this.bind_events(container);
 			return;
 		}
 
@@ -455,7 +558,37 @@ class PODDashboard {
 		});
 
 		html += `</tbody></table></div>`;
+
+		// Add Pagination HTML Row
+		const startIdx = this.start + 1;
+		const endIdx = Math.min(this.start + this.page_length, this.total);
+		html += `
+			<div class="pod-pagination-row">
+				<button class="btn btn-default btn-xs btn-pod-prev" ${this.start === 0 ? "disabled" : ""}>
+					<i class="fa fa-chevron-left"></i> ${__("Previous")}
+				</button>
+				<span class="pod-pagination-text">
+					${__("Showing {0} to {1} of {2} records", [startIdx, endIdx, this.total])}
+				</span>
+				<button class="btn btn-default btn-xs btn-pod-next" ${this.start + this.page_length >= this.total ? "disabled" : ""}>
+					${__("Next")} <i class="fa fa-chevron-right"></i>
+				</button>
+			</div>
+		`;
+
 		container.html(html);
+
+		// Restore search input values & focus state
+		Object.entries(search_vals).forEach(([col, val]) => {
+			if (val) container.find(`.pod-search-input[data-col="${col}"]`).val(val);
+		});
+		if (active_col) {
+			const input = container.find(`.pod-search-input[data-col="${active_col}"]`);
+			if (input.length) {
+				input.focus();
+				try { input[0].setSelectionRange(selection_start, selection_end); } catch(e) {}
+			}
+		}
 
 		this.bind_events(container);
 	}
@@ -465,9 +598,24 @@ class PODDashboard {
 	bind_events(container) {
 		const self = this;
 
-		// Quick Search inputs
+		// Quick Search inputs with Server-Side Debounce
+		let search_timeout = null;
 		container.off("input", ".pod-search-input").on("input", ".pod-search-input", function () {
-			self.apply_search_filters(container);
+			clearTimeout(search_timeout);
+			search_timeout = setTimeout(function() {
+				self.start = 0; // Reset pagination on filter change
+				self.refresh();
+			}, 450); // 450ms debounce
+		});
+
+		// Pagination Buttons
+		container.find(".btn-pod-prev").off("click").on("click", function() {
+			self.start = Math.max(0, self.start - self.page_length);
+			self.refresh();
+		});
+		container.find(".btn-pod-next").off("click").on("click", function() {
+			self.start = self.start + self.page_length;
+			self.refresh();
 		});
 
 		// File Upload Button
@@ -514,57 +662,6 @@ class PODDashboard {
 		});
 	}
 
-	// ── Apply Client-Side Search Filters ──────────────────────────────
-
-	apply_search_filters(container) {
-		const rowFilters = {};
-		container.find(".pod-search-input").each(function () {
-			const col = $(this).data("col");
-			const val = $(this).val().toLowerCase().trim();
-			if (val) {
-				rowFilters[col] = val;
-			}
-		});
-
-		const rows = container.find("#pod-table-body tr");
-		
-		rows.each(function () {
-			const row = $(this);
-			let matches = true;
-
-			for (const [col, val] of Object.entries(rowFilters)) {
-				let cellText = "";
-				if (col === "name") {
-					// Search invoice name & PO Details
-					cellText = row.find(".pod-si-link").text() + " " + row.find(".pod-po-details").text();
-				} else if (col === "customer") {
-					cellText = row.find(".customer-name").text();
-				} else if (col === "posting_date") {
-					cellText = row.find("td:nth-child(3)").text();
-				} else if (col === "grand_total") {
-					cellText = row.find(".pod-total-amount").text();
-				} else if (col === "pod_status") {
-					cellText = row.find(".pod-status-checkbox").is(":checked") ? "delivered accepted" : "missing";
-				} else if (col === "pod_date") {
-					cellText = row.find(".pod-date-input").val() || "";
-				} else if (col === "pod_attachment") {
-					cellText = row.find(".pod-attach-input").val() || "";
-				}
-
-				if (!cellText.toLowerCase().includes(val)) {
-					matches = false;
-					break;
-				}
-			}
-
-			if (matches) {
-				row.show();
-			} else {
-				row.hide();
-			}
-		});
-	}
-
 	// ── Save Row ─────────────────────────────────────────────────────
 
 	save_pod_row(siName, container, btn) {
@@ -604,16 +701,9 @@ class PODDashboard {
 							indicator: "green",
 						});
 						
-						// Remove item from local data array
-						self.data = self.data.filter(d => d.name !== siName);
-
 						row.css("transition", "all 0.5s").css("opacity", "0").css("background-color", "#d4edda");
 						setTimeout(function () {
-							row.remove();
-							self.render_summary();
-							if (self.data.length === 0) {
-								self.render_table([], container);
-							}
+							self.refresh(); // Reload current page list to pull new record into pagination view
 						}, 500);
 					} else {
 						// Partial save — update inputs and classes
@@ -622,16 +712,8 @@ class PODDashboard {
 							indicator: "blue",
 						});
 						
-						// Update local data
-						const item = self.data.find(d => d.name === siName);
-						if (item) {
-							item.bns_pod_status = pod_status;
-							item.bns_pod_date = pod_date;
-							item.bns_pod_attachment = pod_attachment;
-						}
-
 						self.refresh_row_inputs(row, pod_status, pod_date, pod_attachment);
-						self.render_summary();
+						self.refresh(); // Reload statistics and lists
 					}
 				} else {
 					frappe.show_alert({
@@ -821,7 +903,7 @@ class PODDashboard {
 
 			/* ─── Table ─────────────────────────────────────────────── */
 			.pod-table-wrapper {
-				max-height: calc(100vh - 300px);
+				max-height: calc(100vh - 350px);
 				overflow-y: auto;
 			}
 			.pod-table {
@@ -995,6 +1077,28 @@ class PODDashboard {
 			.btn-pod-save {
 				height: 28px;
 				padding: 0 10px !important;
+				font-weight: 600;
+				border-radius: 5px !important;
+				font-size: 0.78rem !important;
+			}
+
+			/* ─── Pagination ────────────────────────────────────────── */
+			.pod-pagination-row {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				padding: 12px 20px;
+				border-top: 1px solid #e2e8f0;
+				background-color: #f8fafc;
+			}
+			.pod-pagination-text {
+				font-size: 0.78rem;
+				font-weight: 600;
+				color: #475569;
+			}
+			.btn-pod-prev, .btn-pod-next {
+				height: 28px;
+				padding: 0 12px !important;
 				font-weight: 600;
 				border-radius: 5px !important;
 				font-size: 0.78rem !important;
