@@ -978,6 +978,7 @@ _SCOPE_LABELS = {
 	"orphaned_receiving": "Orphaned (source cancelled/missing)",
 	"flag_mismatch": "Flag Mismatch (one-sided internal)",
 	"no_counter_doc": "Missing Counter-Document",
+	"internal_no_source": "Internal supplier, no BNS source link",
 }
 
 
@@ -1224,6 +1225,51 @@ def _audit_sales_invoices(filters, settings):
 	return results
 
 
+def _srbnb_account(company):
+	"""The company's Stock Received But Not Billed account (no internal transfer
+	Purchase Receipt should ever post here)."""
+	acc = (frappe.db.get_value("Company", company, "stock_received_but_not_billed") or "").strip()
+	if not acc:
+		acc = frappe.db.get_value(
+			"Account",
+			{"company": company, "account_type": "Stock Received But Not Billed", "is_group": 0},
+			"name",
+		) or ""
+	return acc
+
+
+def _flag_unlinked_internal_pr(row):
+	"""Internal-supplier Purchase Receipt that the classifier skipped because it has
+	no BNS source reference (Delivery Note / Sales Invoice). We can't reconstruct
+	the full expected pattern, but such a receipt must NOT have posted to Stock
+	Received But Not Billed -- an internal transfer credits Stock In Transit, not
+	SRBNB. Flag any SRBNB hit so these stuck receipts stop being invisible."""
+	doc = frappe.get_doc("Purchase Receipt", row.name)
+	if _is_zero_amount_document(doc):
+		return None
+	srbnb = _srbnb_account(doc.company)
+	if not srbnb:
+		return None
+	gl_entries = _fetch_gl_entries("Purchase Receipt", row.name)
+	if not gl_entries:
+		return None
+	actual = _actual_gl_account_sides(gl_entries)
+	hits = {(acc, side) for (acc, side) in actual if acc == srbnb}
+	if not hits:
+		return None
+	return _build_row(
+		row, "internal_no_source", "Unexpected Account (No BNS Source Link)",
+		unexpected_accounts=hits,
+		details=(
+			"Internal-supplier receipt posted to Stock Received But Not Billed and has "
+			"no BNS source reference (Delivery Note / Sales Invoice), so the internal GL "
+			"rewrite never ran and this SRBNB value never clears. Fix: link the receipt "
+			"to its internal Sales Invoice / Delivery Note and repost, or reverse the "
+			"SRBNB to the internal transfer account via a Journal Entry."
+		),
+	)
+
+
 def _audit_purchase_receipts(filters, settings):
 	"""Audit GL and SLE for BNS internal Purchase Receipts."""
 	conditions, values = _build_date_conditions(filters, alias="pr")
@@ -1245,6 +1291,9 @@ def _audit_purchase_receipts(filters, settings):
 	for row in docs:
 		scope = _classify_pr(row)
 		if not scope:
+			# Internal-supplier receipt with no BNS source link: the classifier
+			# can't type it, but it still must not sit in SRBNB. Flag that.
+			_append_if(results, _flag_unlinked_internal_pr(row))
 			continue
 
 		doc = frappe.get_doc("Purchase Receipt", row.name)
