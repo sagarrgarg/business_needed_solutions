@@ -86,11 +86,10 @@ def get_pending_pod_invoices(company=None, fiscal_year=None, from_date=None, to_
 	internal_customers = [
 		c.name for c in frappe.get_all(
 			"Customer",
-			filters=[
+			or_filters=[
 				["Customer", "is_internal_customer", "=", 1],
 				["Customer", "is_bns_internal_customer", "=", 1]
 			],
-			or_filters=True,
 			fields=["name"]
 		)
 	]
