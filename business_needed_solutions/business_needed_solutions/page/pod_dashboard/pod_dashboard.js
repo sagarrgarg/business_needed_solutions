@@ -37,7 +37,7 @@ class PODDashboard {
 
 		// Pagination State
 		this.start = 0;
-		this.page_length = 20;
+		this.page_length = 500;
 		this.total = 0;
 
 		this.init();
@@ -903,7 +903,8 @@ class PODDashboard {
 
 			/* ─── Table ─────────────────────────────────────────────── */
 			.pod-table-wrapper {
-				max-height: calc(100vh - 350px);
+				max-height: calc(100vh - 220px);
+				min-height: 500px;
 				overflow-y: auto;
 			}
 			.pod-table {

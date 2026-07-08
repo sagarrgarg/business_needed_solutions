@@ -67,7 +67,7 @@ def get_pending_pod_invoices(
 	customer=None,
 	pod_status=None,
 	start=0,
-	page_length=20,
+	page_length=500,
 	search_name=None,
 	search_customer=None,
 	search_posting_date=None,
@@ -88,7 +88,7 @@ def get_pending_pod_invoices(
 
 	company = company or _default_company()
 	start = frappe.utils.cint(start)
-	page_length = frappe.utils.cint(page_length) or 20
+	page_length = frappe.utils.cint(page_length) or 500
 	
 	if fiscal_year and not (from_date and to_date):
 		year_start_date, year_end_date = frappe.db.get_value(
