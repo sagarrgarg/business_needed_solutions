@@ -370,6 +370,12 @@ def _load_withholding(wh, tax_table, inv_table, parents):
 	is any deduction, nor the raw GL debit, which could be a return/payment)."""
 	if not parents:
 		return
+	# is_tax_withholding_account exists on Purchase Taxes and Charges but NOT on
+	# Sales Taxes and Charges in some ERPNext versions -- guard so the report
+	# never crashes with "Unknown column" when TCS-on-sales isn't modelled.
+	tax_doctype = tax_table[3:] if tax_table.startswith("tab") else tax_table
+	if not frappe.db.has_column(tax_doctype, "is_tax_withholding_account"):
+		return
 	# amount = company (base) currency for the debit/credit columns;
 	# amount_ac = transaction currency for the *_in_account_currency columns.
 	rows = frappe.db.sql(
