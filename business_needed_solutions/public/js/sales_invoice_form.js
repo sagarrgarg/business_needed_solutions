@@ -60,6 +60,16 @@ frappe.ui.form.on('Sales Invoice', {
     },
 
     refresh: function(frm) {
+        // Show missing POD warning banner if document is submitted and has incomplete POD fields
+        if (frm.doc.docstatus === 1) {
+            if (!frm.doc.bns_pod_status || !frm.doc.bns_pod_date || !frm.doc.bns_pod_attachment) {
+                frm.dashboard.set_headline(
+                    __("<strong>Alert:</strong> Proof of Delivery (POD) details are incomplete. Please complete them in the <strong>POD Details</strong> section in the Details tab."),
+                    "orange"
+                );
+            }
+        }
+
         // Value-only Credit Note shortcut: shown on draft return SIs. Flips
         // update_stock off and zeroes every item qty so the SI matches the
         // zero-qty-return shape detected by the BNS Settings opt-in bypass
