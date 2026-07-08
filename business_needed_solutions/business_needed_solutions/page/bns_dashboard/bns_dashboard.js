@@ -815,7 +815,9 @@ class BNSDashboard {
 	}
 
 	async load_tds_fixables() {
-		if (!this.is_system_manager) return;
+		// Access is decided by get_fixables_config (toggle + SysMgr or Backfill
+		// Role); refresh() only calls this when tds_enabled, so no client-side
+		// System-Manager gate here (it would wrongly block allowed non-SysMgr roles).
 		await this.load_tax_withholding_categories();
 		await Promise.all([
 			this.load_suppliers_missing_tds(),
@@ -825,7 +827,6 @@ class BNSDashboard {
 	}
 
 	async load_tax_withholding_categories() {
-		if (!this.is_system_manager) return;
 		try {
 			const result = await frappe.call({
 				method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.get_tax_withholding_categories",
