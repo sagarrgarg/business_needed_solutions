@@ -26,7 +26,7 @@ app_license = "Commercial"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/business_needed_solutions/css/business_needed_solutions.css"
-app_include_js = ["/assets/business_needed_solutions/js/sales_invoice_form.js?v=122",
+app_include_js = [
                   "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=216",
                   "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=51",
                   "/assets/business_needed_solutions/js/delivery_note.js?v=137",
@@ -63,7 +63,7 @@ doctype_js = {
               "Stock Entry" : "public/js/doctype_item_grid_controls.js",
               
               # Sales Documents
-              "Sales Invoice" : "public/js/doctype_item_grid_controls.js",
+              "Sales Invoice" : ["public/js/doctype_item_grid_controls.js", "public/js/sales_invoice_form.js"],
               "Sales Order" : ["public/js/doctype_item_grid_controls.js", "public/js/update_items_override.js"],
               "Delivery Note" : "public/js/doctype_item_grid_controls.js",
               
