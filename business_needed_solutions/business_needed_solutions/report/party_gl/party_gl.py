@@ -370,8 +370,11 @@ def _load_withholding(wh, tax_table, inv_table, parents):
 	is any deduction, nor the raw GL debit, which could be a return/payment)."""
 	if not parents:
 		return
+	# amount = company (base) currency for the debit/credit columns;
+	# amount_ac = transaction currency for the *_in_account_currency columns.
 	rows = frappe.db.sql(
-		f"""select parent, sum(base_tax_amount) as amount, max(account_head) as account
+		f"""select parent, sum(base_tax_amount) as amount, sum(tax_amount) as amount_ac,
+			max(account_head) as account
 		from `{tax_table}`
 		where parent in %(p)s and is_tax_withholding_account = 1
 		group by parent having amount > 0""",
@@ -393,6 +396,7 @@ def _load_withholding(wh, tax_table, inv_table, parents):
 		m = meta.get(r.parent, {})
 		wh[r.parent] = {
 			"amount": flt(r.amount),
+			"amount_ac": flt(r.amount_ac),
 			"account": r.account,
 			"section": _section_code(m.get("section")),
 			"is_return": m.get("is_return"),
@@ -441,9 +445,13 @@ def inject_tds_breakup(data, filters):
 		out.append(d)
 		vno, vt = d.get("voucher_no"), d.get("voucher_type")
 		info = wh.get(vno) if vno else None
-		if not info or vt not in ("Purchase Invoice", "Sales Invoice") or d.get("is_tds_row"):
+		# Only split the PARTY-account leg. Without a party filter a PI/SI has
+		# several legs (party, expense, GST) all typed the same -- the withholding
+		# belongs to the party leg (the one carrying `party`), never the others.
+		if not info or vt not in ("Purchase Invoice", "Sales Invoice") or d.get("is_tds_row") or not d.get("party"):
 			continue
 		W = flt(info.get("amount"))
+		Wac = flt(info.get("amount_ac")) or W
 		# Skip nothing-due and returns (sign reversal on returns -- handled later).
 		if W <= 0 or info.get("is_return"):
 			continue
@@ -452,15 +460,15 @@ def inject_tds_breakup(data, filters):
 		# W currently sits in the debit is removed; the rest is added back to the
 		# credit so the invoice shows gross. (Works whether TDS was posted as a
 		# separate party debit -- backfill -- or netted into the credit -- native.)
-		def _degross(dr_key, cr_key):
+		def _degross(dr_key, cr_key, amt):
 			dr, cr = flt(d.get(dr_key)), flt(d.get(cr_key))
-			taken = min(dr, W)
+			taken = min(dr, amt)
 			d[dr_key] = dr - taken
-			d[cr_key] = cr + (W - taken)
-			return W - taken  # column-sum delta added to both debit and credit
+			d[cr_key] = cr + (amt - taken)
+			return amt - taken  # column-sum delta added to both debit and credit
 
-		bump += _degross("debit", "credit")
-		bump_ac += _degross("debit_in_account_currency", "credit_in_account_currency")
+		bump += _degross("debit", "credit", W)
+		bump_ac += _degross("debit_in_account_currency", "credit_in_account_currency", Wac)
 
 		kind = "TCS" if vt == "Sales Invoice" else "TDS"
 		section = info.get("section")
@@ -476,7 +484,7 @@ def inject_tds_breakup(data, filters):
 			"party_type": d.get("party_type"),
 			"debit": W,
 			"credit": 0.0,
-			"debit_in_account_currency": W,
+			"debit_in_account_currency": Wac,
 			"credit_in_account_currency": 0.0,
 			"account_currency": d.get("account_currency"),
 			"remarks": _("Withheld against {0}").format(vno),
