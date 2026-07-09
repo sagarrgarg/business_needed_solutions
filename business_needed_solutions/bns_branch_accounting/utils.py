@@ -2351,6 +2351,42 @@ def _resolve_valuation_from_gl_entries(
     return valuation_amount, next(iter(accounts)), ""
 
 
+def _resolve_stock_account_from_warehouses(doc) -> Optional[str]:
+    """Resolve the single stock account for a document's stock-item warehouses,
+    from ERPNext's warehouse account map (which resolves account-less warehouses
+    to the company default inventory account -- see get_warehouse_account_map).
+
+    Fallback for when [[_resolve_valuation_from_gl_entries]] cannot find a stock
+    account ON THE EXPECTED SIDE of the source GL. That happens for RETURN
+    documents whose stock leg nets out of ERPNext's own GL (e.g. when an item's
+    expense_account IS the stock account), so the side-scan finds no row and the
+    return would silently drop its Stock-in-Hand / transit pair even though the
+    SLE moved real stock. Returns None when the doc spans multiple distinct stock
+    accounts (do not guess) or none resolves -- callers then keep prior behaviour.
+    """
+    if not doc.get("company"):
+        return None
+    try:
+        from erpnext.stock import get_warehouse_account_map
+
+        wmap = get_warehouse_account_map(doc.company) or {}
+    except Exception:
+        return None
+    accounts = set()
+    for item in (doc.get("items") or []):
+        warehouse = (item.get("warehouse") or "").strip()
+        if not warehouse:
+            continue
+        item_code = item.get("item_code")
+        if item_code and not cint(frappe.get_cached_value("Item", item_code, "is_stock_item")):
+            continue
+        row = wmap.get(warehouse)
+        account = (row.get("account") if row else None)
+        if account:
+            accounts.add(account)
+    return next(iter(accounts)) if len(accounts) == 1 else None
+
+
 def _make_bns_gl_entry(doc, account: str, debit: float = 0.0, credit: float = 0.0, against: str = "", template: Optional[Dict[str, Any]] = None):
     """Build GL entry while preserving dimensions from template."""
     template = template or {}
@@ -2553,6 +2589,12 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
         gl_entries, side=val_side, company=doc.company
     )
+    # A purchase-return PR's stock leg can net out of ERPNext's source GL, so the
+    # side-scan finds no row and the stock pair would be dropped. Fall back to the
+    # warehouse's stock account (forward flows resolve a row above, so this only
+    # fires when the scan found nothing). See [[_rewrite_bns_internal_pi_gl_entries]].
+    if not stock_account:
+        stock_account = _resolve_stock_account_from_warehouses(doc)
     # Use the ACTUAL stock value moved (SLE svd) for the transit leg, not
     # ERPNext's valuation_rate-based GL number (which diverges when an item's
     # svd is 0), so receiver-transit-Cr == sender-transit-Dr.
@@ -2795,6 +2837,14 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
             gl_entries, side=stock_gl_side, company=doc.company
         )
+        # A RETURN's stock leg can net out of ERPNext's source GL (e.g. when the
+        # item's expense_account IS the stock account), so the side-scan above
+        # finds no row and would silently DROP the stock pair. Fall back to the
+        # warehouse's stock account so the leg is still posted (from the SLE
+        # value). Forward flows resolve a stock row above, so this only fires when
+        # the scan genuinely found nothing.
+        if not stock_account:
+            stock_account = _resolve_stock_account_from_warehouses(doc)
         # Use the ACTUAL stock value moved (SLE svd) for the transit leg, not
         # ERPNext's valuation_rate-based GL number (which diverges when an item's
         # svd is 0), so the receiver's Internal COGS credit == the sender's debit.

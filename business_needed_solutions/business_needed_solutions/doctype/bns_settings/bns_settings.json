@@ -32,6 +32,14 @@
   "negative_stock_cutoff_date",
   "column_break_ns_override",
   "negative_stock_override_roles",
+  "posting_time_edit_section",
+  "enable_posting_time_edit",
+  "posting_time_edit_roles",
+  "dashboard_fixables_section",
+  "enable_expense_item_fixables",
+  "expense_fixables_roles",
+  "enable_tds_category_fixables",
+  "tds_backfill_roles",
   "purchase_attachment_section",
   "enforce_purchase_document_attachments",
   "purchase_attachment_cutoff_date",
@@ -248,6 +256,61 @@
    "fieldtype": "Table MultiSelect",
    "label": "Override Roles",
    "options": "Has Role"
+  },
+  {
+   "fieldname": "posting_time_edit_section",
+   "fieldtype": "Section Break",
+   "label": "Post-Submit Posting Time Edit"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_posting_time_edit",
+   "fieldtype": "Check",
+   "label": "Allow Editing Posting Time After Submit",
+   "description": "When ON, users with the roles below (and System Manager) can change posting date/time on a submitted stock voucher; the change reposts the stock ledger so it re-sorts and re-values. Frozen accounting periods are always refused. Use for the 'purchase keyed in the evening, sales all day' negative-stock pattern."
+  },
+  {
+   "depends_on": "eval:doc.enable_posting_time_edit",
+   "fieldname": "posting_time_edit_roles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Allowed Roles",
+   "options": "Has Role",
+   "description": "Roles that may edit posting time after submit, in addition to System Manager."
+  },
+  {
+   "fieldname": "dashboard_fixables_section",
+   "fieldtype": "Section Break",
+   "label": "BNS Dashboard Fixables"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_expense_item_fixables",
+   "fieldtype": "Check",
+   "label": "Enable Expense Item Fixables",
+   "description": "When ON, the Expense Item Fixables tools on the BNS Dashboard are available to System Manager and the roles below. Purchase Invoice expense-account corrections are restricted to the current fiscal year; only a System Manager can reach prior fiscal years, enforced server-side."
+  },
+  {
+   "depends_on": "eval:doc.enable_expense_item_fixables",
+   "fieldname": "expense_fixables_roles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Additional Expense Fix Roles",
+   "options": "Has Role",
+   "description": "Roles that may use Expense Item Fixables for the current fiscal year, in addition to System Manager. Prior-fiscal-year edits remain System Manager only."
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_tds_category_fixables",
+   "fieldtype": "Check",
+   "label": "Enable TDS Category Fixables & Backfill",
+   "description": "When ON, enables the TDS Category Fixables tools on the BNS Dashboard (System Manager only) and TDS backfill on submitted Purchase Invoices. Corrections/backfills are restricted to the current fiscal year; older invoices are never listed and are refused server-side. Applying TDS sets the supplier's category, adds the withholding row and posts only the incremental TDS GL (GST/ITC is not re-booked); paid/partly-paid PIs are unreconciled first; frozen periods are refused."
+  },
+  {
+   "depends_on": "eval:doc.enable_tds_category_fixables",
+   "fieldname": "tds_backfill_roles",
+   "fieldtype": "Table MultiSelect",
+   "label": "Additional Backfill Roles",
+   "options": "Has Role",
+   "description": "Roles that may run the whitelisted per-PI TDS backfill API directly, in addition to System Manager. The BNS Dashboard TDS tools remain System Manager only."
   },
   {
    "fieldname": "purchase_attachment_section",

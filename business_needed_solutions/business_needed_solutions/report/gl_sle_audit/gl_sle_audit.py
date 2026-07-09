@@ -51,6 +51,7 @@ def _columns() -> List[Dict[str, Any]]:
         {"label": _("Posting Date"),  "fieldname": "posting_date", "fieldtype": "Date",         "width": 110},
         {"label": _("Company"),       "fieldname": "company",      "fieldtype": "Link",         "options": "Company", "width": 160},
         {"label": _("Status"),        "fieldname": "status",       "fieldtype": "Data",         "width": 190},
+        {"label": _("Posting Mismatch"), "fieldname": "posting_mismatch", "fieldtype": "Data",   "width": 280},
         {"label": _("Expected GL"),   "fieldname": "expected_gl",  "fieldtype": "Check",        "width": 80},
         {"label": _("GL Count"),      "fieldname": "gl_count",     "fieldtype": "Int",          "width": 80},
         {"label": _("GL Debit"),      "fieldname": "gl_dr",        "fieldtype": "Currency",     "width": 120},

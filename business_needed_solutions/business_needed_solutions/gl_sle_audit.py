@@ -167,6 +167,26 @@ STATUS_CANCELLED_ACTIVE_GL = "Cancelled · active GL"
 STATUS_CANCELLED_ACTIVE_SLE = "Cancelled · active SLE"
 STATUS_CANCELLED_ACTIVE_BOTH = "Cancelled · active GL & SLE"
 
+# A submitted voucher whose GL and/or SLE rows carry a posting date/time that
+# DIFFERS from the voucher header. GL/SLE always copy the header's posting
+# datetime at submit; a divergence means a later partial edit/repost (or a
+# manual/DB change) moved one side and not the other -- which corrupts ledger
+# ORDER (FIFO valuation, running balance) and reconciliation. GL Entry has no
+# posting_time, so only its date is compared; SLE compares date AND time.
+STATUS_POSTING_MISMATCH = "Posting Date/Time Mismatch"
+
+# Doctypes whose parent table carries a posting_time (stock movement order).
+_HAS_POSTING_TIME = frozenset(
+    {
+        "Sales Invoice",
+        "Purchase Invoice",
+        "Delivery Note",
+        "Purchase Receipt",
+        "Stock Entry",
+        "Stock Reconciliation",
+    }
+)
+
 # Imbalanced SLE intentionally dropped — sign mismatches are byproducts
 # of upstream negative-stock issues, NOT bugs in the GL/SLE pipeline.
 # Use BNS Settings `enable_per_warehouse_negative_stock_disallow` +
@@ -191,6 +211,30 @@ def _is_perpetual(company: Optional[str]) -> bool:
     return cache[company]
 
 
+def _posting_mismatch_bits(r: Dict[str, Any]) -> List[str]:
+    """Human descriptions of any GL/SLE posting date/time divergence from the
+    voucher header. Empty list when consistent. GL Entry has no posting_time so
+    only its date is compared; SLE compares both date and time."""
+    bits: List[str] = []
+    header_pd = getdate(r["posting_date"])
+    header_pt = r.get("header_posting_time")  # timedelta, or None for JE/LCV/PE
+
+    if cint(r.get("gl_count")):
+        gmin, gmax = r.get("gl_min_pd"), r.get("gl_max_pd")
+        if (gmin and getdate(gmin) != header_pd) or (gmax and getdate(gmax) != header_pd):
+            bits.append(f"GL date {gmin}–{gmax} vs header {header_pd}")
+
+    if cint(r.get("sle_count")):
+        smin, smax = r.get("sle_min_pd"), r.get("sle_max_pd")
+        if (smin and getdate(smin) != header_pd) or (smax and getdate(smax) != header_pd):
+            bits.append(f"SLE date {smin}–{smax} vs header {header_pd}")
+        if header_pt is not None:
+            tmin, tmax = r.get("sle_min_pt"), r.get("sle_max_pt")
+            if (tmin is not None and tmin != header_pt) or (tmax is not None and tmax != header_pt):
+                bits.append(f"SLE time {tmin}–{tmax} vs header {header_pt}")
+    return bits
+
+
 def _audit_one_doctype(
     doctype: str,
     cutoff_date: Optional[str],
@@ -212,6 +256,11 @@ def _audit_one_doctype(
     # SI/PI/DN/PR — zero-amount docs legitimately produce no GL. None
     # for doctypes where the field doesn't apply (SE, SR, JE, LCV).
     select_doc_total = f"p.{total_field}" if total_field else "0"
+
+    # Header posting_time (for the posting-datetime-mismatch check). Doctypes
+    # without a posting_time column (JE/LCV/PE) select NULL and skip the time leg.
+    has_posting_time = doctype in _HAS_POSTING_TIME
+    select_posting_time = "p.posting_time" if has_posting_time else "NULL"
 
     # Stock-item subquery: counts stock items + fixed assets per parent doc.
     # Defaults to (0, 0) when the doc has no item table (JE, LCV) — those
@@ -272,6 +321,7 @@ def _audit_one_doctype(
         SELECT
             p.name,
             p.{posting_field} AS posting_date,
+            {select_posting_time} AS header_posting_time,
             p.company,
             {select_update_stock} AS update_stock,
             {select_doc_total}   AS doc_total,
@@ -279,16 +329,20 @@ def _audit_one_doctype(
             COALESCE(gl.gl_count, 0) AS gl_count,
             COALESCE(gl.gl_dr, 0)    AS gl_dr,
             COALESCE(gl.gl_cr, 0)    AS gl_cr,
+            gl.gl_min_pd, gl.gl_max_pd,
             COALESCE(sle.sle_count, 0)              AS sle_count,
             COALESCE(sle.sle_value_movement, 0)     AS sle_value_movement,
-            COALESCE(sle.sle_value_net, 0)          AS sle_value_net
+            COALESCE(sle.sle_value_net, 0)          AS sle_value_net,
+            sle.sle_min_pd, sle.sle_max_pd, sle.sle_min_pt, sle.sle_max_pt
         FROM `{parent_table}` p
         {stock_join_sql}
         LEFT JOIN (
             SELECT voucher_no,
                    COUNT(*) AS gl_count,
                    SUM(debit)  AS gl_dr,
-                   SUM(credit) AS gl_cr
+                   SUM(credit) AS gl_cr,
+                   MIN(posting_date) AS gl_min_pd,
+                   MAX(posting_date) AS gl_max_pd
             FROM `tabGL Entry`
             WHERE voucher_type = %(doctype)s AND is_cancelled = 0
             GROUP BY voucher_no
@@ -305,7 +359,11 @@ def _audit_one_doctype(
             SELECT voucher_no,
                    COUNT(*) AS sle_count,
                    SUM(ABS(stock_value_difference)) AS sle_value_movement,
-                   SUM(stock_value_difference)      AS sle_value_net
+                   SUM(stock_value_difference)      AS sle_value_net,
+                   MIN(posting_date) AS sle_min_pd,
+                   MAX(posting_date) AS sle_max_pd,
+                   MIN(posting_time) AS sle_min_pt,
+                   MAX(posting_time) AS sle_max_pt
             FROM `tabStock Ledger Entry`
             WHERE voucher_type = %(doctype)s AND is_cancelled = 0
             GROUP BY voucher_no
@@ -333,6 +391,11 @@ def _audit_one_doctype(
         if expects_sle and not r["sle_count"]:
             statuses.append(STATUS_MISSING_SLE)
 
+        # Posting date/time divergence between GL/SLE and the voucher header.
+        mismatch_bits = _posting_mismatch_bits(r)
+        if mismatch_bits:
+            statuses.append(STATUS_POSTING_MISMATCH)
+
         if not statuses:
             continue
 
@@ -359,6 +422,7 @@ def _audit_one_doctype(
             "stock_item_count": cint(r.get("stock_item_count")),
             "asset_item_count": cint(r.get("asset_item_count")),
             "total_item_count": cint(r.get("total_item_count")),
+            "posting_mismatch": "; ".join(mismatch_bits),
             "status": status_label,
         })
 
@@ -1053,6 +1117,156 @@ def _heal_cancelled_active(doctype: str, name: str) -> Dict[str, Any]:
         "live_sle_before": len(sles),
         "live_sle_after": 0,
     }
+
+
+def _live_posting_mismatch(doctype: str, name: str) -> List[str]:
+    """Recompute the GL/SLE-vs-header posting divergence for one voucher (used by
+    the heal preview). Reuses [[_posting_mismatch_bits]]."""
+    has_pt = doctype in _HAS_POSTING_TIME
+    fields = ["posting_date"] + (["posting_time"] if has_pt else [])
+    header = frappe.db.get_value(doctype, name, fields, as_dict=True) or {}
+    r: Dict[str, Any] = {
+        "posting_date": header.get("posting_date"),
+        "header_posting_time": header.get("posting_time") if has_pt else None,
+    }
+    gl = frappe.db.sql(
+        """SELECT COUNT(*) c, MIN(posting_date) mn, MAX(posting_date) mx
+           FROM `tabGL Entry`
+           WHERE voucher_type=%s AND voucher_no=%s AND is_cancelled=0""",
+        (doctype, name), as_dict=True,
+    )[0]
+    r.update({"gl_count": gl.c, "gl_min_pd": gl.mn, "gl_max_pd": gl.mx})
+    sle = frappe.db.sql(
+        """SELECT COUNT(*) c, MIN(posting_date) mnd, MAX(posting_date) mxd,
+                  MIN(posting_time) mnt, MAX(posting_time) mxt
+           FROM `tabStock Ledger Entry`
+           WHERE voucher_type=%s AND voucher_no=%s AND is_cancelled=0""",
+        (doctype, name), as_dict=True,
+    )[0]
+    r.update({
+        "sle_count": sle.c, "sle_min_pd": sle.mnd, "sle_max_pd": sle.mxd,
+        "sle_min_pt": sle.mnt, "sle_max_pt": sle.mxt,
+    })
+    return _posting_mismatch_bits(r)
+
+
+def _heal_posting_mismatch(doctype: str, name: str) -> Dict[str, Any]:
+    """Re-sync a SUBMITTED voucher's GL and SLE posting datetime to the header,
+    then repost affected item-warehouses so order + FIFO valuation recompute.
+
+    The header is the source of truth; GL/SLE must match it. GL Entry carries
+    only posting_date; SLE carries posting_date, posting_time and (v15) a combined
+    posting_datetime. Guarded to run ONLY on docstatus=1."""
+    from erpnext.stock.utils import get_combine_datetime
+
+    ds = frappe.db.get_value(doctype, name, "docstatus")
+    if cint(ds) != 1:
+        raise frappe.ValidationError(
+            f"{doctype} {name} is not submitted (docstatus={ds}); heal aborted"
+        )
+
+    header = frappe.db.get_value(doctype, name, ["posting_date", "posting_time"], as_dict=True) or {}
+    header_pd = header.get("posting_date")
+    header_pt = header.get("posting_time") or "00:00:00"
+    header_dt = get_combine_datetime(header_pd, header_pt)
+
+    # 1) GL Entry — date only.
+    gl_fixed = 0
+    for g in frappe.get_all(
+        "GL Entry",
+        filters={"voucher_type": doctype, "voucher_no": name, "is_cancelled": 0},
+        fields=["name", "posting_date"],
+    ):
+        if str(g.posting_date) != str(header_pd):
+            frappe.db.set_value("GL Entry", g.name, {"posting_date": header_pd}, update_modified=True)
+            gl_fixed += 1
+
+    # 2) SLE — date + time (+ combined posting_datetime when present).
+    has_pdt = frappe.get_meta("Stock Ledger Entry").has_field("posting_datetime")
+    sle_vals = {"posting_date": header_pd, "posting_time": header_pt}
+    if has_pdt:
+        sle_vals["posting_datetime"] = header_dt
+    sles = frappe.get_all(
+        "Stock Ledger Entry",
+        filters={"voucher_type": doctype, "voucher_no": name, "is_cancelled": 0},
+        fields=["name", "item_code", "warehouse", "company"],
+    )
+    for s in sles:
+        frappe.db.set_value("Stock Ledger Entry", s.name, sle_vals, update_modified=True)
+
+    # 3) repost affected item-warehouses so the ledger re-sorts + re-values.
+    reposted: List[Dict[str, Any]] = []
+    seen: set = set()
+    for s in sles:
+        if not s.item_code or not s.warehouse:
+            continue
+        key = (s.item_code, s.warehouse)
+        if key in seen:
+            continue
+        seen.add(key)
+        riv = frappe.get_doc({
+            "doctype": "Repost Item Valuation",
+            "based_on": "Item and Warehouse",
+            "company": s.company,
+            "item_code": s.item_code,
+            "warehouse": s.warehouse,
+            "posting_date": header_pd,
+            "posting_time": header_pt,
+            "allow_negative_stock": 1,
+            "allow_zero_rate": 1,
+        })
+        riv.flags.ignore_permissions = True
+        riv.insert()
+        riv.submit()
+        riv.repost_now()
+        reposted.append({
+            "item_code": s.item_code, "warehouse": s.warehouse,
+            "riv": riv.name, "status": riv.status,
+        })
+
+    actions_run: List[str] = []
+    if gl_fixed:
+        actions_run.append(f"synced {gl_fixed} GL date")
+    if sles:
+        actions_run.append(f"synced {len(sles)} SLE datetime")
+    if reposted:
+        actions_run.append(f"reposted {len(reposted)} item-warehouse")
+    return {
+        "actions_run": actions_run,
+        "skipped": [],
+        "gl_synced": gl_fixed,
+        "sle_synced": len(sles),
+        "reposted": reposted,
+    }
+
+
+@frappe.whitelist()
+def heal_posting_mismatch(docs, dry_run=True):
+    """Heal 'Posting Date/Time Mismatch' rows: sync each voucher's GL/SLE posting
+    datetime to its header and repost. dry_run (default) previews the live
+    divergence per doc without writing."""
+    _bns_require_accounts_write()
+    docs = _normalize_doc_list(docs)
+    dry_run = cint(dry_run)
+    results: List[Dict[str, Any]] = []
+    for d in docs:
+        doctype, name = d.get("doctype"), d.get("name")
+        if not doctype or not name:
+            continue
+        if dry_run:
+            results.append({
+                "doctype": doctype, "name": name, "healed": False,
+                "mismatch": "; ".join(_live_posting_mismatch(doctype, name)),
+            })
+        else:
+            try:
+                res = _heal_posting_mismatch(doctype, name)
+                results.append({"doctype": doctype, "name": name, "healed": True, **res})
+            except Exception as e:
+                results.append({"doctype": doctype, "name": name, "healed": False, "error": str(e)[:300]})
+    if not dry_run:
+        frappe.db.commit()
+    return {"dry_run": bool(dry_run), "attempted": len(docs), "results": results}
 
 
 def _plan_repair(doctype: str, status: str) -> List[str]:

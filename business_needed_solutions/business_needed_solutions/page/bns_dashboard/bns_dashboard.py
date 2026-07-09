@@ -9,7 +9,7 @@ Provides data and actions for the BNS Dashboard page.
 
 import frappe
 from frappe import _
-from frappe.utils import flt, cstr
+from frappe.utils import flt, cstr, cint
 
 
 # -------------------------------------------------------------------
@@ -60,6 +60,82 @@ def _require_dashboard_write(*doctypes):
 			)
 
 
+def _require_fixables_enabled(field, label):
+	"""Hard gate on a BNS Settings toggle. The Expense Item Fixables and TDS
+	Category Fixables tools are each disabled by default and must be switched
+	on in BNS Settings before any of their endpoints will run."""
+	if not frappe.db.get_single_value("BNS Settings", field):
+		frappe.throw(
+			_("{0} is disabled. Enable it in BNS Settings.").format(label),
+			frappe.PermissionError,
+		)
+
+
+def _expense_roles():
+	"""Roles (besides System Manager) allowed to use Expense Item Fixables, from
+	BNS Settings > Additional Expense Fix Roles. Cached per request."""
+	key = "_bns_expense_fixables_roles"
+	if key not in frappe.flags:
+		frappe.flags[key] = set(
+			frappe.get_all(
+				"Has Role",
+				filters={"parenttype": "BNS Settings", "parentfield": "expense_fixables_roles"},
+				pluck="role",
+			)
+		)
+	return frappe.flags[key]
+
+
+def can_fix_expense():
+	"""True when Expense Item Fixables is enabled AND the user is a System Manager
+	or holds an Additional Expense Fix Role. Prior-fiscal-year edits are further
+	restricted to System Manager, enforced per-invoice."""
+	if not frappe.db.get_single_value("BNS Settings", "enable_expense_item_fixables", cache=True):
+		return False
+	roles = set(frappe.get_roles())
+	return "System Manager" in roles or bool(_expense_roles() & roles)
+
+
+def _require_expense_fixables():
+	"""Gate for every Expense Item Fixables endpoint: the BNS Settings toggle AND
+	(System Manager OR an Additional Expense Fix Role). Invoices prior to the
+	current fiscal year are System Manager only, enforced at query/worker level."""
+	if not can_fix_expense():
+		frappe.throw(
+			_("Expense Item Fixables is disabled, or you don't hold an allowed role."),
+			frappe.PermissionError,
+		)
+
+
+def _require_tds_fixables():
+	"""Gate for every TDS Category Fixables endpoint: the BNS Settings toggle AND
+	(System Manager OR an Additional Backfill Role) -- same access as the per-PI
+	backfill (can_backfill_tds). Backfilling invoices PRIOR to the current fiscal
+	year is additionally restricted to System Manager, enforced per-invoice."""
+	from business_needed_solutions.business_needed_solutions.overrides.tds_backfill import can_backfill_tds
+	if not can_backfill_tds():
+		frappe.throw(
+			_("TDS Category Fixables is disabled, or you don't hold an allowed role."),
+			frappe.PermissionError,
+		)
+
+
+@frappe.whitelist()
+def get_fixables_config():
+	"""Frontend gate helper: which dashboard fixables the current user may see.
+	Expense Item Fixables = System Manager + its toggle. TDS Category Fixables =
+	its toggle + (System Manager OR an Additional Backfill Role); prior-fiscal-year
+	backfill within it stays System Manager only."""
+	_require_dashboard_read()
+	from business_needed_solutions.business_needed_solutions.overrides.tds_backfill import can_backfill_tds
+	is_sys_mgr = "System Manager" in frappe.get_roles()
+	return {
+		"is_system_manager": is_sys_mgr,
+		"expense_enabled": bool(can_fix_expense()),
+		"tds_enabled": bool(can_backfill_tds()),
+	}
+
+
 @frappe.whitelist()
 def get_items_missing_expense_account(company=None):
 	"""
@@ -72,6 +148,7 @@ def get_items_missing_expense_account(company=None):
 		dict with count and items list
 	"""
 	_require_dashboard_read()
+	_require_expense_fixables()
 	# Get default company if not provided
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
@@ -119,10 +196,13 @@ def set_item_expense_account(item_code, expense_account, company=None):
 	Returns:
 		dict with success status
 	"""
-	_require_dashboard_write("Item")
+	# Access is the fixables gate (toggle + System Manager or Additional Expense
+	# Role); the save runs with ignore_permissions, so we don't also require raw
+	# doctype write here (parity with the TDS fixer).
+	_require_expense_fixables()
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
-	
+
 	if not expense_account:
 		frappe.throw(_("Expense Account is required"))
 	
@@ -157,7 +237,7 @@ def set_item_expense_account(item_code, expense_account, company=None):
 
 
 @frappe.whitelist()
-def get_purchase_invoices_with_wrong_expense_account(company=None, from_date=None, to_date=None):
+def get_purchase_invoices_with_wrong_expense_account(company=None, from_date=None, to_date=None, include_prior_fy=0):
 	"""
 	Get Purchase Invoices where non-stock items have wrong or missing expense accounts.
 
@@ -178,16 +258,21 @@ def get_purchase_invoices_with_wrong_expense_account(company=None, from_date=Non
 		- items_with_wrong_account: List of PI items where expense account differs from default
 	"""
 	_require_dashboard_read()
+	_require_expense_fixables()
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
-	
-	# Build date filters
-	date_conditions = ""
-	if from_date:
-		date_conditions += " AND pi.posting_date >= %(from_date)s"
-	if to_date:
-		date_conditions += " AND pi.posting_date <= %(to_date)s"
-	
+
+	# Default: current fiscal year only. A System Manager may include prior years
+	# (the flag is ignored otherwise); the background worker re-guards too.
+	fy_start, fy_end = _current_fiscal_year(company)
+	show_prior = cint(include_prior_fy) and ("System Manager" in frappe.get_roles())
+	params = {"company": company, "fy_end": fy_end}
+	if show_prior:
+		date_conditions = " AND pi.posting_date <= %(fy_end)s"
+	else:
+		date_conditions = " AND pi.posting_date >= %(fy_start)s AND pi.posting_date <= %(fy_end)s"
+		params["fy_start"] = fy_start
+
 	# Query for PI items with non-stock items
 	query = """
 		SELECT 
@@ -228,28 +313,27 @@ def get_purchase_invoices_with_wrong_expense_account(company=None, from_date=Non
 		LIMIT 1000
 	""".format(date_conditions=date_conditions)
 	
-	items = frappe.db.sql(query, {
-		"company": company,
-		"from_date": from_date,
-		"to_date": to_date
-	}, as_dict=True)
-	
+	items = frappe.db.sql(query, params, as_dict=True)
+
 	# Separate into two categories
 	items_without_default = []
 	items_with_wrong_account = []
-	
+
 	for item in items:
+		item["prior_fy"] = 1 if str(item.get("posting_date")) < str(fy_start) else 0
 		if not item.item_default_expense_account:
 			items_without_default.append(item)
 		else:
 			items_with_wrong_account.append(item)
-	
+
 	return {
 		"items_without_default": items_without_default,
 		"items_with_wrong_account": items_with_wrong_account,
 		"count_without_default": len(items_without_default),
 		"count_with_wrong_account": len(items_with_wrong_account),
-		"company": company
+		"company": company,
+		"showing_prior_fy": bool(show_prior),
+		"is_system_manager": "System Manager" in frappe.get_roles(),
 	}
 
 
@@ -270,12 +354,11 @@ def bulk_fix_pi_expense_accounts(items):
 	Returns:
 		dict with status and total_invoices (or validation_errors if any fail upfront)
 	"""
-	# Gate on Purchase Invoice write — repost_accounting_entries is a standard
-	# PI operation and handles the GL Entry writes internally with
-	# ignore_permissions=True. Requiring direct GL Entry write here would lock
-	# the action to System / Accounts Manager only, which is stricter than the
-	# underlying ERPNext flow needs.
-	_require_dashboard_write("Purchase Invoice")
+	# Access is the fixables gate (toggle + System Manager or Additional Expense
+	# Role). repost_accounting_entries handles the GL writes internally with
+	# ignore_permissions, and the worker re-guards fiscal year per invoice, so we
+	# don't also require raw Purchase Invoice write here (parity with the TDS fixer).
+	_require_expense_fixables()
 	import json
 	if isinstance(items, str):
 		items = json.loads(items)
@@ -356,6 +439,20 @@ def _process_pi_expense_fix(pi_updates, user):
 					errors.append({
 						"pi_item_name": iu["pi_item_name"],
 						"error": _("Purchase Invoice {0} is not submitted").format(pi_name),
+					})
+				done += 1
+				_publish_progress(done, total, pi_name, success_count, errors, user)
+				continue
+
+			# Current fiscal year is open to allowed roles; anything outside it
+			# (prior year in particular) is System Manager only -- re-checked here so
+			# a stale client can't push an older invoice through.
+			fy_start, fy_end = _current_fiscal_year(pi_doc.company)
+			if not (str(fy_start) <= str(pi_doc.posting_date) <= str(fy_end)) and "System Manager" not in frappe.get_roles():
+				for iu in item_updates:
+					errors.append({
+						"pi_item_name": iu["pi_item_name"],
+						"error": _("Purchase Invoice {0} is outside the current fiscal year — System Manager only").format(pi_name),
 					})
 				done += 1
 				_publish_progress(done, total, pi_name, success_count, errors, user)
@@ -459,11 +556,12 @@ def get_all_expense_items(company=None):
 		dict with count and items list
 	"""
 	_require_dashboard_read()
+	_require_expense_fixables()
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
-	
+
 	items = frappe.db.sql("""
-		SELECT 
+		SELECT
 			i.name as item_code,
 			i.item_name,
 			i.item_group,
@@ -487,6 +585,318 @@ def get_all_expense_items(company=None):
 		"items": items,
 		"company": company
 	}
+
+
+# ===================================================================
+# TDS Category Fixables (System Manager only)
+#
+# Mirrors the Expense Item Fixables tools but for Tax Withholding
+# ("TDS") Category on Suppliers and Purchase Invoices:
+#   1. Suppliers missing a TDS Category  -> fill whichever empty
+#   2. Purchase Invoices (current FY) whose tax_withholding_category
+#      disagrees with the supplier's  -> bulk correct the field
+#   3. Full supplier list with their current TDS Category
+#
+# Every endpoint here is gated to the System Manager role, per the
+# requirement that this whole area is disabled for everyone else.
+# ===================================================================
+
+
+def _require_system_manager():
+	"""Hard gate: only System Manager may read or act on the TDS Category
+	Fixables tools. Enforced server-side so hiding the UI is not the only
+	line of defence."""
+	if "System Manager" not in frappe.get_roles():
+		frappe.throw(
+			_("The TDS Category Fixables tools are restricted to the System Manager role."),
+			frappe.PermissionError,
+		)
+
+
+def _current_fiscal_year(company):
+	"""Return (start_date, end_date) of the fiscal year containing today for
+	the given company. Falls back to the global FY if company has none."""
+	from erpnext.accounts.utils import get_fiscal_year
+	from frappe.utils import nowdate
+
+	fy = get_fiscal_year(nowdate(), company=company, as_dict=True)
+	return fy.year_start_date, fy.year_end_date
+
+
+@frappe.whitelist()
+def get_tax_withholding_categories():
+	"""List of Tax Withholding Category names for the fill/fix dropdowns."""
+	_require_tds_fixables()
+	return frappe.get_all(
+		"Tax Withholding Category",
+		fields=["name"],
+		order_by="name",
+		limit=500,
+	)
+
+
+@frappe.whitelist()
+def get_suppliers_missing_tds_category():
+	"""Enabled suppliers with no tax_withholding_category set."""
+	_require_tds_fixables()
+	suppliers = frappe.db.sql("""
+		SELECT
+			s.name AS supplier,
+			s.supplier_name,
+			s.supplier_group,
+			s.pan
+		FROM `tabSupplier` s
+		WHERE
+			s.disabled = 0
+			AND (s.tax_withholding_category IS NULL OR s.tax_withholding_category = '')
+		ORDER BY s.supplier_name
+		LIMIT 1000
+	""", as_dict=True)
+	return {"count": len(suppliers), "suppliers": suppliers}
+
+
+@frappe.whitelist()
+def get_all_suppliers_with_tds_category():
+	"""All enabled suppliers with their current TDS Category (blank if unset)."""
+	_require_tds_fixables()
+	suppliers = frappe.db.sql("""
+		SELECT
+			s.name AS supplier,
+			s.supplier_name,
+			s.supplier_group,
+			s.tax_withholding_category,
+			s.pan
+		FROM `tabSupplier` s
+		WHERE s.disabled = 0
+		ORDER BY s.supplier_name
+		LIMIT 2000
+	""", as_dict=True)
+	return {"count": len(suppliers), "suppliers": suppliers}
+
+
+@frappe.whitelist()
+def set_supplier_tds_category(supplier, tax_withholding_category):
+	"""Set the tax_withholding_category on one supplier."""
+	_require_tds_fixables()
+	if not tax_withholding_category:
+		frappe.throw(_("Tax Withholding Category is required"))
+	if not frappe.db.exists("Tax Withholding Category", tax_withholding_category):
+		frappe.throw(_("Tax Withholding Category {0} does not exist").format(tax_withholding_category))
+
+	supplier_doc = frappe.get_doc("Supplier", supplier)
+	supplier_doc.tax_withholding_category = tax_withholding_category
+	supplier_doc.save(ignore_permissions=True)
+
+	return {
+		"success": True,
+		"message": _("TDS Category set for {0}").format(supplier),
+	}
+
+
+@frappe.whitelist()
+def get_pis_needing_tds_fix(company=None, include_prior_fy=0):
+	"""Submitted Purchase Invoices whose TDS is not fully applied yet -- shown
+	until every field and the GL are fixed. A PI needs fixing when the supplier
+	has a TDS Category AND any of:
+	  - the PI's category disagrees with the supplier's, OR
+	  - apply_tds is off (TDS never applied), OR
+	  - a TDS row exists but taxes_and_charges_deducted is 0 (old-backfill bug).
+	By default only the CURRENT fiscal year is listed. A System Manager may pass
+	include_prior_fy=1 to also see older invoices (they alone may fix those)."""
+	_require_tds_fixables()
+	if not company:
+		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
+
+	fy_start, fy_end = _current_fiscal_year(company)
+	# Prior-fiscal-year backfill is System Manager only; ignore the flag otherwise.
+	show_prior = cint(include_prior_fy) and ("System Manager" in frappe.get_roles())
+
+	params = {"company": company, "fy_end": fy_end}
+	if show_prior:
+		date_condition = "AND pi.posting_date <= %(fy_end)s"
+	else:
+		date_condition = "AND pi.posting_date >= %(fy_start)s AND pi.posting_date <= %(fy_end)s"
+		params["fy_start"] = fy_start
+
+	rows = frappe.db.sql(f"""
+		SELECT
+			pi.name AS purchase_invoice,
+			pi.posting_date,
+			pi.supplier,
+			pi.supplier_name,
+			pi.apply_tds,
+			pi.tax_withholding_category AS pi_category,
+			pi.taxes_and_charges_deducted,
+			s.tax_withholding_category AS supplier_category,
+			EXISTS(
+				SELECT 1 FROM `tabPurchase Taxes and Charges` t
+				WHERE t.parent = pi.name AND t.is_tax_withholding_account = 1
+			) AS has_tds_row
+		FROM `tabPurchase Invoice` pi
+		INNER JOIN `tabSupplier` s ON s.name = pi.supplier
+		WHERE
+			pi.docstatus = 1
+			AND pi.company = %(company)s
+			{date_condition}
+			AND s.tax_withholding_category IS NOT NULL
+			AND s.tax_withholding_category != ''
+			AND (
+				COALESCE(pi.tax_withholding_category, '') != s.tax_withholding_category
+				OR pi.apply_tds = 0
+				OR (
+					pi.apply_tds = 1
+					AND IFNULL(pi.taxes_and_charges_deducted, 0) = 0
+					AND EXISTS(
+						SELECT 1 FROM `tabPurchase Taxes and Charges` t
+						WHERE t.parent = pi.name AND t.is_tax_withholding_account = 1
+					)
+				)
+			)
+		ORDER BY pi.supplier, pi.posting_date, pi.name
+		LIMIT 2000
+	""", params, as_dict=True)
+
+	for r in rows:
+		r["correct_category"] = r["supplier_category"]
+		r["prior_fy"] = 1 if str(r.get("posting_date")) < str(fy_start) else 0
+		if cstr(r.get("pi_category") or "") != cstr(r["supplier_category"]):
+			r["reason"] = _("Wrong / missing category")
+		elif not cint(r.get("apply_tds")):
+			r["reason"] = _("TDS not applied")
+		else:
+			r["reason"] = _("Deducted total missing")
+
+	return {
+		"count": len(rows),
+		"items": rows,
+		"company": company,
+		"fiscal_year_start": str(fy_start),
+		"fiscal_year_end": str(fy_end),
+		"showing_prior_fy": bool(show_prior),
+		"is_system_manager": "System Manager" in frappe.get_roles(),
+	}
+
+
+def _fix_one_pi_tds(name):
+	"""Fully fix TDS on one submitted PI: align the category to the supplier, then
+	either repair the header split (a TDS row already exists) or run the full
+	backfill -- add the TDS row + incremental GL, or mark a nothing-due invoice as
+	applied. Current FY is open to all allowed roles; invoices outside it (prior
+	year) are System Manager only. Returns the backfill/repair result dict."""
+	from business_needed_solutions.business_needed_solutions.overrides.tds_backfill import (
+		backfill_tds_on_pi, repair_tds_totals_on_pi, _existing_tds_row,
+	)
+
+	pi = frappe.get_doc("Purchase Invoice", name)
+	if pi.docstatus != 1:
+		return {"changed": False, "reason": _("Not submitted")}
+
+	# Current fiscal year is open to all allowed roles; anything outside it
+	# (prior year in particular) is System Manager only.
+	fy_start, fy_end = _current_fiscal_year(pi.company)
+	if not (str(fy_start) <= str(pi.posting_date) <= str(fy_end)):
+		if "System Manager" not in frappe.get_roles():
+			return {"changed": False, "reason": _("Outside current fiscal year — System Manager only")}
+
+	supplier_cat = frappe.db.get_value("Supplier", pi.supplier, "tax_withholding_category")
+	if not supplier_cat:
+		return {"changed": False, "reason": _("Supplier has no TDS Category")}
+
+	# Align the PI category to the supplier's before computing/applying TDS.
+	if cstr(pi.tax_withholding_category or "") != cstr(supplier_cat):
+		frappe.db.set_value("Purchase Invoice", name, "tax_withholding_category", supplier_cat, update_modified=False)
+
+	if _existing_tds_row(pi):
+		# TDS row already present -> only repair the header split totals if needed.
+		return repair_tds_totals_on_pi(name)
+
+	# No TDS row -> full backfill (unreconcile + row + incremental GL + outstanding,
+	# or mark as applied when nothing is due).
+	return backfill_tds_on_pi(name)
+
+
+@frappe.whitelist()
+def fix_selected_pis_tds(items):
+	"""Apply TDS to the selected Purchase Invoices (category + apply_tds + TDS row
+	+ incremental GL, via the shared backfill core). A single selection runs
+	inline for immediate feedback; more than one is dispatched to a background job
+	that processes in posting-date order (so ERPNext's cumulative-threshold logic
+	sees earlier invoices already applied), in batches of 10. Requires the toggle +
+	(System Manager or an Additional Backfill Role); prior-fiscal-year invoices are
+	fixed only when the caller is a System Manager (enforced per invoice)."""
+	_require_tds_fixables()
+	import json
+	if isinstance(items, str):
+		items = json.loads(items)
+
+	names = []
+	for it in items:
+		n = it.get("purchase_invoice") if isinstance(it, dict) else it
+		if n:
+			names.append(n)
+	names = list(dict.fromkeys(names))  # de-dupe, preserve order
+
+	if not names:
+		return {"status": "error", "total_invoices": 0}
+
+	if len(names) == 1:
+		# Single invoice -> run inline and return the result immediately.
+		result = _fix_one_pi_tds(names[0])
+		return {"status": "done", "total_invoices": 1, "result": result}
+
+	# More than one -> background job, batch size 10, with realtime progress.
+	frappe.enqueue(
+		_process_pi_tds_fix,
+		queue="long",
+		timeout=3600,
+		pi_names=names,
+		user=frappe.session.user,
+	)
+	return {"status": "queued", "total_invoices": len(names)}
+
+
+def _process_pi_tds_fix(pi_names, user):
+	"""Background worker: apply TDS to each PI in (supplier, posting-date) order so
+	the cumulative-threshold logic sees earlier invoices already applied. Commits
+	and emits realtime progress every PI_FIX_BATCH_SIZE (10)."""
+	ordered = frappe.get_all(
+		"Purchase Invoice",
+		filters={"name": ["in", pi_names]},
+		fields=["name"],
+		order_by="supplier asc, posting_date asc, name asc",
+	)
+	names = [r.name for r in ordered] or list(pi_names)
+
+	total = len(names)
+	done = 0
+	success_count = 0
+	errors = []
+
+	for idx, name in enumerate(names, 1):
+		try:
+			res = _fix_one_pi_tds(name)
+			if res.get("changed"):
+				success_count += 1
+		except Exception as e:
+			frappe.db.rollback()
+			errors.append({"purchase_invoice": name, "error": cstr(e)})
+
+		done += 1
+		if idx % PI_FIX_BATCH_SIZE == 0:
+			frappe.db.commit()
+
+		frappe.publish_realtime(
+			"bns_tds_fix_progress",
+			{"done": done, "total": total, "current_pi": name, "success_count": success_count, "error_count": len(errors)},
+			user=user,
+		)
+
+	frappe.db.commit()
+	frappe.publish_realtime(
+		"bns_tds_fix_complete",
+		{"success_count": success_count, "error_count": len(errors), "errors": errors[:50]},
+		user=user,
+	)
 
 
 @frappe.whitelist()
@@ -519,25 +929,29 @@ def get_dashboard_summary(company=None):
 			AND (id.expense_account IS NULL OR id.expense_account = '')
 	""", {"company": company})[0][0] or 0
 	
-	# Count of PI items with wrong expense account (fixable, excludes fixed assets)
+	# Count of PI items with wrong expense account (fixable, excludes fixed assets).
+	# Scoped to the current fiscal year to match the actionable list.
+	fy_start, fy_end = _current_fiscal_year(company)
 	pi_fixable_count = frappe.db.sql("""
 		SELECT COUNT(*)
 		FROM `tabPurchase Invoice Item` pii
 		INNER JOIN `tabPurchase Invoice` pi ON pi.name = pii.parent
 		INNER JOIN `tabItem` i ON i.name = pii.item_code
-		INNER JOIN `tabItem Default` id 
-			ON id.parent = pii.item_code 
+		INNER JOIN `tabItem Default` id
+			ON id.parent = pii.item_code
 			AND id.parenttype = 'Item'
 			AND id.company = %(company)s
-		WHERE 
+		WHERE
 			pi.docstatus = 1
 			AND pi.company = %(company)s
+			AND pi.posting_date >= %(fy_start)s
+			AND pi.posting_date <= %(fy_end)s
 			AND i.is_stock_item = 0
 			AND i.is_fixed_asset = 0
-			AND id.expense_account IS NOT NULL 
-			AND id.expense_account != '' 
+			AND id.expense_account IS NOT NULL
+			AND id.expense_account != ''
 			AND pii.expense_account != id.expense_account
-	""", {"company": company})[0][0] or 0
+	""", {"company": company, "fy_start": fy_start, "fy_end": fy_end})[0][0] or 0
 	
 	# Count of unlinked customer/supplier by PAN
 	unlinked_pan_count = get_unlinked_pan_count()

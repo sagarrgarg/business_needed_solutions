@@ -255,6 +255,15 @@
         font-size: 7pt;
         padding: 4px 3px !important;
     }
+    .tds-row td {
+        font-style: italic;
+        color: #555;
+        background: #fbfbf7;
+    }
+    .tds-row .voucher-type {
+        color: #8a6d00;
+        font-weight: 600;
+    }
     .item-row td {
         background: #fafafa !important;
         border-top: 1px dashed #ccc !important;
@@ -510,6 +519,7 @@
                 {% if (acct.indexOf("Total") > -1) { rowClass = 'total-row'; } %}
             {% } %}
             {% if (isItemRow) { rowClass = 'item-row'; } %}
+            {% if (row.is_tds_row) { rowClass = 'tds-row'; } %}
             <tr class="{%= rowClass %}" {% if (isClosing) { %}data-closing-balance="{%= row.balance || '' %}"{% } %}>
                 {% if (isItemRow) { %}
                     {% if (show_date) { %}<td></td>{% } %}
