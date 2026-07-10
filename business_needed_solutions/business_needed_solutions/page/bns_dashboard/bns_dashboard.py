@@ -958,6 +958,71 @@ def get_dashboard_summary(company=None):
 	
 	# Get lightweight transfer mismatch info from last prepared report
 	transfer_mismatch_info = get_transfer_mismatch_summary(company)
+
+	# Fetch internal customers to exclude from POD count
+	internal_customers = [
+		c.name for c in frappe.get_all(
+			"Customer",
+			or_filters=[
+				["Customer", "is_internal_customer", "=", 1],
+				["Customer", "is_bns_internal_customer", "=", 1]
+			],
+			fields=["name"]
+		)
+	]
+
+	# Build POD filters
+	pod_where = [
+		"si.docstatus = 1",
+		"si.gst_category != 'Unregistered'"
+	]
+	pod_params = {}
+	if company:
+		pod_where.append("si.company = %(company)s")
+		pod_params["company"] = company
+	if internal_customers:
+		pod_where.append("si.customer NOT IN %(internal_customers)s")
+		pod_params["internal_customers"] = tuple(internal_customers)
+
+	kpi_where = list(pod_where)
+
+	# 1. Total Pending (1+ Missing)
+	pod_where_pending = list(pod_where)
+	pod_where_pending.append("(si.bns_pod_status IS NULL OR si.bns_pod_status = '' OR si.bns_pod_date IS NULL OR si.bns_pod_attachment IS NULL OR si.bns_pod_attachment = '')")
+	
+	pod_total_pending_res = frappe.db.sql(f"""
+		SELECT COUNT(si.name) FROM `tabSales Invoice` si WHERE {" AND ".join(pod_where_pending)}
+	""", pod_params)
+	pod_total_pending = pod_total_pending_res[0][0] if pod_total_pending_res else 0
+
+	# 2. Total Done POD: all three fields filled AND status = Delivered
+	pod_total_done_res = frappe.db.sql(f"""
+		SELECT COUNT(si.name) FROM `tabSales Invoice` si 
+		WHERE {" AND ".join(kpi_where)}
+		  AND si.bns_pod_status = 'Delivered'
+		  AND si.bns_pod_date IS NOT NULL
+		  AND si.bns_pod_attachment IS NOT NULL 
+		  AND si.bns_pod_attachment != ''
+	""", pod_params)
+	pod_total_done = pod_total_done_res[0][0] if pod_total_done_res else 0
+
+	# 3. Total Pending POD (3 Missing): all 3 fields missing/blank
+	pod_total_pending_all_missing_res = frappe.db.sql(f"""
+		SELECT COUNT(si.name) FROM `tabSales Invoice` si 
+		WHERE {" AND ".join(kpi_where)}
+		  AND (si.bns_pod_status IS NULL OR si.bns_pod_status = '')
+		  AND si.bns_pod_date IS NULL
+		  AND (si.bns_pod_attachment IS NULL OR si.bns_pod_attachment = '')
+	""", pod_params)
+	pod_total_pending_all_missing = pod_total_pending_all_missing_res[0][0] if pod_total_pending_all_missing_res else 0
+
+	# 4. Total Partial POD: bns_pod_status = Partially Delivered
+	pod_total_partial_res = frappe.db.sql(f"""
+		SELECT COUNT(si.name) FROM `tabSales Invoice` si 
+		WHERE {" AND ".join(kpi_where)}
+		  AND si.bns_pod_status = 'Partially Delivered'
+	""", pod_params)
+	pod_total_partial = pod_total_partial_res[0][0] if pod_total_partial_res else 0
 	
 	return {
 		"items_missing_expense_account": items_missing_count,
@@ -966,6 +1031,10 @@ def get_dashboard_summary(company=None):
 		"transfer_mismatch_count": transfer_mismatch_info.get("count", 0),
 		"transfer_mismatch_prepared_at": transfer_mismatch_info.get("prepared_at"),
 		"transfer_mismatch_status": transfer_mismatch_info.get("status"),
+		"pod_total_pending": pod_total_pending,
+		"pod_total_done": pod_total_done,
+		"pod_total_pending_all_missing": pod_total_pending_all_missing,
+		"pod_total_partial": pod_total_partial,
 		"company": company
 	}
 

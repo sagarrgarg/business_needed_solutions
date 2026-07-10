@@ -236,6 +236,39 @@ class BNSDashboard {
 					</div>
 				</div>
 
+				<!-- ======= PROOF OF DELIVERY (POD) HEALTH ======= -->
+				<div class="bns-section">
+					<div class="bns-section-title">
+						<i class="fa fa-truck"></i> ${__("Proof of Delivery (POD) Health")}
+					</div>
+					<div class="row" id="pod-health-cards">
+						<div class="col-lg-3 col-md-6 col-6 mb-3">
+							<div class="metric-card" id="pod-total-pending">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("Total Pending (1+ Missing)")}</div>
+							</div>
+						</div>
+						<div class="col-lg-3 col-md-6 col-6 mb-3">
+							<div class="metric-card" id="pod-total-done">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("Total Done POD")}</div>
+							</div>
+						</div>
+						<div class="col-lg-3 col-md-6 col-6 mb-3">
+							<div class="metric-card" id="pod-total-pending-all-missing">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("Total Pending POD (3 Missing)")}</div>
+							</div>
+						</div>
+						<div class="col-lg-3 col-md-6 col-6 mb-3">
+							<div class="metric-card" id="pod-total-partial">
+								<div class="metric-value">--</div>
+								<div class="metric-label">${__("Total Partial POD")}</div>
+							</div>
+						</div>
+					</div>
+				</div>
+
 				<!-- ======= QUICK LINKS ======= -->
 				<div class="bns-section">
 					<div class="bns-section-title">
@@ -1367,6 +1400,10 @@ class BNSDashboard {
 	bind_events() {
 		const self = this;
 
+		this.wrapper.find("#pod-health-cards .metric-card").css("cursor", "pointer").on("click", function () {
+			frappe.set_route("pod-dashboard");
+		});
+
 		this.wrapper.find(".section-header").on("click", function () {
 			const section = $(this).data("section");
 			self.toggle_section(section);
@@ -1721,6 +1758,15 @@ class BNSDashboard {
 				(data.unlinked_pan_count || 0) > 0 ? "warn" : "ok");
 			this._set_metric("health-transfer-mismatch", mismatchCount, null,
 				mismatchCount > 0 ? "danger" : "ok");
+
+			// Update POD metrics
+			this._set_metric("pod-total-pending", data.pod_total_pending, null,
+				data.pod_total_pending > 0 ? "warn" : "ok");
+			this._set_metric("pod-total-done", data.pod_total_done, null, "ok");
+			this._set_metric("pod-total-pending-all-missing", data.pod_total_pending_all_missing, null,
+				data.pod_total_pending_all_missing > 0 ? "danger" : "ok");
+			this._set_metric("pod-total-partial", data.pod_total_partial, null,
+				data.pod_total_partial > 0 ? "warn" : "ok");
 		} catch (e) {
 			console.error("Failed to load summary:", e);
 		}
