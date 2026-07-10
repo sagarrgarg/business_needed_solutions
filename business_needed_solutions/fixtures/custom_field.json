@@ -3245,7 +3245,7 @@
   "fieldname": "bns_pod_status",
   "fieldtype": "Select",
   "label": "POD Status",
-  "options": "\nDelivered\nIn-Transit\nIssue",
+  "options": "\nDelivered\nPartially Delivered\nNot Delivered",
   "insert_after": "bns_pod_section",
   "allow_on_submit": 1,
   "depends_on": "eval:doc.docstatus==1",

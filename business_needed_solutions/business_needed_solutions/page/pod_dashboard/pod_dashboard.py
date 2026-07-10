@@ -110,109 +110,143 @@ def get_pending_pod_invoices(
 		)
 	]
 
-	# Build base filters — always submitted, always for selected company, and always exclude Unregistered GST category
-	filters = [
-		["Sales Invoice", "docstatus", "=", 1],
-		["Sales Invoice", "gst_category", "!=", "Unregistered"]
+	# Build base SQL filters
+	where_conds = [
+		"si.docstatus = 1",
+		"si.gst_category != 'Unregistered'"
 	]
+	params = {}
+
 	if company:
-		filters.append(["Sales Invoice", "company", "=", company])
+		where_conds.append("si.company = %(company)s")
+		params["company"] = company
 	
 	if internal_customers:
-		filters.append(["Sales Invoice", "customer", "not in", internal_customers])
+		where_conds.append("si.customer NOT IN %(internal_customers)s")
+		params["internal_customers"] = tuple(internal_customers)
 
 	if from_date:
-		filters.append(["Sales Invoice", "posting_date", ">=", from_date])
+		where_conds.append("si.posting_date >= %(from_date)s")
+		params["from_date"] = from_date
 	if to_date:
-		filters.append(["Sales Invoice", "posting_date", "<=", to_date])
+		where_conds.append("si.posting_date <= %(to_date)s")
+		params["to_date"] = to_date
 
 	if customer:
-		filters.append(["Sales Invoice", "customer", "=", customer])
+		where_conds.append("si.customer = %(customer)s")
+		params["customer"] = customer
 
 	if pod_status:
 		if pod_status == "Missing":
-			filters.append(["Sales Invoice", "bns_pod_status", "in", ["", None]])
+			where_conds.append("(si.bns_pod_status IS NULL OR si.bns_pod_status = '')")
 		else:
-			filters.append(["Sales Invoice", "bns_pod_status", "=", pod_status])
+			where_conds.append("si.bns_pod_status = %(pod_status)s")
+			params["pod_status"] = pod_status
 
 	# Add quick column searches
 	if search_name:
-		filters.append(["Sales Invoice", "name", "like", f"%{search_name}%"])
+		where_conds.append("si.name LIKE %(search_name)s")
+		params["search_name"] = f"%{search_name}%"
 	if search_customer:
-		filters.append(["Sales Invoice", "customer_name", "like", f"%{search_customer}%"])
+		where_conds.append("si.customer_name LIKE %(search_customer)s")
+		params["search_customer"] = f"%{search_customer}%"
 	if search_posting_date:
-		filters.append(["Sales Invoice", "posting_date", "like", f"%{search_posting_date}%"])
-	if search_grand_total:
-		filters.append(["Sales Invoice", "grand_total", "like", f"%{search_grand_total}%"])
+		where_conds.append("si.posting_date LIKE %(search_posting_date)s")
+		params["search_posting_date"] = f"%{search_posting_date}%"
 	if search_pod_status:
-		filters.append(["Sales Invoice", "bns_pod_status", "like", f"%{search_pod_status}%"])
+		where_conds.append("si.bns_pod_status LIKE %(search_pod_status)s")
+		params["search_pod_status"] = f"%{search_pod_status}%"
 	if search_pod_date:
-		filters.append(["Sales Invoice", "bns_pod_date", "like", f"%{search_pod_date}%"])
+		where_conds.append("si.bns_pod_date LIKE %(search_pod_date)s")
+		params["search_pod_date"] = f"%{search_pod_date}%"
 	if search_pod_attachment:
-		filters.append(["Sales Invoice", "bns_pod_attachment", "like", f"%{search_pod_attachment}%"])
+		where_conds.append("si.bns_pod_attachment LIKE %(search_pod_attachment)s")
+		params["search_pod_attachment"] = f"%{search_pod_attachment}%"
+
+	# Save KPI filters before applying the main dashboard pending condition
+	kpi_where_conds = list(where_conds)
 
 	# Base pending OR filters — at least one of the 3 fields must be missing
-	or_filters = [
-		["Sales Invoice", "bns_pod_status", "in", ["", None]],
-		["Sales Invoice", "bns_pod_date", "is", "not set"],
-		["Sales Invoice", "bns_pod_attachment", "in", ["", None]]
-	]
+	where_conds.append("(si.bns_pod_status IS NULL OR si.bns_pod_status = '' OR si.bns_pod_date IS NULL OR si.bns_pod_attachment IS NULL OR si.bns_pod_attachment = '')")
 
-	# Query matching records for current page
-	invoices = frappe.get_all(
-		"Sales Invoice",
-		filters=filters,
-		or_filters=or_filters,
-		fields=[
-			"name",
-			"customer",
-			"customer_name",
-			"posting_date",
-			"grand_total",
-			"currency",
-			"bns_pod_status",
-			"bns_pod_date",
-			"bns_pod_attachment",
-			"po_no",
-			"po_date"
-		],
-		order_by="posting_date desc",
-		start=start,
-		page_length=page_length
-	)
+	# Query matching records for current page using raw SQL with JOIN and subquery
+	query = f"""
+		SELECT 
+			si.name,
+			si.customer,
+			si.customer_name,
+			si.posting_date,
+			si.grand_total,
+			si.currency,
+			si.bns_pod_status,
+			si.bns_pod_date,
+			si.bns_pod_attachment,
+			si.po_no,
+			si.po_date,
+			addr.city,
+			addr.state,
+			(SELECT GROUP_CONCAT(DISTINCT sii.sales_order SEPARATOR ', ') 
+			 FROM `tabSales Invoice Item` sii 
+			 WHERE sii.parent = si.name AND sii.sales_order IS NOT NULL AND sii.sales_order != '') as sales_orders
+		FROM `tabSales Invoice` si
+		LEFT JOIN `tabAddress` addr ON si.customer_address = addr.name
+		WHERE {" AND ".join(where_conds)}
+		ORDER BY si.posting_date DESC
+		LIMIT {start}, {page_length}
+	"""
+	invoices = frappe.db.sql(query, params, as_dict=True)
 
 	# Calculate counts dynamically at database level
-	total_pending = frappe.get_all(
-		"Sales Invoice",
-		filters=filters,
-		or_filters=or_filters,
-		fields=["count(name) as total"]
-	)[0].total
+	# Total Pending (at least one missing)
+	total_pending_res = frappe.db.sql(f"""
+		SELECT COUNT(si.name) as total 
+		FROM `tabSales Invoice` si
+		LEFT JOIN `tabAddress` addr ON si.customer_address = addr.name
+		WHERE {" AND ".join(where_conds)}
+	""", params)
+	total_pending = total_pending_res[0][0] if total_pending_res else 0
 
-	missing_status = frappe.get_all(
-		"Sales Invoice",
-		filters=filters + [["Sales Invoice", "bns_pod_status", "in", ["", None]]],
-		fields=["count(name) as total"]
-	)[0].total
+	# 1. Total Done POD: all three fields filled AND status = Delivered
+	total_done_res = frappe.db.sql(f"""
+		SELECT COUNT(si.name) as total 
+		FROM `tabSales Invoice` si
+		LEFT JOIN `tabAddress` addr ON si.customer_address = addr.name
+		WHERE {" AND ".join(kpi_where_conds)}
+		  AND si.bns_pod_status = 'Delivered'
+		  AND si.bns_pod_date IS NOT NULL
+		  AND si.bns_pod_attachment IS NOT NULL 
+		  AND si.bns_pod_attachment != ''
+	""", params)
+	total_done = total_done_res[0][0] if total_done_res else 0
 
-	missing_date = frappe.get_all(
-		"Sales Invoice",
-		filters=filters + [["Sales Invoice", "bns_pod_date", "is", "not set"]],
-		fields=["count(name) as total"]
-	)[0].total
+	# 2. Total Pending POD: all 3 fields missing/blank
+	total_pending_all_missing_res = frappe.db.sql(f"""
+		SELECT COUNT(si.name) as total 
+		FROM `tabSales Invoice` si
+		LEFT JOIN `tabAddress` addr ON si.customer_address = addr.name
+		WHERE {" AND ".join(kpi_where_conds)}
+		  AND (si.bns_pod_status IS NULL OR si.bns_pod_status = '')
+		  AND si.bns_pod_date IS NULL
+		  AND (si.bns_pod_attachment IS NULL OR si.bns_pod_attachment = '')
+	""", params)
+	total_pending_all_missing = total_pending_all_missing_res[0][0] if total_pending_all_missing_res else 0
 
-	missing_attach = frappe.get_all(
-		"Sales Invoice",
-		filters=filters + [["Sales Invoice", "bns_pod_attachment", "in", ["", None]]],
-		fields=["count(name) as total"]
-	)[0].total
+	# 3. Total Partial POD: bns_pod_status = Partially Delivered
+	total_partial_res = frappe.db.sql(f"""
+		SELECT COUNT(si.name) as total 
+		FROM `tabSales Invoice` si
+		LEFT JOIN `tabAddress` addr ON si.customer_address = addr.name
+		WHERE {" AND ".join(kpi_where_conds)}
+		  AND si.bns_pod_status = 'Partially Delivered'
+	""", params)
+	total_partial = total_partial_res[0][0] if total_partial_res else 0
 
 	return {
 		"invoices": invoices,
 		"total": total_pending,
-		"missing_status": missing_status,
-		"missing_date": missing_date,
-		"missing_attachment": missing_attach,
+		"total_done": total_done,
+		"total_pending_all_missing": total_pending_all_missing,
+		"total_partial": total_partial,
 	}
 
 
@@ -229,7 +263,7 @@ def save_pod_details(sales_invoice, pod_status=None, pod_date=None, pod_attachme
 
 	Args:
 		sales_invoice (str): Name of the Sales Invoice
-		pod_status (str): One of: Delivered, In-Transit, Issue (or blank)
+		pod_status (str): One of: Delivered, Partially Delivered, Not Delivered (or blank)
 		pod_date (str): Date string YYYY-MM-DD (or blank)
 		pod_attachment (str): URL/path of the attachment (or blank)
 
@@ -242,7 +276,7 @@ def save_pod_details(sales_invoice, pod_status=None, pod_date=None, pod_attachme
 		frappe.throw(_("Sales Invoice {0} not found.").format(sales_invoice))
 
 	# Validate pod_status is one of allowed values if provided
-	allowed_statuses = ["", "Delivered", "In-Transit", "Issue"]
+	allowed_statuses = ["", "Delivered", "Partially Delivered", "Not Delivered"]
 	if pod_status and pod_status not in allowed_statuses:
 		frappe.throw(_("Invalid POD Status: {0}").format(pod_status))
 

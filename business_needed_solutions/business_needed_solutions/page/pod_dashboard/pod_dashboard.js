@@ -88,19 +88,19 @@ class PODDashboard {
 				<div class="pod-summary-row" id="pod-summary-row">
 					<div class="pod-metric-card" id="pod-pending-card">
 						<div class="pod-metric-value" id="pod-pending-count">--</div>
-						<div class="pod-metric-label">${__("Total Pending")}</div>
+						<div class="pod-metric-label">${__("Total Pending (1+ Missing)")}</div>
 					</div>
-					<div class="pod-metric-card" id="pod-status-card">
-						<div class="pod-metric-value" id="pod-missing-status-count">--</div>
-						<div class="pod-metric-label">${__("Missing Status")}</div>
+					<div class="pod-metric-card" id="pod-done-card">
+						<div class="pod-metric-value" id="pod-done-count">--</div>
+						<div class="pod-metric-label">${__("Total Done POD")}</div>
 					</div>
-					<div class="pod-metric-card" id="pod-date-card">
-						<div class="pod-metric-value" id="pod-missing-date-count">--</div>
-						<div class="pod-metric-label">${__("Missing Date")}</div>
+					<div class="pod-metric-card" id="pod-all-missing-card">
+						<div class="pod-metric-value" id="pod-all-missing-count">--</div>
+						<div class="pod-metric-label">${__("Total Pending POD (3 Missing)")}</div>
 					</div>
-					<div class="pod-metric-card" id="pod-attach-card">
-						<div class="pod-metric-value" id="pod-missing-attach-count">--</div>
-						<div class="pod-metric-label">${__("Missing Attachment")}</div>
+					<div class="pod-metric-card" id="pod-partial-card">
+						<div class="pod-metric-value" id="pod-partial-count">--</div>
+						<div class="pod-metric-label">${__("Total Partial POD")}</div>
 					</div>
 				</div>
 
@@ -159,7 +159,7 @@ class PODDashboard {
 				fieldname: "pod_status",
 				label: __("POD Status"),
 				fieldtype: "Select",
-				options: "\nMissing\nDelivered\nIn-Transit\nIssue"
+				options: "\nDelivered\nPartially Delivered\nNot Delivered"
 			},
 			{
 				fieldname: "fiscal_year",
@@ -320,9 +320,9 @@ class PODDashboard {
 
 					self.render_summary(
 						r.message.total,
-						r.message.missing_status,
-						r.message.missing_date,
-						r.message.missing_attachment
+						r.message.total_done,
+						r.message.total_pending_all_missing,
+						r.message.total_partial
 					);
 					self.render_table(self.data, container);
 				} else {
@@ -337,16 +337,18 @@ class PODDashboard {
 
 	// ── Summary ──────────────────────────────────────────────────────
 
-	render_summary(total, missing_status, missing_date, missing_attach) {
+	render_summary(total, total_done, total_pending_all_missing, total_partial) {
 		this.wrapper.find("#pod-pending-count").text(total || 0);
-		this.wrapper.find("#pod-missing-status-count").text(missing_status || 0);
-		this.wrapper.find("#pod-missing-date-count").text(missing_date || 0);
-		this.wrapper.find("#pod-missing-attach-count").text(missing_attach || 0);
+		this.wrapper.find("#pod-done-count").text(total_done || 0);
+		this.wrapper.find("#pod-all-missing-count").text(total_pending_all_missing || 0);
+		this.wrapper.find("#pod-partial-count").text(total_partial || 0);
 
 		this.update_card_style(this.wrapper.find("#pod-pending-card"), total || 0);
-		this.update_card_style(this.wrapper.find("#pod-status-card"), missing_status || 0);
-		this.update_card_style(this.wrapper.find("#pod-date-card"), missing_date || 0);
-		this.update_card_style(this.wrapper.find("#pod-attach-card"), missing_attach || 0);
+		this.wrapper.find("#pod-done-card").removeClass("pod-card-ok pod-card-warning pod-card-danger");
+		this.wrapper.find("#pod-done-card").addClass("pod-card-ok");
+
+		this.update_card_style(this.wrapper.find("#pod-all-missing-card"), total_pending_all_missing || 0);
+		this.update_card_style(this.wrapper.find("#pod-partial-card"), total_partial || 0);
 	}
 
 	update_card_style(card, count) {
@@ -401,8 +403,7 @@ class PODDashboard {
 									<th style="width:220px">${__("Sales Invoice")}</th>
 									<th>${__("Customer")}</th>
 									<th style="width:110px">${__("Date")}</th>
-									<th style="width:115px">${__("Grand Total")}</th>
-									<th style="width:130px">${__("Fully Accepted")}</th>
+									<th style="width:160px">${__("POD Status")}</th>
 									<th style="width:140px">${__("POD Date")}</th>
 									<th style="width:200px">${__("POD Attachment")}</th>
 									<th style="width:85px">${__("Action")}</th>
@@ -411,7 +412,6 @@ class PODDashboard {
 									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="name" placeholder="${__("Search…")}"></th>
 									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="customer" placeholder="${__("Search…")}"></th>
 									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="posting_date" placeholder="${__("Search…")}"></th>
-									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="grand_total" placeholder="${__("Search…")}"></th>
 									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="pod_status" placeholder="${__("Search…")}"></th>
 									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="pod_date" placeholder="${__("Search…")}"></th>
 									<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="pod_attachment" placeholder="${__("Search…")}"></th>
@@ -420,7 +420,7 @@ class PODDashboard {
 							</thead>
 							<tbody>
 								<tr>
-									<td colspan="8" class="text-center text-muted">${__("No matching records found")}</td>
+									<td colspan="7" class="text-center text-muted">${__("No matching records found")}</td>
 								</tr>
 							</tbody>
 						</table>
@@ -454,8 +454,7 @@ class PODDashboard {
 							<th style="width:220px">${__("Sales Invoice")}</th>
 							<th>${__("Customer")}</th>
 							<th style="width:110px">${__("Date")}</th>
-							<th style="width:115px">${__("Grand Total")}</th>
-							<th style="width:130px">${__("Fully Accepted")}</th>
+							<th style="width:160px">${__("POD Status")}</th>
 							<th style="width:140px">${__("POD Date")}</th>
 							<th style="width:200px">${__("POD Attachment")}</th>
 							<th style="width:85px">${__("Action")}</th>
@@ -464,7 +463,6 @@ class PODDashboard {
 							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="name" placeholder="${__("Search…")}"></th>
 							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="customer" placeholder="${__("Search…")}"></th>
 							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="posting_date" placeholder="${__("Search…")}"></th>
-							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="grand_total" placeholder="${__("Search…")}"></th>
 							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="pod_status" placeholder="${__("Search…")}"></th>
 							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="pod_date" placeholder="${__("Search…")}"></th>
 							<th><input type="text" class="form-control form-control-sm pod-search-input" data-col="pod_attachment" placeholder="${__("Search…")}"></th>
@@ -484,7 +482,6 @@ class PODDashboard {
 			const escName = frappe.utils.escape_html(inv.name);
 			const escCustomerName = frappe.utils.escape_html(inv.customer_name || inv.customer || "");
 			const escDate = frappe.utils.escape_html(inv.posting_date || "");
-			const grandTotal = format_currency(inv.grand_total, inv.currency);
 			const currentAttach = frappe.utils.escape_html(inv.bns_pod_attachment || "");
 			const currentStatus = frappe.utils.escape_html(inv.bns_pod_status || "");
 			const currentDate = frappe.utils.escape_html(inv.bns_pod_date || "");
@@ -495,9 +492,21 @@ class PODDashboard {
 				const escPoNo = inv.po_no ? frappe.utils.escape_html(inv.po_no) : "";
 				const escPoDate = inv.po_date ? frappe.datetime.str_to_user(inv.po_date) : "";
 				poDetailsHtml = `
-					<div class="pod-po-details">
-						<span class="po-label">PO:</span>
-						<span class="po-val">${escPoNo} ${escPoDate ? `(${escPoDate})` : ""}</span>
+					<div class="pod-invoice-sub-row">
+						<span class="sub-label">PO:</span>
+						<span class="sub-val">${escPoNo} ${escPoDate ? `(${escPoDate})` : ""}</span>
+					</div>
+				`;
+			}
+
+			// SO Details below Sales Invoice
+			let soDetailsHtml = "";
+			if (inv.sales_orders) {
+				const escSalesOrders = frappe.utils.escape_html(inv.sales_orders);
+				soDetailsHtml = `
+					<div class="pod-invoice-sub-row">
+						<span class="sub-label">SO:</span>
+						<span class="sub-val" title="${escSalesOrders}">${escSalesOrders}</span>
 					</div>
 				`;
 			}
@@ -508,23 +517,31 @@ class PODDashboard {
 						<a href="/app/sales-invoice/${escName}" target="_blank" class="pod-si-link">
 							${escName}
 						</a>
-						${poDetailsHtml}
+						<div class="pod-invoice-sub-info">
+							${soDetailsHtml}
+							${poDetailsHtml}
+						</div>
 					</td>
 					<td>
 						<div class="pod-customer-cell">
 							<span class="customer-name" title="${frappe.utils.escape_html(inv.customer || '')}">${escCustomerName}</span>
+							${(inv.city || inv.state) ? `
+								<div class="pod-customer-address">
+									${[inv.city, inv.state].filter(Boolean).map(frappe.utils.escape_html).join(", ")}
+								</div>
+							` : ""}
 						</div>
 					</td>
 					<td><span class="text-muted">${escDate}</span></td>
-					<td><span class="pod-total-amount">${grandTotal}</span></td>
 					<td>
 						<div class="pod-field-wrap">
-							<div class="pod-checkbox-wrap">
-								<input type="checkbox" class="pod-status-checkbox ${hasStatus ? 'pod-input-filled' : 'pod-input-missing'}" 
-									data-name="${escName}"
-									${currentStatus === "Delivered" ? "checked" : ""}>
-								<label class="pod-checkbox-label">${__("Accepted")}</label>
-							</div>
+							<select class="form-control form-control-sm pod-status-select ${hasStatus ? 'pod-input-filled' : 'pod-input-missing'}"
+								data-name="${escName}">
+								<option value="">${__("Select...")}</option>
+								<option value="Delivered" ${currentStatus === "Delivered" ? "selected" : ""}>${__("Delivered")}</option>
+								<option value="Partially Delivered" ${currentStatus === "Partially Delivered" ? "selected" : ""}>${__("Partially Delivered")}</option>
+								<option value="Not Delivered" ${currentStatus === "Not Delivered" ? "selected" : ""}>${__("Not Delivered")}</option>
+							</select>
 						</div>
 					</td>
 					<td>
@@ -646,9 +663,9 @@ class PODDashboard {
 			self.save_pod_row(siName, container, $(this));
 		});
 
-		// Update style on status checkbox changes
-		container.off("change", ".pod-status-checkbox").on("change", ".pod-status-checkbox", function () {
-			self.toggle_input_style($(this), $(this).is(":checked"));
+		// Update style on status select changes
+		container.off("change", ".pod-status-select").on("change", ".pod-status-select", function () {
+			self.toggle_input_style($(this), !!$(this).val());
 		});
 
 		// Update style on date input changes
@@ -668,7 +685,7 @@ class PODDashboard {
 		const self = this;
 		const row = container.find(`tr[data-name="${siName}"]`);
 
-		const pod_status = row.find(".pod-status-checkbox").is(":checked") ? "Delivered" : "";
+		const pod_status = row.find(".pod-status-select").val();
 		const pod_date = row.find(".pod-date-input").val();
 		const pod_attachment = row.find(".pod-attach-input").val().trim();
 
@@ -735,15 +752,15 @@ class PODDashboard {
 	// ── Update inputs in place after partial save ────────────────────
 
 	refresh_row_inputs(row, pod_status, pod_date, pod_attachment) {
-		const statusCheckbox = row.find(".pod-status-checkbox");
+		const statusSelect = row.find(".pod-status-select");
 		const dateInput = row.find(".pod-date-input");
 		const attachInput = row.find(".pod-attach-input");
 
-		statusCheckbox.prop("checked", pod_status === "Delivered");
+		statusSelect.val(pod_status || "");
 		dateInput.val(pod_date || "");
 		attachInput.val(pod_attachment || "");
 
-		this.toggle_input_style(statusCheckbox, pod_status === "Delivered");
+		this.toggle_input_style(statusSelect, !!pod_status);
 		this.toggle_input_style(dateInput, !!pod_date);
 		this.toggle_input_style(attachInput, !!pod_attachment);
 	}
@@ -964,7 +981,7 @@ class PODDashboard {
 				background-color: #f8fafc;
 			}
 
-			/* ─── SI Link & PO Details ──────────────────────────────── */
+			/* ─── SI Link & PO / SO Details ────────────────────────── */
 			.pod-si-link {
 				font-weight: 700;
 				color: var(--primary-color, #1f6bff);
@@ -973,21 +990,51 @@ class PODDashboard {
 			.pod-si-link:hover {
 				text-decoration: underline;
 			}
-			.pod-po-details {
+			.pod-invoice-sub-info {
+				display: flex;
+				flex-direction: column;
+				gap: 2px;
+				margin-top: 4px;
+			}
+			.pod-invoice-sub-row {
 				font-size: 0.72rem;
 				color: #64748b;
-				margin-top: 4px;
 				line-height: 1.2;
+				display: flex;
+				gap: 4px;
+				align-items: center;
 			}
-			.po-label {
-				font-weight: 600;
+			.sub-label {
+				font-weight: 700;
+				color: #475569;
+			}
+			.sub-val {
+				color: #64748b;
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				max-width: 180px;
+			}
+			.pod-customer-address {
+				font-size: 0.72rem;
+				color: #64748b;
+				font-style: italic;
+				margin-top: 2px;
 			}
 
-			/* ─── Inputs & Checkbox ─────────────────────────────────── */
+			/* ─── Inputs & Status Select ────────────────────────────── */
 			.pod-field-wrap {
 				display: flex;
 				flex-direction: column;
 				gap: 4px;
+			}
+			.pod-status-select {
+				height: 28px !important;
+				font-size: 0.78rem !important;
+				border-radius: 5px !important;
+				padding: 2px 6px !important;
+				font-weight: 600;
+				cursor: pointer;
 			}
 			.pod-date-input,
 			.pod-attach-input {
@@ -995,31 +1042,6 @@ class PODDashboard {
 				font-size: 0.78rem !important;
 				border-radius: 5px !important;
 				transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
-			}
-			
-			/* Checkbox styles */
-			.pod-checkbox-wrap {
-				display: flex;
-				align-items: center;
-				gap: 6px;
-				padding: 3px 8px;
-				border-radius: 5px;
-				height: 28px;
-				width: fit-content;
-			}
-			.pod-status-checkbox {
-				width: 15px;
-				height: 15px;
-				cursor: pointer;
-				margin: 0 !important;
-			}
-			.pod-checkbox-label {
-				font-size: 0.78rem;
-				font-weight: 600;
-				color: #475569;
-				margin: 0;
-				cursor: pointer;
-				user-select: none;
 			}
 
 			.pod-input-missing {
@@ -1031,15 +1053,7 @@ class PODDashboard {
 				background-color: #ffffff !important;
 			}
 			
-			/* Add styles for checkbox wrapper specifically */
-			div.pod-checkbox-wrap.pod-input-missing {
-				border: 1px solid #fecdd3 !important;
-				background-color: #fff1f2 !important;
-			}
-			div.pod-checkbox-wrap.pod-input-filled {
-				border: 1px solid #cbd5e1 !important;
-				background-color: #ffffff !important;
-			}
+			/* Focus styles for status select and inputs */
 
 			.pod-input-missing:focus,
 			.pod-input-filled:focus {
