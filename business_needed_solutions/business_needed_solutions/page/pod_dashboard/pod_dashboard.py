@@ -267,16 +267,26 @@ def save_pod_details(sales_invoice, pod_status=None, pod_date=None, pod_attachme
 	if pod_status and pod_status not in allowed_statuses:
 		frappe.throw(_("Invalid POD Status: {0}").format(pod_status))
 
-	# Use doc.save to preserve document validation events/hooks while ignoring general permissions
-	doc = frappe.get_doc("Sales Invoice", sales_invoice)
-	if doc.docstatus != 1:
+	# Validate that the invoice is submitted (docstatus=1) — security guard
+	doc_status = frappe.db.get_value("Sales Invoice", sales_invoice, "docstatus")
+	if doc_status != 1:
 		frappe.throw(_("POD details can only be updated for submitted Sales Invoices."))
 
-	doc.flags.ignore_permissions = True
-	doc.bns_pod_status = pod_status or ""
-	doc.bns_pod_date = pod_date or None
-	doc.bns_pod_attachment = pod_attachment or ""
-	doc.save()
+	# Use frappe.db.set_value to surgically update ONLY the 3 POD fields.
+	# DO NOT use doc.save() here — submitted Sales Invoices have many validate/
+	# before_save hooks (internal customer checks, GST validations, etc.) that
+	# modify unrelated fields, which then appear as dirty/"Not Saved" on next open.
+	frappe.db.set_value(
+		"Sales Invoice",
+		sales_invoice,
+		{
+			"bns_pod_status": pod_status or "",
+			"bns_pod_date": pod_date or None,
+			"bns_pod_attachment": pod_attachment or "",
+		},
+		update_modified=False,
+	)
+	frappe.db.commit()
 
 	# Programmatically link the file attachment if uploaded as unattached
 	if pod_attachment:
