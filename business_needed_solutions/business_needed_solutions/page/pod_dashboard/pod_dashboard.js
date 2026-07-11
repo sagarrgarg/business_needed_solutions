@@ -511,12 +511,15 @@ class PODDashboard {
 				`;
 			}
 
+			const can_read_si = frappe.model.can_read("Sales Invoice");
+			const siLinkHtml = can_read_si 
+				? `<a href="/app/sales-invoice/${escName}" target="_blank" class="pod-si-link">${escName}</a>`
+				: `<span class="pod-si-text" style="font-weight:bold;">${escName}</span>`;
+
 			html += `
 				<tr class="${rowClass}" data-name="${escName}">
 					<td>
-						<a href="/app/sales-invoice/${escName}" target="_blank" class="pod-si-link">
-							${escName}
-						</a>
+						${siLinkHtml}
 						<div class="pod-invoice-sub-info">
 							${soDetailsHtml}
 							${poDetailsHtml}
@@ -641,9 +644,8 @@ class PODDashboard {
 			const row = container.find(`tr[data-name="${siName}"]`);
 			const input = row.find(".pod-attach-input");
 
-			new frappe.ui.FileUploader({
-				doctype: "Sales Invoice",
-				docname: siName,
+			const can_write_si = frappe.model.can_write("Sales Invoice");
+			const uploaderArgs = {
 				frm: null,
 				on_success: function (file_doc) {
 					const url = file_doc.file_url;
@@ -654,7 +656,12 @@ class PODDashboard {
 						indicator: "blue",
 					});
 				},
-			});
+			};
+			if (can_write_si) {
+				uploaderArgs.doctype = "Sales Invoice";
+				uploaderArgs.docname = siName;
+			}
+			new frappe.ui.FileUploader(uploaderArgs);
 		});
 
 		// Save Button
