@@ -61,7 +61,7 @@ frappe.ui.form.on('Sales Invoice', {
 
     refresh: function(frm) {
         // Show missing POD warning banner if document is submitted and has incomplete POD fields
-        if (frm.doc.docstatus === 1) {
+        if (frm.doc.docstatus === 1 && frm.doc.gst_category !== 'Unregistered' && frm.doc.is_bns_internal_customer !== 1) {
             if (!frm.doc.bns_pod_status || !frm.doc.bns_pod_date || !frm.doc.bns_pod_attachment) {
                 frm.dashboard.set_headline(
                     __("<strong>Alert:</strong> Proof of Delivery (POD) details are incomplete. Please complete them in the <strong>POD Details</strong> section in the Details tab."),
