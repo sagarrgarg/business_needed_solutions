@@ -1,10 +1,10 @@
 {
  "content": null,
- "creation": "2026-07-06 10:00:00.000000",
+ "creation": "2026-07-06 10:00:00",
  "docstatus": 0,
  "doctype": "Page",
  "idx": 0,
- "modified": "2026-07-06 10:00:00.000000",
+ "modified": "2026-07-11 15:20:47.532524",
  "modified_by": "Administrator",
  "module": "Business Needed Solutions",
  "name": "pod-dashboard",
@@ -22,10 +22,14 @@
   },
   {
    "role": "Sales User"
+  },
+  {
+   "role": "POD Dashboard User"
   }
  ],
  "script": null,
  "standard": "Yes",
+ "style": null,
  "system_page": 0,
  "title": "POD Dashboard"
 }

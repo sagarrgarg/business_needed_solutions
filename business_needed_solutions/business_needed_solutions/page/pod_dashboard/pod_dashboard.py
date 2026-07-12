@@ -19,34 +19,21 @@ from frappe.utils import today, add_months
 # -------------------------------------------------------------------
 
 
-def _require_dashboard_read():
-	"""Any read endpoint: caller must have read permission on BNS Settings."""
-	if not frappe.has_permission("BNS Settings", "read"):
+def _require_dashboard_access():
+	"""Ensures the user has the required roles to access the POD Dashboard."""
+	# Auto-create POD Dashboard User role if it doesn't exist
+	if not frappe.db.exists("Role", "POD Dashboard User"):
+		frappe.get_doc({"doctype": "Role", "role_name": "POD Dashboard User"}).insert(ignore_permissions=True)
+
+	allowed_roles = ["POD Dashboard User", "Accounts User", "Accounts Manager", "System Manager", "Administrator"]
+	if not any(r in frappe.get_roles() for r in allowed_roles):
 		frappe.throw(
 			_(
-				"You need read permission on BNS Settings to use the POD Dashboard. "
-				"Ask an administrator to grant your role read access via the Role Permission Manager."
+				"You do not have permission to access the POD Dashboard. "
+				"Please ask an administrator to assign the 'POD Dashboard User' role."
 			),
 			frappe.PermissionError,
 		)
-
-
-def _require_dashboard_write(*doctypes):
-	"""Write endpoint: caller must have write permission on BNS Settings and each target doctype."""
-	if not frappe.has_permission("BNS Settings", "write"):
-		frappe.throw(
-			_(
-				"You need write permission on BNS Settings for this action. "
-				"Ask an administrator to grant your role write access via the Role Permission Manager."
-			),
-			frappe.PermissionError,
-		)
-	for dt in doctypes:
-		if not frappe.has_permission(dt, "write"):
-			frappe.throw(
-				_("You do not have write permission on {0}.").format(dt),
-				frappe.PermissionError,
-			)
 
 
 def _default_company():
@@ -84,7 +71,7 @@ def get_pending_pod_invoices(
 	  - bns_pod_date
 	  - bns_pod_attachment
 	"""
-	_require_dashboard_read()
+	_require_dashboard_access()
 
 	company = company or _default_company()
 	start = frappe.utils.cint(start)
@@ -270,7 +257,7 @@ def save_pod_details(sales_invoice, pod_status=None, pod_date=None, pod_attachme
 	Returns:
 		dict: {success: True, all_filled: True/False}
 	"""
-	_require_dashboard_write("Sales Invoice")
+	_require_dashboard_access()
 
 	if not frappe.db.exists("Sales Invoice", sales_invoice):
 		frappe.throw(_("Sales Invoice {0} not found.").format(sales_invoice))
@@ -280,6 +267,15 @@ def save_pod_details(sales_invoice, pod_status=None, pod_date=None, pod_attachme
 	if pod_status and pod_status not in allowed_statuses:
 		frappe.throw(_("Invalid POD Status: {0}").format(pod_status))
 
+	# Validate that the invoice is submitted (docstatus=1) — security guard
+	doc_status = frappe.db.get_value("Sales Invoice", sales_invoice, "docstatus")
+	if doc_status != 1:
+		frappe.throw(_("POD details can only be updated for submitted Sales Invoices."))
+
+	# Use frappe.db.set_value to surgically update ONLY the 3 POD fields.
+	# DO NOT use doc.save() here — submitted Sales Invoices have many validate/
+	# before_save hooks (internal customer checks, GST validations, etc.) that
+	# modify unrelated fields, which then appear as dirty/"Not Saved" on next open.
 	frappe.db.set_value(
 		"Sales Invoice",
 		sales_invoice,
@@ -288,9 +284,27 @@ def save_pod_details(sales_invoice, pod_status=None, pod_date=None, pod_attachme
 			"bns_pod_date": pod_date or None,
 			"bns_pod_attachment": pod_attachment or "",
 		},
-		update_modified=True,
+		update_modified=False,
 	)
 	frappe.db.commit()
+
+	# Programmatically link the file attachment if uploaded as unattached
+	if pod_attachment:
+		file_doc = frappe.db.get_value(
+			"File",
+			{"file_url": pod_attachment, "attached_to_name": ("in", ["", None])},
+			"name"
+		)
+		if file_doc:
+			frappe.db.set_value(
+				"File",
+				file_doc,
+				{
+					"attached_to_doctype": "Sales Invoice",
+					"attached_to_name": sales_invoice
+				},
+				update_modified=False
+			)
 
 	# Check if all 3 fields are now filled
 	all_filled = bool(pod_status and pod_date and pod_attachment)

@@ -3235,7 +3235,7 @@
   "label": "POD Details",
   "insert_after": "ignore_pricing_rule",
   "collapsible": 1,
-  "depends_on": "eval:doc.docstatus==1",
+  "depends_on": "eval:doc.docstatus==1 && doc.gst_category != 'Unregistered' && doc.is_bns_internal_customer != 1",
   "module": "Business Needed Solutions",
   "name": "Sales Invoice-bns_pod_section"
  },
