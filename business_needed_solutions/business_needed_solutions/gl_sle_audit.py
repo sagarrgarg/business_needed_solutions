@@ -309,7 +309,16 @@ def _audit_one_doctype(
     params: Dict[str, Any] = {}
 
     if cutoff_date:
-        where_clauses.append(f"p.{posting_field} >= %(cutoff)s")
+        # Window by the header date OR the GL/SLE date. A backdated header whose
+        # GL/SLE still sits in a later (in-window) period would otherwise fall
+        # outside a header-only cutoff -- exactly the wrong-dated-GL case this
+        # audit exists to catch. Referencing the joined gl/sle aggregates keeps
+        # those documents in scope.
+        where_clauses.append(
+            f"(p.{posting_field} >= %(cutoff)s"
+            " OR gl.gl_max_pd >= %(cutoff)s"
+            " OR sle.sle_max_pd >= %(cutoff)s)"
+        )
         params["cutoff"] = getdate(cutoff_date)
     if company:
         where_clauses.append("p.company = %(company)s")
