@@ -117,6 +117,17 @@ frappe.query_reports["Stock Ledger Negative Episodes"] = {
 				"land on the reco's intended balance (e.g. deepest -100, reco target 50 => 150)."
 			),
 		},
+		{
+			fieldname: "unique_min_per_pair",
+			label: __("Unique Item×Warehouse (deepest episode only)"),
+			fieldtype: "Check",
+			default: 0,
+			description: __(
+				"Collapse to one row per item + warehouse (+ batch when segregated). When an " +
+				"item-warehouse goes negative more than once, keep only the deepest episode " +
+				"(minimum Min Balance) — its Required Qty covers every shallower dip."
+			),
+		},
 	],
 	formatter: function (value, row, column, data, default_formatter) {
 		value = default_formatter(value, row, column, data);

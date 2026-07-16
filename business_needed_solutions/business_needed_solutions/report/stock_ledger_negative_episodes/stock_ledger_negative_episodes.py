@@ -30,10 +30,33 @@ def execute(filters=None):
 	episodes = find_negative_episodes(
 		stock_ledger_data, group_by_batch=group_by_batch, include_stock_reco=include_stock_reco
 	)
+	if filters and cint(filters.get("unique_min_per_pair")):
+		episodes = collapse_to_min_per_pair(episodes)
 	columns = get_columns(group_by_batch=group_by_batch, include_stock_reco=include_stock_reco)
 	data = prepare_report_data(episodes)
 
 	return columns, data
+
+
+def collapse_to_min_per_pair(episodes):
+	"""Reduce to one episode per item + warehouse (+ batch_no) pair.
+
+	When an item-warehouse dips negative more than once, keep only the episode
+	with the minimum (deepest) ``min_balance`` -- the worst deficit, whose
+	``required_qty`` covers every shallower dip. Ties on min_balance break to the
+	earliest ``episode_start`` for determinism.
+	"""
+	best = {}
+	for ep in episodes:
+		key = (ep["item_code"], ep["warehouse"], ep.get("batch_no") or "")
+		cur = best.get(key)
+		if (
+			cur is None
+			or ep["min_balance"] < cur["min_balance"]
+			or (ep["min_balance"] == cur["min_balance"] and ep["episode_start"] < cur["episode_start"])
+		):
+			best[key] = ep
+	return list(best.values())
 
 
 def get_stock_ledger_data(filters):
@@ -329,6 +352,8 @@ def export_fix_plan(filters):
 	episodes = find_negative_episodes(
 		stock_ledger_data, group_by_batch=group_by_batch, include_stock_reco=include_stock_reco
 	)
+	if cint(filters.get("unique_min_per_pair")):
+		episodes = collapse_to_min_per_pair(episodes)
 
 	output = StringIO()
 	writer = csv.writer(output)
