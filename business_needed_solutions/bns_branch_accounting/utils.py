@@ -2101,6 +2101,124 @@ def _validate_internal_si_dn_one_to_one_parity(doc, dn_names: List[str]) -> None
             )
 
 
+def _collect_internal_address_mismatches(doc) -> List[Dict[str, Any]]:
+    """Return address-parity mismatches for an internal-transfer document vs
+    its source(s). Pure — never throws, never gates by cutoff (the caller
+    decides). Compares the Address *record* (link field) because a correct
+    internal transfer carries the same Address doc on both sides:
+
+    * Same seller side  — DN <-> SI: DN.company_address == SI.company_address,
+      DN.customer_address == SI.customer_address.
+    * Cross side — SI/DN -> PR/PI: source company_address == PR/PI.supplier_address
+      (seller branch), source customer_address == PR/PI.billing_address (buyer branch).
+
+    Each mismatch: {label, source_type, source_name, source_address,
+    target_field, target_address}. Returns simply for internal RETURN docs
+    (role/direction swaps there — out of scope)."""
+    dt = doc.get("doctype")
+    if cint(doc.get("is_return")):
+        return []
+
+    out: List[Dict[str, Any]] = []
+
+    def _cmp(label, src_type, src_name, src_val, tgt_field, tgt_val):
+        if (src_val or "").strip() != (tgt_val or "").strip():
+            out.append({
+                "label": label,
+                "source_type": src_type,
+                "source_name": src_name,
+                "source_address": src_val or "",
+                "target_field": tgt_field,
+                "target_address": tgt_val or "",
+            })
+
+    if dt == "Sales Invoice":
+        if not is_bns_internal_customer(doc):
+            return []
+        dn_names = sorted({
+            (item.get("delivery_note") or "").strip()
+            for item in (doc.get("items") or [])
+            if (item.get("delivery_note") or "").strip()
+        })
+        for dn in dn_names:
+            src = frappe.db.get_value(
+                "Delivery Note", dn, ["company_address", "customer_address"], as_dict=True
+            ) or {}
+            _cmp("Company Address", "Delivery Note", dn,
+                 src.get("company_address"), "company_address", doc.get("company_address"))
+            _cmp("Customer Address", "Delivery Note", dn,
+                 src.get("customer_address"), "customer_address", doc.get("customer_address"))
+
+    elif dt in ("Purchase Receipt", "Purchase Invoice"):
+        if not is_bns_internal_supplier(doc):
+            return []
+        sources: List[tuple] = []
+        if dt == "Purchase Receipt":
+            flags = _get_pr_source_link_flags(doc)
+            sources += [("Delivery Note", n) for n in (flags.get("dn_names") or [])]
+            sources += [("Sales Invoice", n) for n in (flags.get("si_names") or [])]
+        else:
+            si_name = _resolve_si_name_for_internal_pi(doc)
+            if si_name:
+                sources.append(("Sales Invoice", si_name))
+        for src_type, src_name in sources:
+            src = frappe.db.get_value(
+                src_type, src_name, ["company_address", "customer_address"], as_dict=True
+            ) or {}
+            _cmp("Supplier Address = source Company Address", src_type, src_name,
+                 src.get("company_address"), "supplier_address", doc.get("supplier_address"))
+            _cmp("Billing Address = source Customer Address", src_type, src_name,
+                 src.get("customer_address"), "billing_address", doc.get("billing_address"))
+
+    return out
+
+
+def validate_internal_address_parity(doc, method: Optional[str] = None) -> None:
+    """Block submit when an internal-transfer DN/SI/PR/PI carries branch
+    addresses that do not mirror its source document. Gated by the Internal
+    Transfer Cutoff Date so legacy pre-cutoff vouchers are not retroactively
+    blocked. See [[_collect_internal_address_mismatches]]."""
+    if doc.doctype not in ("Sales Invoice", "Purchase Receipt", "Purchase Invoice"):
+        return
+    if not is_after_internal_transfer_cutoff(doc.get("posting_date")):
+        return
+
+    mismatches = _collect_internal_address_mismatches(doc)
+    if not mismatches:
+        return
+
+    lines = []
+    for m in mismatches:
+        lines.append(
+            _("- {0}: this {1}'s {2} is {3}, but source {4} {5} carries {6}").format(
+                m["label"], doc.doctype, m["target_field"],
+                frappe.bold(m["target_address"] or "(blank)"),
+                m["source_type"], m["source_name"],
+                frappe.bold(m["source_address"] or "(blank)"),
+            )
+        )
+    frappe.throw(
+        _(
+            "Internal transfer address parity mismatch — the branch addresses on this {0} "
+            "do not match its source document. Both documents must carry the same Address "
+            "record (seller branch and buyer branch). Fix the addresses before submitting:\n\n{1}"
+        ).format(doc.doctype, "\n".join(lines)),
+        title=_("Internal Address Parity"),
+    )
+
+
+@frappe.whitelist()
+def get_internal_address_parity_mismatches(doctype: str, name: str) -> List[Dict[str, Any]]:
+    """Report/UI helper: address-parity mismatches for a saved internal doc,
+    independent of the cutoff date (surfaces already-saved discrepancies)."""
+    _bns_require_accounts_read()
+    if doctype not in ("Sales Invoice", "Purchase Receipt", "Purchase Invoice"):
+        return []
+    if not frappe.db.exists(doctype, name):
+        return []
+    return _collect_internal_address_mismatches(frappe.get_doc(doctype, name))
+
+
 def validate_internal_sales_invoice_linkage(doc, method: Optional[str] = None) -> None:
     """Enforce internal SI different-GSTIN and DN strict parity after cutoff."""
     if doc.doctype != "Sales Invoice":

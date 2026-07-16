@@ -979,6 +979,7 @@ _SCOPE_LABELS = {
 	"flag_mismatch": "Flag Mismatch (one-sided internal)",
 	"no_counter_doc": "Missing Counter-Document",
 	"internal_no_source": "Internal supplier, no BNS source link",
+	"address_parity": "Address Parity Mismatch",
 }
 
 
@@ -1019,6 +1020,7 @@ def _get_data(filters):
 
 	data.extend(_audit_cross_document_consistency(filters, settings))
 	data.extend(_audit_internal_pair_balance(filters, settings))
+	data.extend(_audit_address_parity(filters, settings))
 
 	data.sort(key=lambda r: r.get("posting_date") or "0000-00-00", reverse=True)
 	return data
@@ -1051,6 +1053,68 @@ def _build_date_conditions(filters, alias="doc"):
 		conditions.append(f"{alias}.posting_date <= %s")
 		values.append(filters.to_date)
 	return conditions, values
+
+
+def _audit_address_parity(filters, settings):
+	"""Flag submitted internal SI/PR/PI whose branch addresses do not mirror
+	their source document (already-saved discrepancies).
+
+	Reuses the same comparison the submit-time guard uses
+	(``utils._collect_internal_address_mismatches``) but runs over historical
+	data regardless of the Internal Transfer Cutoff Date, so pre-existing
+	swapped/blank-address vouchers surface here even though they can no longer
+	be blocked at submit.
+	"""
+	from business_needed_solutions.bns_branch_accounting.utils import (
+		_collect_internal_address_mismatches,
+	)
+
+	# SQL pre-filter to plausibly-internal docs to avoid loading every voucher.
+	internal_filter = {
+		"Sales Invoice": "doc.is_bns_internal_customer = 1",
+		"Purchase Receipt": "(doc.is_bns_internal_supplier = 1 OR ifnull(doc.bns_inter_company_reference, '') != '')",
+		"Purchase Invoice": "(doc.is_bns_internal_supplier = 1 OR ifnull(doc.bns_inter_company_reference, '') != '')",
+	}
+
+	rows = []
+	doc_types = _get_doc_types_to_audit(filters)
+	for dt in ("Sales Invoice", "Purchase Receipt", "Purchase Invoice"):
+		if dt not in doc_types:
+			continue
+		conditions, values = _build_date_conditions(filters, alias="doc")
+		conditions.append("ifnull(doc.is_return, 0) = 0")
+		conditions.append(internal_filter[dt])
+		candidates = frappe.db.sql(
+			f"""select doc.name, doc.posting_date
+			     from `tab{dt}` doc
+			     where {' AND '.join(conditions)}""",
+			values,
+			as_dict=True,
+		)
+		for cand in candidates:
+			mismatches = _collect_internal_address_mismatches(frappe.get_doc(dt, cand["name"]))
+			if not mismatches:
+				continue
+			details = " | ".join(
+				"{0}: {1}={2} vs {3} {4} {5}".format(
+					m["label"], m["target_field"], m["target_address"] or "(blank)",
+					m["source_type"], m["source_name"], m["source_address"] or "(blank)",
+				)
+				for m in mismatches
+			)
+			rows.append({
+				"posting_date": cand["posting_date"],
+				"document_type": dt,
+				"document_name": cand["name"],
+				"internal_scope": _SCOPE_LABELS["address_parity"],
+				"deviation_type": "Address Parity Mismatch",
+				"expected_accounts": "",
+				"unexpected_accounts": "",
+				"missing_accounts": "",
+				"sle_issue": "",
+				"details": details,
+			})
+	return rows
 
 
 # ---------------------------------------------------------------------------
