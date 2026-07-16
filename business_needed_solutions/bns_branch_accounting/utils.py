@@ -2104,33 +2104,49 @@ def _validate_internal_si_dn_one_to_one_parity(doc, dn_names: List[str]) -> None
 def _collect_internal_address_mismatches(doc) -> List[Dict[str, Any]]:
     """Return address-parity mismatches for an internal-transfer document vs
     its source(s). Pure — never throws, never gates by cutoff (the caller
-    decides). Compares the Address *record* (link field) because a correct
-    internal transfer carries the same Address doc on both sides:
+    decides). A correct internal transfer mirrors branch addresses:
 
     * Same seller side  — DN <-> SI: DN.company_address == SI.company_address,
       DN.customer_address == SI.customer_address.
     * Cross side — SI/DN -> PR/PI: source company_address == PR/PI.supplier_address
       (seller branch), source customer_address == PR/PI.billing_address (buyer branch).
 
+    Each leg is compared on BOTH the Address record AND the GSTIN behind it, so
+    callers can tell apart the two very different failures:
+
+    * ``gstin_mismatch=True``  — the address resolves to the WRONG GSTIN
+      (inverted / wrong branch): real GST/ITC damage. This is what the submit
+      guard blocks on.
+    * ``gstin_mismatch=False`` — same GSTIN, merely a different Address record
+      for the same branch (e.g. two address docs for one marketplace GSTIN):
+      cosmetic parity noise, surfaced in the report but NOT blocked, so valid
+      transfers aren't rejected.
+
     Each mismatch: {label, source_type, source_name, source_address,
-    target_field, target_address}. Returns simply for internal RETURN docs
-    (role/direction swaps there — out of scope)."""
+    target_field, target_address, source_gstin, target_gstin, gstin_mismatch}.
+    Returns [] for internal RETURN docs (role/direction swaps — out of scope)."""
     dt = doc.get("doctype")
     if cint(doc.get("is_return")):
         return []
 
     out: List[Dict[str, Any]] = []
 
-    def _cmp(label, src_type, src_name, src_val, tgt_field, tgt_val):
-        if (src_val or "").strip() != (tgt_val or "").strip():
-            out.append({
-                "label": label,
-                "source_type": src_type,
-                "source_name": src_name,
-                "source_address": src_val or "",
-                "target_field": tgt_field,
-                "target_address": tgt_val or "",
-            })
+    def _cmp(label, src_type, src_name, src_addr, tgt_field, tgt_addr, src_gstin, tgt_gstin):
+        if (src_addr or "").strip() == (tgt_addr or "").strip():
+            return
+        sg, tg = (src_gstin or "").strip().upper(), (tgt_gstin or "").strip().upper()
+        out.append({
+            "label": label,
+            "source_type": src_type,
+            "source_name": src_name,
+            "source_address": src_addr or "",
+            "target_field": tgt_field,
+            "target_address": tgt_addr or "",
+            "source_gstin": sg,
+            "target_gstin": tg,
+            # only a confident GST failure when both GSTINs are known and differ
+            "gstin_mismatch": bool(sg and tg and sg != tg),
+        })
 
     if dt == "Sales Invoice":
         if not is_bns_internal_customer(doc):
@@ -2142,12 +2158,16 @@ def _collect_internal_address_mismatches(doc) -> List[Dict[str, Any]]:
         })
         for dn in dn_names:
             src = frappe.db.get_value(
-                "Delivery Note", dn, ["company_address", "customer_address"], as_dict=True
+                "Delivery Note", dn,
+                ["company_address", "customer_address", "company_gstin", "billing_address_gstin"],
+                as_dict=True,
             ) or {}
             _cmp("Company Address", "Delivery Note", dn,
-                 src.get("company_address"), "company_address", doc.get("company_address"))
+                 src.get("company_address"), "company_address", doc.get("company_address"),
+                 src.get("company_gstin"), doc.get("company_gstin"))
             _cmp("Customer Address", "Delivery Note", dn,
-                 src.get("customer_address"), "customer_address", doc.get("customer_address"))
+                 src.get("customer_address"), "customer_address", doc.get("customer_address"),
+                 src.get("billing_address_gstin"), doc.get("billing_address_gstin"))
 
     elif dt in ("Purchase Receipt", "Purchase Invoice"):
         if not is_bns_internal_supplier(doc):
@@ -2163,45 +2183,54 @@ def _collect_internal_address_mismatches(doc) -> List[Dict[str, Any]]:
                 sources.append(("Sales Invoice", si_name))
         for src_type, src_name in sources:
             src = frappe.db.get_value(
-                src_type, src_name, ["company_address", "customer_address"], as_dict=True
+                src_type, src_name,
+                ["company_address", "customer_address", "company_gstin", "billing_address_gstin"],
+                as_dict=True,
             ) or {}
+            # seller branch: PR/PI.supplier_address <-> source.company_address
             _cmp("Supplier Address = source Company Address", src_type, src_name,
-                 src.get("company_address"), "supplier_address", doc.get("supplier_address"))
+                 src.get("company_address"), "supplier_address", doc.get("supplier_address"),
+                 src.get("company_gstin"), doc.get("supplier_gstin"))
+            # buyer branch: PR/PI.billing_address <-> source.customer_address
             _cmp("Billing Address = source Customer Address", src_type, src_name,
-                 src.get("customer_address"), "billing_address", doc.get("billing_address"))
+                 src.get("customer_address"), "billing_address", doc.get("billing_address"),
+                 src.get("billing_address_gstin"), doc.get("company_gstin"))
 
     return out
 
 
 def validate_internal_address_parity(doc, method: Optional[str] = None) -> None:
-    """Block submit when an internal-transfer DN/SI/PR/PI carries branch
-    addresses that do not mirror its source document. Gated by the Internal
-    Transfer Cutoff Date so legacy pre-cutoff vouchers are not retroactively
-    blocked. See [[_collect_internal_address_mismatches]]."""
+    """Block submit when an internal-transfer DN/SI/PR/PI carries a branch
+    address that resolves to the WRONG GSTIN vs its source (inverted / wrong
+    branch) — the real GST/ITC failure. A same-GSTIN-but-different-Address-record
+    difference is NOT blocked (that is valid; e.g. two address docs for one
+    marketplace GSTIN) — it is only surfaced in the internal audit report.
+    Gated by the Internal Transfer Cutoff Date so legacy pre-cutoff vouchers are
+    not retroactively blocked. See [[_collect_internal_address_mismatches]]."""
     if doc.doctype not in ("Sales Invoice", "Purchase Receipt", "Purchase Invoice"):
         return
     if not is_after_internal_transfer_cutoff(doc.get("posting_date")):
         return
 
-    mismatches = _collect_internal_address_mismatches(doc)
-    if not mismatches:
+    blocking = [m for m in _collect_internal_address_mismatches(doc) if m.get("gstin_mismatch")]
+    if not blocking:
         return
 
     lines = []
-    for m in mismatches:
+    for m in blocking:
         lines.append(
-            _("- {0}: this {1}'s {2} is {3}, but source {4} {5} carries {6}").format(
+            _("- {0}: this {1}'s {2} is {3} (GSTIN {4}), but source {5} {6} is {7} (GSTIN {8})").format(
                 m["label"], doc.doctype, m["target_field"],
-                frappe.bold(m["target_address"] or "(blank)"),
+                frappe.bold(m["target_address"] or "(blank)"), m["target_gstin"] or "?",
                 m["source_type"], m["source_name"],
-                frappe.bold(m["source_address"] or "(blank)"),
+                frappe.bold(m["source_address"] or "(blank)"), m["source_gstin"] or "?",
             )
         )
     frappe.throw(
         _(
-            "Internal transfer address parity mismatch — the branch addresses on this {0} "
-            "do not match its source document. Both documents must carry the same Address "
-            "record (seller branch and buyer branch). Fix the addresses before submitting:\n\n{1}"
+            "Internal transfer GSTIN parity mismatch — a branch address on this {0} resolves to "
+            "a different GSTIN than its source document (wrong/inverted branch). Fix the addresses "
+            "so seller and buyer GSTINs mirror the source before submitting:\n\n{1}"
         ).format(doc.doctype, "\n".join(lines)),
         title=_("Internal Address Parity"),
     )

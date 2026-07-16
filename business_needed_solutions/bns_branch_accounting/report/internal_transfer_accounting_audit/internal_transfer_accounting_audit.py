@@ -1095,10 +1095,14 @@ def _audit_address_parity(filters, settings):
 			mismatches = _collect_internal_address_mismatches(frappe.get_doc(dt, cand["name"]))
 			if not mismatches:
 				continue
+			critical = any(m.get("gstin_mismatch") for m in mismatches)
 			details = " | ".join(
-				"{0}: {1}={2} vs {3} {4} {5}".format(
+				"{0}: {1}={2} (GSTIN {3}) vs {4} {5} {6} (GSTIN {7}){8}".format(
 					m["label"], m["target_field"], m["target_address"] or "(blank)",
+					m.get("target_gstin") or "?",
 					m["source_type"], m["source_name"], m["source_address"] or "(blank)",
+					m.get("source_gstin") or "?",
+					" [WRONG GSTIN]" if m.get("gstin_mismatch") else " [same GSTIN, diff record]",
 				)
 				for m in mismatches
 			)
@@ -1107,7 +1111,10 @@ def _audit_address_parity(filters, settings):
 				"document_type": dt,
 				"document_name": cand["name"],
 				"internal_scope": _SCOPE_LABELS["address_parity"],
-				"deviation_type": "Address Parity Mismatch",
+				"deviation_type": (
+					"Address Parity - WRONG GSTIN" if critical
+					else "Address Parity - record only"
+				),
 				"expected_accounts": "",
 				"unexpected_accounts": "",
 				"missing_accounts": "",
