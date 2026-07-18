@@ -60,6 +60,17 @@ frappe.ui.form.on('Sales Invoice', {
     },
 
     refresh: function(frm) {
+        // BNS asset-transfer picker: scope the item-row Asset field to units that
+        // are actually eligible to dispatch (right item + company, transferable
+        // status, not already in transit).
+        frm.set_query('asset', 'items', function(doc, cdt, cdn) {
+            const row = locals[cdt][cdn];
+            return {
+                query: 'business_needed_solutions.bns_branch_accounting.utils.bns_transferable_asset_query',
+                filters: { item_code: row.item_code, company: doc.company }
+            };
+        });
+
         // Show missing POD warning banner if document is submitted and has incomplete POD fields
         if (frm.doc.docstatus === 1 && frm.doc.gst_category !== 'Unregistered' && frm.doc.is_bns_internal_customer !== 1) {
             if (!frm.doc.bns_pod_status || !frm.doc.bns_pod_date || !frm.doc.bns_pod_attachment) {

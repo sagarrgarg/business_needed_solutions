@@ -1,5 +1,16 @@
 frappe.ui.form.on('Delivery Note', {
     refresh: function(frm) {
+        // BNS asset-transfer picker: scope the item-row transferred-asset field to
+        // units eligible to dispatch (right item + company, transferable status,
+        // not already in transit).
+        frm.set_query('bns_transferred_asset', 'items', function(doc, cdt, cdn) {
+            const row = locals[cdt][cdn];
+            return {
+                query: 'business_needed_solutions.bns_branch_accounting.utils.bns_transferable_asset_query',
+                filters: { item_code: row.item_code, company: doc.company }
+            };
+        });
+
         // Show button to convert to BNS Internal if customer is BNS internal but DN is not marked
         // OR if DN is marked but status is not "BNS Internally Transferred"
         // Only for same GSTIN transfers

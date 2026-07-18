@@ -29,7 +29,7 @@ app_license = "Commercial"
 app_include_js = [
                   "/assets/business_needed_solutions/js/purchase_invoice_form.js?v=219",
                   "/assets/business_needed_solutions/js/purchase_receipt_form.js?v=52",
-                  "/assets/business_needed_solutions/js/delivery_note.js?v=137",
+                  "/assets/business_needed_solutions/js/delivery_note.js?v=138",
                   "/assets/business_needed_solutions/js/discount_manipulation_by_type.js?v=38",
                   "/assets/business_needed_solutions/js/direct_print.js?v=50",
                   "/assets/business_needed_solutions/js/item.js",
@@ -214,6 +214,12 @@ doc_events = {
     "Item": {
         "validate": "business_needed_solutions.business_needed_solutions.overrides.item_validation.validate_expense_account_for_non_stock_items"
     },
+    "Asset": {
+        "autoname": "business_needed_solutions.business_needed_solutions.overrides.asset_naming.bns_asset_autoname"
+    },
+    "Asset Category": {
+        "validate": "business_needed_solutions.business_needed_solutions.overrides.asset_naming.validate_asset_category_abbr"
+    },
     "Stock Ledger Entry": {
         "validate": [
             "business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.validate_sle_warehouse_negative_stock",
@@ -236,17 +242,20 @@ doc_events = {
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_return_credit_note_parity",
+            "business_needed_solutions.bns_branch_accounting.utils.bns_guard_asset_in_transit",
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.bns_branch_accounting.gst_integration.validate_internal_dn_vehicle_no",
             "business_needed_solutions.bns_branch_accounting.utils.update_delivery_note_status_for_bns_internal",
             "business_needed_solutions.bns_branch_accounting.utils.backlink_internal_return_debit_note",
-            "business_needed_solutions.bns_branch_accounting.gst_integration.maybe_generate_internal_dn_ewaybill"
+            "business_needed_solutions.bns_branch_accounting.gst_integration.maybe_generate_internal_dn_ewaybill",
+            "business_needed_solutions.bns_branch_accounting.utils.bns_create_asset_transfer_movement"
         ],
         "on_cancel": [
             "business_needed_solutions.bns_branch_accounting.utils.validate_delivery_note_cancellation",
             "business_needed_solutions.bns_branch_accounting.utils.ignore_payment_ledger_cancellation_links_for_dn",
+            "business_needed_solutions.bns_branch_accounting.utils.bns_cancel_asset_transfer_movement",
             "business_needed_solutions.bns_branch_accounting.utils.bns_ignore_repost_ledger_links_on_cancel"
         ]
     },
@@ -257,6 +266,7 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_address_parity",
+            "business_needed_solutions.bns_branch_accounting.utils.bns_validate_asset_receive_parity",
             "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments",
             "business_needed_solutions.business_needed_solutions.overrides.ineligible_itc_submission_control.restrict_ineligible_itc_submission"
         ],
@@ -291,14 +301,17 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_stock_movement_captured",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_return_credit_note_parity",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_address_parity",
+            "business_needed_solutions.bns_branch_accounting.utils.bns_guard_asset_in_transit",
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
             "business_needed_solutions.bns_branch_accounting.utils.update_sales_invoice_status_for_bns_internal",
-            "business_needed_solutions.bns_branch_accounting.utils.backlink_internal_return_debit_note"
+            "business_needed_solutions.bns_branch_accounting.utils.backlink_internal_return_debit_note",
+            "business_needed_solutions.bns_branch_accounting.utils.bns_create_asset_transfer_movement"
         ],
         "on_cancel": [
             "business_needed_solutions.bns_branch_accounting.utils.cancel_linked_purchase_docs_for_sales_invoice",
+            "business_needed_solutions.bns_branch_accounting.utils.bns_cancel_asset_transfer_movement",
             "business_needed_solutions.bns_branch_accounting.utils.bns_ignore_repost_ledger_links_on_cancel"
         ]
     },
@@ -310,6 +323,7 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_address_parity",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_return_linkage",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_stock_movement_captured",
+            "business_needed_solutions.bns_branch_accounting.utils.bns_validate_asset_receive_parity",
             "business_needed_solutions.business_needed_solutions.overrides.ineligible_itc_submission_control.restrict_ineligible_itc_submission",
         ],
         "on_submit": [

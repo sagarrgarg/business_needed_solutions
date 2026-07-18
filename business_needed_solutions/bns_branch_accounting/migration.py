@@ -36,12 +36,99 @@ def after_migrate() -> None:
         migrate_split_internal_transfer_accounts()
         migrate_non_gst_internal_transfer_accounts()
         backfill_diff_gstin_opt_in_for_legacy_internal_dns()
+        ensure_asset_transfer_movement_fields()
+        ensure_bns_in_transit_location()
 
         logger.info("BNS Branch Accounting post-migration setup completed successfully")
 
     except Exception as e:
         logger.error("Error in BNS Branch Accounting post-migration setup: %s", str(e))
         raise
+
+
+def ensure_asset_transfer_movement_fields() -> None:
+    """Ensure the Phase-2 branch-shift tracking fields exist on Asset.
+
+    Idempotent upsert via create_custom_fields (skill §3). All no_copy so they
+    never propagate through amendments; hidden/read-only since they are system
+    managed by the transfer hooks.
+    """
+    from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+
+    try:
+        create_custom_fields(
+            {
+                "Asset": [
+                    {
+                        "fieldname": "bns_in_transit",
+                        "label": "BNS In Transit",
+                        "fieldtype": "Check",
+                        "insert_after": "bns_pre_transfer_cost_center",
+                        "read_only": 1,
+                        "no_copy": 1,
+                        "module": "BNS Branch Accounting",
+                        "description": "Set while this asset is dispatched on an internal transfer but not yet received. Blocks a second dispatch.",
+                    },
+                    {
+                        "fieldname": "bns_pre_transfer_location",
+                        "label": "BNS Pre-Transfer Location",
+                        "fieldtype": "Link",
+                        "options": "Location",
+                        "insert_after": "bns_in_transit",
+                        "read_only": 1,
+                        "hidden": 1,
+                        "no_copy": 1,
+                        "module": "BNS Branch Accounting",
+                        "description": "Source branch Location captured at dispatch, used to restore location if the dispatch is cancelled.",
+                    },
+                    {
+                        "fieldname": "bns_transit_target_location",
+                        "label": "BNS Transit Target Location",
+                        "fieldtype": "Link",
+                        "options": "Location",
+                        "insert_after": "bns_pre_transfer_location",
+                        "read_only": 1,
+                        "hidden": 1,
+                        "no_copy": 1,
+                        "module": "BNS Branch Accounting",
+                        "description": "Destination branch Location captured at dispatch, consumed by the receiver to complete the movement.",
+                    },
+                ]
+            },
+            ignore_validate=True,
+        )
+        frappe.db.commit()
+    except Exception as e:
+        logger.error("Error ensuring asset transfer movement fields: %s", str(e))
+        frappe.db.rollback()
+
+
+def ensure_bns_in_transit_location() -> None:
+    """Create the 'BNS In Transit' Location (once) and pin it in settings if blank.
+
+    The Location is the physical analogue of the Asset in Transit account: an
+    asset sits here between dispatch and receipt. Guarded so it is safe on a
+    fresh site (Location doctype/table may not exist yet) and idempotent.
+    """
+    if not frappe.db.exists("DocType", "Location") or not frappe.db.table_exists("Location"):
+        return
+    try:
+        loc_name = "BNS In Transit"
+        if not frappe.db.exists("Location", loc_name):
+            loc = frappe.new_doc("Location")
+            loc.location_name = loc_name
+            loc.is_group = 0
+            loc.insert(ignore_permissions=True)
+            loc_name = loc.name
+
+        settings = "BNS Branch Accounting Settings"
+        if frappe.get_meta(settings).has_field("asset_in_transit_location"):
+            if not frappe.db.get_single_value(settings, "asset_in_transit_location"):
+                frappe.db.set_single_value(settings, "asset_in_transit_location", loc_name)
+        frappe.db.commit()
+    except Exception as e:
+        logger.error("Error ensuring BNS In Transit location: %s", str(e))
+        frappe.db.rollback()
 
 
 def initialize_bns_repost_tracking_state() -> None:

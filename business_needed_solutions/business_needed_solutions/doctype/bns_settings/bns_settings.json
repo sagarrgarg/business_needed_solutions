@@ -88,7 +88,10 @@
   "srbnb_internal_clearing_account",
   "ineligible_itc_section",
   "restrict_ineligible_itc_submission",
-  "ineligible_itc_authorized_role"
+  "ineligible_itc_authorized_role",
+  "tab_break_assets",
+  "asset_naming_section",
+  "enable_bns_asset_naming"
  ],
  "fields": [
   {
@@ -612,12 +615,29 @@
    "default": "Accounts Manager",
    "depends_on": "eval:doc.restrict_ineligible_itc_submission",
    "description": "Only users with this role may submit PR/PI that book ineligible ITC. Defaults to Accounts Manager."
+  },
+  {
+   "fieldname": "tab_break_assets",
+   "fieldtype": "Tab Break",
+   "label": "Assets"
+  },
+  {
+   "fieldname": "asset_naming_section",
+   "fieldtype": "Section Break",
+   "label": "Asset Naming"
+  },
+  {
+   "default": "0",
+   "description": "When enabled, newly created Assets are named {Company Abbr}/{Asset Category Series Abbreviation}/{Item Code}/{###} (e.g. KGOPL/OE/FA-01/001) instead of the flat ACC-ASS series. Prerequisite: set a Series Abbreviation on every Asset Category in use first — creating an asset under a category with no abbreviation is blocked. Existing asset names are never changed.",
+   "fieldname": "enable_bns_asset_naming",
+   "fieldtype": "Check",
+   "label": "Enable BNS Asset Naming"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-04-01 12:00:00.000000",
+ "modified": "2026-07-18 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Business Needed Solutions",
  "name": "BNS Settings",

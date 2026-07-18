@@ -8,6 +8,7 @@
   "accounts_section",
   "stock_in_transit_account",
   "asset_in_transit_account",
+  "asset_in_transit_location",
   "column_break_accounts",
   "internal_sales_transfer_account",
   "internal_sales_non_gst_account",
@@ -52,6 +53,13 @@
    "fieldtype": "Link",
    "label": "Asset in Transit Account",
    "options": "Account"
+  },
+  {
+   "description": "Physical-location analogue of the Asset in Transit account. On dispatch of an internal fixed-asset transfer the asset is moved here (via Asset Movement); the receiver then moves it on to the destination branch Location. Auto-created as 'BNS In Transit' on migrate if blank.",
+   "fieldname": "asset_in_transit_location",
+   "fieldtype": "Link",
+   "label": "Asset in Transit Location",
+   "options": "Location"
   },
   {
    "fieldname": "column_break_accounts",
@@ -212,7 +220,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-07-02 12:00:00.000000",
+ "modified": "2026-07-18 13:00:00.000000",
  "modified_by": "Administrator",
  "module": "BNS Branch Accounting",
  "name": "BNS Branch Accounting Settings",

@@ -4749,6 +4749,11 @@ def append_asset_transfer_gl_entries(doc, gl_entries):
             return gl_entries
         if not is_bns_internal_transfer(doc):
             return gl_entries
+        # Post the asset-in-transit leg only on the SLE-owning document. Without
+        # this, an update_stock=0 SI/PI whose stock lives on a linked DN/PR would
+        # append the leg a second time (the "SI followed by DN" double-post).
+        if not _voucher_owns_sle(doc.doctype, doc):
+            return gl_entries
         if not is_after_accounting_rewrite_cutoff(doc.get("posting_date")):
             return gl_entries
         asset_rows = _bns_asset_transfer_rows(doc)
@@ -4782,11 +4787,16 @@ def bns_apply_asset_transfer(doc, method: Optional[str] = None) -> None:
         return
     if not is_bns_internal_transfer(doc):
         return
+    if not _voucher_owns_sle(doc.doctype, doc):
+        # update_stock=0 PI defers to its linked PR (the SLE owner), so the
+        # receipt is applied and the movement posted exactly once.
+        return
     if not is_after_accounting_rewrite_cutoff(doc.get("posting_date")):
         return
     if not frappe.get_meta("Asset").has_field("bns_pre_transfer_cost_center"):
         return
-    for ar in _bns_asset_transfer_rows(doc):
+    rows = _bns_asset_transfer_rows(doc)
+    for ar in rows:
         asset_name = ar["asset"]
         new_cc = doc.get("cost_center") or (ar["item"].get("cost_center") or "")
         if not new_cc:
@@ -4804,28 +4814,332 @@ def bns_apply_asset_transfer(doc, method: Optional[str] = None) -> None:
             "BNS asset transfer: %s cost_center %s -> %s via %s",
             asset_name, cur_cc, new_cc, doc.name,
         )
+    # Physical leg: In-Transit -> destination branch Location (Asset Movement #2).
+    _bns_create_receiver_movement(doc, rows)
 
 
 def bns_revert_asset_transfer(doc, method: Optional[str] = None) -> None:
-    """On cancel of a BNS internal receiver, restore the asset's prior cost_center."""
+    """On cancel of a BNS internal receiver (PR/PI), cancel the receipt Asset
+    Movement (native recompute returns the asset to the In-Transit location, as
+    the dispatch movement is still submitted), flag the asset back as in-transit,
+    and restore its prior cost_center."""
     if doc.doctype not in ("Purchase Receipt", "Purchase Invoice"):
         return
     if not frappe.get_meta("Asset").has_field("bns_pre_transfer_cost_center"):
         return
+
+    cancelled_assets = _bns_cancel_movements_for(doc)
+
     for ar in _bns_asset_transfer_rows(doc):
         asset_name = ar["asset"]
+        vals = {}
         prev_cc = frappe.db.get_value("Asset", asset_name, "bns_pre_transfer_cost_center")
         if prev_cc:
-            frappe.db.set_value(
-                "Asset",
-                asset_name,
-                {"cost_center": prev_cc, "bns_pre_transfer_cost_center": None},
-                update_modified=False,
+            vals["cost_center"] = prev_cc
+            vals["bns_pre_transfer_cost_center"] = None
+        if asset_name in cancelled_assets:
+            # dispatch leg still stands -> asset is genuinely back in transit
+            vals["bns_in_transit"] = 1
+        if vals:
+            frappe.db.set_value("Asset", asset_name, vals, update_modified=False)
+            logger.info("BNS asset transfer: reverted %s on cancel of %s (%s)", asset_name, doc.name, vals)
+
+
+# ---------------------------------------------------------------------------
+# Internal asset transfer — physical Asset Movement trail + transit guard
+# ---------------------------------------------------------------------------
+# The value/GL side (append_asset_transfer_gl_entries) already mirrors the
+# stock-in-transit leg. These functions add the *physical* analogue: an Asset
+# Movement chain through the "BNS In Transit" Location, plus a guard blocking a
+# re-dispatch of an asset that has not yet been received.
+#
+# Exactly one document per side drives, keyed on _voucher_owns_sle: an
+# update_stock=0 SI/PI defers to its linked DN/PR, so an asset carried on both
+# (the "SI followed by DN" case) posts/moves exactly once.
+
+def _bns_asset_transfer_active(doc) -> bool:
+    """Common gate: a BNS internal transfer, on the SLE-owning document, past the
+    accounting-rewrite cutoff. Mirrors append_asset_transfer_gl_entries so the
+    movement trail and the GL leg stay in lockstep."""
+    return bool(
+        is_bns_internal_transfer(doc)
+        and _voucher_owns_sle(doc.doctype, doc)
+        and is_after_accounting_rewrite_cutoff(doc.get("posting_date"))
+    )
+
+
+def _bns_in_transit_location() -> str:
+    return (
+        frappe.db.get_single_value("BNS Branch Accounting Settings", "asset_in_transit_location") or ""
+    ).strip()
+
+
+def _bns_asset_current_location(asset_name: str) -> Optional[str]:
+    return frappe.db.get_value("Asset", asset_name, "location")
+
+
+def _bns_doc_posting_datetime(doc):
+    from frappe.utils import get_datetime
+
+    return get_datetime(f"{doc.get('posting_date')} {doc.get('posting_time') or '00:00:00'}")
+
+
+def _bns_safe_movement_datetime(asset_names, desired_dt):
+    """Return a datetime not earlier than any asset's latest submitted movement
+    (+1s), so ERPNext's validate_transaction_date accepts the new movement and
+    native latest-location ordering resolves to it."""
+    from frappe.utils import add_to_date, get_datetime
+
+    latest = None
+    for a in set(asset_names):
+        d = frappe.db.sql(
+            """SELECT MAX(am.transaction_date) FROM `tabAsset Movement` am
+            JOIN `tabAsset Movement Item` ami ON ami.parent = am.name
+            WHERE ami.asset = %s AND am.docstatus = 1""",
+            a,
+        )[0][0]
+        if d and (latest is None or d > latest):
+            latest = d
+    if latest and get_datetime(desired_dt) <= get_datetime(latest):
+        return add_to_date(get_datetime(latest), seconds=1)
+    return desired_dt
+
+
+def _bns_create_asset_movement(company, purpose, rows, reference_doctype, reference_name, txn_dt) -> str:
+    """Create + submit one Asset Movement. rows: list of {asset, source, target}."""
+    am = frappe.new_doc("Asset Movement")
+    am.company = company
+    am.purpose = purpose
+    am.transaction_date = txn_dt
+    am.reference_doctype = reference_doctype
+    am.reference_name = reference_name
+    for r in rows:
+        am.append(
+            "assets",
+            {"asset": r["asset"], "source_location": r.get("source"), "target_location": r.get("target")},
+        )
+    am.flags.ignore_permissions = True
+    am.insert()
+    am.submit()
+    return am.name
+
+
+def _bns_cancel_movements_for(doc) -> set:
+    """Cancel the submitted Asset Movements this document created; return the set
+    of assets they covered (used to reset the in-transit flag)."""
+    assets = set()
+    movements = frappe.get_all(
+        "Asset Movement",
+        filters={"reference_doctype": doc.doctype, "reference_name": doc.name, "docstatus": 1},
+        pluck="name",
+    )
+    for m in movements:
+        try:
+            md = frappe.get_doc("Asset Movement", m)
+            for r in md.assets:
+                assets.add(r.asset)
+            md.flags.ignore_permissions = True
+            md.cancel()
+        except Exception:
+            logger.exception("BNS asset transfer: failed to cancel movement %s for %s", m, doc.name)
+    return assets
+
+
+def bns_guard_asset_in_transit(doc, method: Optional[str] = None) -> None:
+    """before_submit on a sender (DN/SI): require the destination branch and block
+    dispatching an asset that is already in transit (dispatched, not yet received)."""
+    if doc.doctype not in ("Delivery Note", "Sales Invoice"):
+        return
+    if not _bns_asset_transfer_active(doc):
+        return
+    rows = _bns_asset_transfer_rows(doc)
+    if not rows:
+        return
+    if not (doc.get("billing_location") or "").strip():
+        frappe.throw(
+            _("Billing Location (destination branch) is required to transfer a fixed asset on this document."),
+            title=_("Asset Transfer Destination Missing"),
+        )
+    for ar in rows:
+        if cint(frappe.db.get_value("Asset", ar["asset"], "bns_in_transit")):
+            frappe.throw(
+                _("Asset {0} is already in transit from an earlier dispatch that has not been received. Receive it before dispatching again.").format(ar["asset"]),
+                title=_("Asset Already In Transit"),
             )
-            logger.info(
-                "BNS asset transfer: reverted %s cost_center -> %s on cancel of %s",
-                asset_name, prev_cc, doc.name,
+
+
+def bns_create_asset_transfer_movement(doc, method: Optional[str] = None) -> None:
+    """on_submit on a sender (DN/SI): move each transferred asset from its current
+    branch Location to the "BNS In Transit" Location (Asset Movement #1), snapshot
+    source + destination on the asset, and flag it in-transit."""
+    if doc.doctype not in ("Delivery Note", "Sales Invoice"):
+        return
+    if not _bns_asset_transfer_active(doc):
+        return
+    rows = _bns_asset_transfer_rows(doc)
+    if not rows:
+        return
+    transit = _bns_in_transit_location()
+    if not transit:
+        logger.warning("BNS asset transfer: asset_in_transit_location not set; skipping dispatch movement for %s", doc.name)
+        return
+    destination = (doc.get("billing_location") or "").strip()
+    if not destination:
+        logger.warning("BNS asset transfer: no billing_location on %s; skipping dispatch movement", doc.name)
+        return
+
+    txn_dt = _bns_doc_posting_datetime(doc)
+    srcs, move_rows = {}, []
+    for ar in rows:
+        asset_name = ar["asset"]
+        src = _bns_asset_current_location(asset_name)
+        srcs[asset_name] = src
+        move_rows.append({"asset": asset_name, "source": src, "target": transit})
+
+    try:
+        safe_dt = _bns_safe_movement_datetime(list(srcs.keys()), txn_dt)
+        _bns_create_asset_movement(doc.company, "Transfer", move_rows, doc.doctype, doc.name, safe_dt)
+    except Exception:
+        logger.exception("BNS asset transfer: failed to create dispatch movement for %s", doc.name)
+        return
+
+    for ar in rows:
+        asset_name = ar["asset"]
+        frappe.db.set_value(
+            "Asset",
+            asset_name,
+            {
+                "bns_in_transit": 1,
+                "bns_pre_transfer_location": srcs.get(asset_name),
+                "bns_transit_target_location": destination,
+            },
+            update_modified=False,
+        )
+        logger.info("BNS asset transfer: dispatched %s to transit via %s (dest %s)", asset_name, doc.name, destination)
+
+
+def bns_cancel_asset_transfer_movement(doc, method: Optional[str] = None) -> None:
+    """on_cancel on a sender (DN/SI): cancel the dispatch Asset Movement, restore
+    the asset's source location, and clear the in-transit flag + snapshots."""
+    if doc.doctype not in ("Delivery Note", "Sales Invoice"):
+        return
+    cancelled_assets = _bns_cancel_movements_for(doc)
+    for ar in _bns_asset_transfer_rows(doc):
+        asset_name = ar["asset"]
+        if asset_name not in cancelled_assets:
+            continue
+        pre = frappe.db.get_value("Asset", asset_name, "bns_pre_transfer_location")
+        vals = {"bns_in_transit": 0, "bns_pre_transfer_location": None, "bns_transit_target_location": None}
+        if pre:
+            # explicit restore over native recompute (which can strand an asset
+            # that had no prior movement baseline)
+            vals["location"] = pre
+        frappe.db.set_value("Asset", asset_name, vals, update_modified=False)
+        logger.info("BNS asset transfer: cancelled dispatch of %s via %s (restored to %s)", asset_name, doc.name, pre)
+
+
+def _bns_create_receiver_movement(doc, rows) -> None:
+    """Move each received asset from the In-Transit Location on to its captured
+    destination branch (Asset Movement #2) and clear the in-transit flag."""
+    transit = _bns_in_transit_location()
+    if not transit:
+        return
+    move_rows = []
+    for ar in rows:
+        asset_name = ar["asset"]
+        if not cint(frappe.db.get_value("Asset", asset_name, "bns_in_transit")):
+            continue  # not dispatched via a BNS movement -> nothing to receive
+        target = frappe.db.get_value("Asset", asset_name, "bns_transit_target_location")
+        if not target:
+            continue
+        move_rows.append({"asset": asset_name, "source": _bns_asset_current_location(asset_name), "target": target})
+    if not move_rows:
+        return
+    try:
+        safe_dt = _bns_safe_movement_datetime([r["asset"] for r in move_rows], _bns_doc_posting_datetime(doc))
+        _bns_create_asset_movement(doc.company, "Transfer", move_rows, doc.doctype, doc.name, safe_dt)
+    except Exception:
+        logger.exception("BNS asset transfer: failed to create receipt movement for %s", doc.name)
+        return
+    for r in move_rows:
+        frappe.db.set_value("Asset", r["asset"], {"bns_in_transit": 0}, update_modified=False)
+        logger.info("BNS asset transfer: received %s at %s via %s", r["asset"], r["target"], doc.name)
+
+
+def _bns_copy_transfer_asset(source, target) -> None:
+    """Auto-receive: copy the sender item's transferred-asset link (Sales Invoice
+    native `asset`, or DN/PR `bns_transferred_asset`) onto the receiver item's
+    `bns_transferred_asset`, so the PR/PI carries the same asset without re-entry."""
+    if not (getattr(target, "meta", None) and target.meta.has_field("bns_transferred_asset")):
+        return
+    src_asset = source.get("asset") or source.get("bns_transferred_asset")
+    if src_asset:
+        target.bns_transferred_asset = src_asset
+
+
+def bns_validate_asset_receive_parity(doc, method: Optional[str] = None) -> None:
+    """before_submit on a receiver (PR/PI): each transferred-asset row must receive
+    an asset that belongs to the row's item + company and (when the transit
+    machinery is active) is genuinely in transit -- so a receiver cannot complete
+    against a wrong, un-dispatched, or already-received asset. The asset analogue
+    of the existing one-to-one item/amount parity check."""
+    if doc.doctype not in ("Purchase Receipt", "Purchase Invoice"):
+        return
+    if not is_bns_internal_transfer(doc):
+        return
+    if not _voucher_owns_sle(doc.doctype, doc):
+        return
+    active = bool(_bns_in_transit_location()) and is_after_accounting_rewrite_cutoff(doc.get("posting_date"))
+    for item in (doc.get("items") or []):
+        asset_name = (item.get("bns_transferred_asset") or "").strip()
+        if not asset_name:
+            continue
+        asset = frappe.db.get_value(
+            "Asset", asset_name, ["item_code", "bns_in_transit", "company"], as_dict=True
+        )
+        if not asset:
+            frappe.throw(_("Row {0}: Asset {1} does not exist.").format(item.idx, asset_name))
+        if asset.item_code != item.item_code:
+            frappe.throw(
+                _("Row {0}: Asset {1} belongs to item {2}, not {3}.").format(item.idx, asset_name, asset.item_code, item.item_code),
+                title=_("Asset Item Mismatch"),
             )
+        if asset.company != doc.company:
+            frappe.throw(_("Row {0}: Asset {1} belongs to a different company ({2}).").format(item.idx, asset_name, asset.company))
+        if active and not cint(asset.bns_in_transit):
+            frappe.throw(
+                _("Row {0}: Asset {1} is not in transit -- it was not dispatched, or has already been received. It cannot be received here.").format(item.idx, asset_name),
+                title=_("Asset Not In Transit"),
+            )
+
+
+@frappe.whitelist()
+@frappe.validate_and_sanitize_search_inputs
+def bns_transferable_asset_query(doctype, txt, searchfield, start, page_len, filters):
+    """Link-field query for the transfer picker: only assets eligible to be
+    dispatched -- submitted, transferable status, of the row's item + company,
+    and NOT already in transit."""
+    filters = filters or {}
+    conditions = [
+        "a.docstatus = 1",
+        "IFNULL(a.bns_in_transit, 0) = 0",
+        "a.status IN ('Submitted', 'Partially Depreciated', 'Fully Depreciated')",
+    ]
+    values = {"txt": f"%{txt}%", "start": cint(start), "page_len": cint(page_len)}
+    if filters.get("item_code"):
+        conditions.append("a.item_code = %(item_code)s")
+        values["item_code"] = filters.get("item_code")
+    if filters.get("company"):
+        conditions.append("a.company = %(company)s")
+        values["company"] = filters.get("company")
+    where = " AND ".join(conditions)
+    return frappe.db.sql(
+        f"""SELECT a.name, a.asset_name, a.location
+        FROM `tabAsset` a
+        WHERE {where} AND (a.name LIKE %(txt)s OR a.asset_name LIKE %(txt)s)
+        ORDER BY a.name LIMIT %(start)s, %(page_len)s""",
+        values,
+    )
 
 
 def _bns_repost_voucher_gl(voucher_type: str, voucher_no: str) -> None:
@@ -5901,8 +6215,11 @@ def _update_item(source, target, source_parent) -> None:
     # "Incorrect value: Supplier must be equal to …".
     target.purchase_order = None
     target.purchase_order_item = None
-    
+
     target_wh = target.warehouse or target.rejected_warehouse
+
+    # Auto-receive: carry the dispatched asset onto the PR row.
+    _bns_copy_transfer_asset(source, target)
 
     # Clear accounting fields to let system auto-populate
     _clear_item_level_fields(target)
@@ -7588,6 +7905,9 @@ def _update_item_pi(source, target, source_parent) -> None:
 
     target_wh = target.warehouse
 
+    # Auto-receive: carry the dispatched asset onto the PI row.
+    _bns_copy_transfer_asset(source, target)
+
     # Clear accounting fields to let system auto-populate
     _clear_item_level_fields_pi(target)
 
@@ -7855,6 +8175,9 @@ def _update_item_pr_from_si(source, target, source_parent) -> None:
     target.received_qty = 0
 
     target_wh = target.warehouse or target.rejected_warehouse
+
+    # Auto-receive: carry the dispatched asset onto the PR row.
+    _bns_copy_transfer_asset(source, target)
 
     _clear_item_level_fields(target)
 
