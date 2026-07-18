@@ -220,6 +220,9 @@ doc_events = {
     "Asset Category": {
         "validate": "business_needed_solutions.business_needed_solutions.overrides.asset_naming.validate_asset_category_abbr"
     },
+    "Asset Movement": {
+        "validate": "business_needed_solutions.bns_branch_accounting.utils.bns_block_direct_asset_movement"
+    },
     "Stock Ledger Entry": {
         "validate": [
             "business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.validate_sle_warehouse_negative_stock",

@@ -5066,6 +5066,42 @@ def _bns_create_receiver_movement(doc, rows) -> None:
         logger.info("BNS asset transfer: received %s at %s via %s", r["asset"], r["target"], doc.name)
 
 
+_BNS_ASSET_TRANSFER_REF_DOCTYPES = ("Delivery Note", "Sales Invoice", "Purchase Receipt", "Purchase Invoice")
+
+
+def bns_block_direct_asset_movement(doc, method: Optional[str] = None) -> None:
+    """Block a manual Asset Movement that changes an asset's location unless it
+    originates from a BNS internal transfer (DN/SI/PR/PI). Forces every branch /
+    location change through the compliant internal-transfer chain instead of the
+    native 'Transfer Asset' shortcut (which posts no challan / tax document).
+    Opt-in via BNS Branch Accounting Settings.block_direct_asset_movement.
+
+    Movements our own flow creates carry a DN/SI/PR/PI reference and are always
+    allowed; Receipt (initial placement) and Issue (custodian-only) are untouched.
+    """
+    if getattr(doc, "doctype", None) != "Asset Movement":
+        return
+    if (doc.get("purpose") or "") not in ("Transfer", "Transfer and Issue"):
+        return
+    if (doc.get("reference_doctype") or "") in _BNS_ASSET_TRANSFER_REF_DOCTYPES:
+        return
+    # §1 migrate-safe: skip if the setting field isn't synced yet.
+    if not frappe.get_meta("BNS Branch Accounting Settings").has_field("block_direct_asset_movement"):
+        return
+    if not frappe.db.get_single_value("BNS Branch Accounting Settings", "block_direct_asset_movement"):
+        return
+    for row in (doc.get("assets") or []):
+        target = (row.get("target_location") or "").strip()
+        if not target:
+            continue
+        current = frappe.db.get_value("Asset", row.get("asset"), "location")
+        if target != current:
+            frappe.throw(
+                _("Direct asset transfers are disabled. Move asset {0} between locations using an internal Delivery Note / Sales Invoice branch transfer, not a manual Asset Movement.").format(row.get("asset")),
+                title=_("Direct Asset Transfer Blocked"),
+            )
+
+
 def _bns_copy_transfer_asset(source, target) -> None:
     """Auto-receive: copy the sender item's transferred-asset link (Sales Invoice
     native `asset`, or DN/PR `bns_transferred_asset`) onto the receiver item's

@@ -26,6 +26,7 @@
   "validation_section",
   "si_pi_amount_tolerance",
   "allow_different_gstin_dn_to_pr",
+  "block_direct_asset_movement",
   "tab_ewaybill",
   "enable_internal_dn_ewaybill",
   "tab_auto_fix",
@@ -173,6 +174,13 @@
    "label": "Allow Different GSTIN DN → PR"
   },
   {
+   "default": "0",
+   "description": "When enabled, a manual Asset Movement (native 'Transfer Asset') that changes an asset's location is blocked. Location/branch changes must instead go through a BNS internal transfer (Delivery Note / Sales Invoice → Purchase Receipt / Purchase Invoice), which posts the required challan/tax document and the transfer GL. Movements our transfer flow creates (linked to a DN/SI/PR/PI) are always allowed; initial Receipt movements and custodian-only Issue movements are unaffected.",
+   "fieldname": "block_direct_asset_movement",
+   "fieldtype": "Check",
+   "label": "Block Direct Asset Transfer (require DN/SI)"
+  },
+  {
    "fieldname": "tab_ewaybill",
    "fieldtype": "Tab Break",
    "label": "e-Waybill"
@@ -220,7 +228,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-07-18 13:00:00.000000",
+ "modified": "2026-07-18 14:00:00.000000",
  "modified_by": "Administrator",
  "module": "BNS Branch Accounting",
  "name": "BNS Branch Accounting Settings",
