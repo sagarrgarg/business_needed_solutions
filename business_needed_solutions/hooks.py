@@ -212,7 +212,10 @@ doc_events = {
         ]
     },
     "Item": {
-        "validate": "business_needed_solutions.business_needed_solutions.overrides.item_validation.validate_expense_account_for_non_stock_items"
+        "validate": [
+            "business_needed_solutions.business_needed_solutions.overrides.item_validation.validate_expense_account_for_non_stock_items",
+            "business_needed_solutions.business_needed_solutions.overrides.item_validation.validate_asset_category_locked_once_used",
+        ]
     },
     "Asset": {
         "autoname": "business_needed_solutions.business_needed_solutions.overrides.asset_naming.bns_asset_autoname"

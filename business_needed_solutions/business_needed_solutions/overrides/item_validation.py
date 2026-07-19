@@ -66,6 +66,27 @@ def validate_expense_account_for_non_stock_items(doc, method: Optional[str] = No
         raise
 
 
+def validate_asset_category_locked_once_used(doc, method: Optional[str] = None) -> None:
+    """Lock an Item's Asset Category once any Asset has been created for it.
+
+    The Asset Category feeds the BNS asset name ({company}/{category_abbr}/...),
+    so changing it after assets exist would desync those assets from their item's
+    category. One-time save: settable while no asset exists, immutable afterwards.
+    """
+    if doc.doctype != "Item" or doc.is_new():
+        return
+    old_category = frappe.db.get_value("Item", doc.name, "asset_category")
+    if old_category == doc.get("asset_category"):
+        return
+    if not old_category:
+        return  # first time being set -> allowed
+    if frappe.db.exists("Asset", {"item_code": doc.name}):
+        frappe.throw(
+            _("Asset Category cannot be changed for item {0}: assets have already been created against it. Changing it would desync existing asset names.").format(doc.name),
+            title=_("Asset Category Locked"),
+        )
+
+
 def _is_expense_account_validation_enabled() -> bool:
     """
     Check if expense account validation is enabled in BNS Settings.
