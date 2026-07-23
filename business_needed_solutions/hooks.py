@@ -180,7 +180,8 @@ jinja = {
 # Override standard doctype classes
 
 override_doctype_class = {
-	"Stock Entry": "business_needed_solutions.business_needed_solutions.overrides.stock_entry_component_qty_variance.BNSStockEntry"
+	"Stock Entry": "business_needed_solutions.business_needed_solutions.overrides.stock_entry_component_qty_variance.BNSStockEntry",
+	"Customize Form": "business_needed_solutions.business_needed_solutions.overrides.customize_form_fix.BNSCustomizeForm",
 }
 
 # Document Events

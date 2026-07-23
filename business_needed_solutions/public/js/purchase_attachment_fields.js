@@ -104,11 +104,13 @@ function _hideAttachmentSection(frm) {
   frm.toggle_display('bns_supplier_invoice_attachment', false);
   frm.toggle_display('bns_ewaybill_attachment', false);
   frm.toggle_display('bns_ewaybill_date', false);
+  frm.toggle_display('bns_ewaybill_no', false);
   frm.toggle_display('bns_mode_of_transport', false);
   frm.toggle_display('bns_builty_attachment', false);
   frm.toggle_reqd('bns_supplier_invoice_attachment', false);
   frm.toggle_reqd('bns_ewaybill_attachment', false);
   frm.toggle_reqd('bns_ewaybill_date', false);
+  frm.toggle_reqd('bns_ewaybill_no', false);
 }
 
 function _showAttachmentSection(frm) {
@@ -125,6 +127,7 @@ function _applyLinkedPRHides(frm) {
   frm.toggle_reqd('bns_supplier_invoice_attachment', false);
   frm.toggle_reqd('bns_ewaybill_attachment', false);
   frm.toggle_reqd('bns_ewaybill_date', false);
+  frm.toggle_reqd('bns_ewaybill_no', false);
 
   var prNames = _linkedPRNames(frm);
   if (!prNames.length) return;
@@ -152,12 +155,14 @@ function _applyLinkedPRHides(frm) {
       if (anyEwb) {
         frm.toggle_display('bns_ewaybill_attachment', false);
         frm.toggle_display('bns_ewaybill_date', false);
+        frm.toggle_display('bns_ewaybill_no', false);
       } else {
         // PR doesn't have e-Waybill — keep PI fields hidden until threshold
         // call says otherwise (and server is exempting anyway, so reqd stays
         // off; this just keeps the form tidy).
         frm.toggle_display('bns_ewaybill_attachment', false);
         frm.toggle_display('bns_ewaybill_date', false);
+        frm.toggle_display('bns_ewaybill_no', false);
       }
       if (anySupInv) frm.toggle_display('bns_supplier_invoice_attachment', false);
     }
@@ -169,8 +174,10 @@ function _refreshEwaybillVisibility(frm) {
     if (internal) {
       frm.toggle_display('bns_ewaybill_attachment', false);
       frm.toggle_display('bns_ewaybill_date', false);
+      frm.toggle_display('bns_ewaybill_no', false);
       frm.toggle_reqd('bns_ewaybill_attachment', false);
       frm.toggle_reqd('bns_ewaybill_date', false);
+      frm.toggle_reqd('bns_ewaybill_no', false);
       return;
     }
     frappe.call({
@@ -193,8 +200,10 @@ function _refreshEwaybillVisibility(frm) {
         var inDraft = frm.doc.docstatus === 0;
         frm.toggle_display('bns_ewaybill_attachment', true);
         frm.toggle_display('bns_ewaybill_date', true);
+        frm.toggle_display('bns_ewaybill_no', true);
         frm.toggle_reqd('bns_ewaybill_attachment', ewaybillRequired && inDraft);
         frm.toggle_reqd('bns_ewaybill_date', ewaybillRequired && inDraft);
+        frm.toggle_reqd('bns_ewaybill_no', ewaybillRequired && inDraft);
 
         if (ewaybillRequired && inDraft && frm.fields_dict.bns_ewaybill_attachment) {
           frm.fields_dict.bns_ewaybill_attachment.set_description(
