@@ -54,11 +54,13 @@ def _get_data(filters):
 	if filters.get("sales_partner"):
 		conditions.append("so.sales_partner = %(sales_partner)s")
 
-	# Sales Person lives in the Sales Team child table; join only when filtered.
+	# Sales Person attribution comes from the CUSTOMER's sales team (the maintained
+	# source of truth), NOT the per-order / per-invoice sales team, which is often
+	# stale or wrong when it gets set or re-linked after the fact.
 	if filters.get("sales_person"):
 		sp_join = (
 			"INNER JOIN `tabSales Team` st "
-			"ON st.parent = so.name AND st.parenttype = 'Sales Order' "
+			"ON st.parent = so.customer AND st.parenttype = 'Customer' "
 			"AND st.sales_person = %(sales_person)s"
 		)
 		sp_select = "st.sales_person AS sales_person, st.allocated_percentage AS allocation_pct"
