@@ -1102,6 +1102,111 @@ def _validate_unique_internal_source_claim(doc) -> None:
         )
 
 
+def ensure_internal_batch_bundle_mapping(doc, method: Optional[str] = None) -> None:
+    """
+    validate hook for Purchase Receipt and Purchase Invoice.
+
+    When a BNS internal PR/PI is being saved (validate), this function ensures
+    that any item which has a source batch/bundle (from a DN or SI) but is
+    missing the receiving bundle gets a proper 'Inward' Serial and Batch Bundle
+    duplicated from the source.
+
+    Running in validate means the bundle is persisted to DB when the PR is
+    Saved (not just in memory), so that ERPNext's on_submit Stock Ledger Entry
+    validation correctly finds and validates the bundle.
+    """
+    if not is_bns_internal_supplier(doc):
+        return
+
+    for item in doc.get("items") or []:
+        # If a bundle already exists, verify it belongs to THIS document and warehouse matches.
+        # Bundles still pointing to the source DN/SI, or having a mismatched warehouse, must be cleared.
+        existing_bundle = getattr(item, "serial_and_batch_bundle", None)
+        if existing_bundle:
+            bundle_data = frappe.db.get_value(
+                "Serial and Batch Bundle", existing_bundle, ["voucher_no", "warehouse"], as_dict=True
+            )
+            if bundle_data:
+                is_correct_doc = (bundle_data.voucher_no == doc.name or not bundle_data.voucher_no)
+                is_correct_wh = (bundle_data.warehouse == item.warehouse)
+                if is_correct_doc and is_correct_wh:
+                    # Properly linked and warehouse matches — ok
+                    continue
+            # Bundle is stale or mismatched — clear so we re-duplicate
+            logger.debug(
+                "ensure_internal_batch_bundle_mapping: clearing stale/mismatched bundle %s "
+                "from item %s",
+                existing_bundle, item.item_code,
+            )
+            item.serial_and_batch_bundle = None
+
+        # Direct batch/serial fields are fine
+        if getattr(item, "batch_no", None) or getattr(item, "serial_no", None):
+            continue
+
+        # Need a warehouse to create/link a bundle
+        target_wh = getattr(item, "warehouse", None)
+        if not target_wh:
+            # Warehouse not yet set — skip silently (user hasn't selected it yet)
+            continue
+
+        source_item = _resolve_source_item_for_batch_mapping(doc, item)
+        if not source_item:
+            continue
+
+        # Source has a full Serial and Batch Bundle → duplicate it (Inward)
+        if source_item.get("serial_and_batch_bundle"):
+            _duplicate_serial_and_batch_bundle(source_item, item, target_wh, "Inward")
+            logger.info(
+                "ensure_internal_batch_bundle_mapping: duplicated bundle %s → %s for item %s",
+                source_item.serial_and_batch_bundle,
+                item.serial_and_batch_bundle,
+                item.item_code,
+            )
+
+        # Source has legacy batch_no field (no bundle)
+        elif source_item.get("batch_no"):
+            item.use_serial_batch_fields = 1
+            item.batch_no = source_item.batch_no
+            if source_item.get("serial_no"):
+                item.serial_no = source_item.serial_no
+            logger.info(
+                "ensure_internal_batch_bundle_mapping: copied batch_no %s for item %s",
+                item.batch_no, item.item_code,
+            )
+
+        else:
+            logger.debug(
+                "ensure_internal_batch_bundle_mapping: source item %s has no batch/bundle.",
+                source_item.name,
+            )
+
+
+def _resolve_source_item_for_batch_mapping(doc, item) -> Optional[object]:
+    """Resolve the source document item row for batch mapping."""
+    if doc.doctype == "Purchase Receipt":
+        dn_item_name = (getattr(item, "delivery_note_item", None) or "").strip()
+        if dn_item_name and frappe.db.exists("Delivery Note Item", dn_item_name):
+            return frappe.get_doc("Delivery Note Item", dn_item_name)
+        si_item_name = (getattr(item, "sales_invoice_item", None) or "").strip()
+        if si_item_name and frappe.db.exists("Sales Invoice Item", si_item_name):
+            return frappe.get_doc("Sales Invoice Item", si_item_name)
+
+    elif doc.doctype == "Purchase Invoice":
+        # Only stock-updating PIs need batch mapping
+        if not cint(doc.get("update_stock")):
+            return None
+        si_item_name = (getattr(item, "sales_invoice_item", None) or "").strip()
+        if si_item_name and frappe.db.exists("Sales Invoice Item", si_item_name):
+            return frappe.get_doc("Sales Invoice Item", si_item_name)
+
+    return None
+
+
+# Keep old private alias for backward compat with validate hook calls
+_ensure_internal_batch_bundle_mapping = ensure_internal_batch_bundle_mapping
+
+
 def validate_internal_purchase_receipt_linkage(doc, method: Optional[str] = None) -> None:
     """
     Enforce PR linkage rules after configured cutoff.
@@ -1174,6 +1279,9 @@ def validate_internal_purchase_receipt_linkage(doc, method: Optional[str] = None
         )
 
     _validate_internal_pr_one_to_one_parity(doc)
+    
+    # Ensure missing batches/bundles are mapped now that the warehouse is available on save
+    _ensure_internal_batch_bundle_mapping(doc)
 
 
 def _validate_internal_pr_one_to_one_parity(doc) -> None:
@@ -1372,6 +1480,7 @@ def validate_internal_purchase_invoice_linkage(doc, method: Optional[str] = None
             break
 
     if has_si_link or valid_pr_link:
+        _ensure_internal_batch_bundle_mapping(doc)
         return
 
     frappe.throw(
