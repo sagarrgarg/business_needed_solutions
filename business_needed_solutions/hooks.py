@@ -267,7 +267,10 @@ doc_events = {
         ]
     },
     "Purchase Receipt": {
-        "validate": "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
+        "validate": [
+            "business_needed_solutions.bns_branch_accounting.utils.ensure_internal_batch_bundle_mapping",
+            "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
+        ],
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
@@ -339,6 +342,7 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.utils.bns_apply_asset_transfer"
         ],
         "validate": [
+            "business_needed_solutions.bns_branch_accounting.utils.ensure_internal_batch_bundle_mapping",
             "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference",
             "business_needed_solutions.business_needed_solutions.overrides.gst_compliance.validate_purchase_invoice_same_gstin",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_invoice_transfer_rate",
