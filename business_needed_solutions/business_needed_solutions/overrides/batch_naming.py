@@ -64,12 +64,12 @@ def set_custom_batch_nos(doc, method):
 			if matched_rule.append_suffix:
 				# Append suffix sequentially -01, -02...
 				suffix_idx = 1
-				while frappe.db.exists("Batch", f"{base_name}-{suffix_idx:02d}"):
+				while frappe.db.exists("Batch", {"batch_id": f"{base_name}-{suffix_idx:02d}"}):
 					suffix_idx += 1
 				final_batch_no = f"{base_name}-{suffix_idx:02d}"
 
 			# Ensure the Batch exists in the database
-			if not frappe.db.exists("Batch", final_batch_no):
+			if not frappe.db.exists("Batch", {"batch_id": final_batch_no}):
 				batch_doc = frappe.new_doc("Batch")
 				batch_doc.item = item.item_code
 				batch_doc.batch_id = final_batch_no
