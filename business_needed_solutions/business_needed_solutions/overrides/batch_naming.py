@@ -41,7 +41,7 @@ def set_custom_batch_nos(doc, method):
 					continue
 					
 				purposes = [p.strip() for p in (row.stock_entry_purposes or "").split(",") if p.strip()]
-				if purposes and purpose not in purposes:
+				if doctype == "Stock Entry" and purposes and purpose not in purposes:
 					continue
 					
 				matched_rule = row
