@@ -5,6 +5,8 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "batch_naming_section",
+  "batch_naming_formats",
   "tab_break_general",
   "general_section",
   "discount_type",
@@ -94,6 +96,17 @@
   "enable_bns_asset_naming"
  ],
  "fields": [
+  {
+   "fieldname": "batch_naming_section",
+   "fieldtype": "Section Break",
+   "label": "Batch Naming"
+  },
+  {
+   "fieldname": "batch_naming_formats",
+   "fieldtype": "Table",
+   "label": "Batch Naming Formats",
+   "options": "BNS Batch Naming Format"
+  },
   {
    "fieldname": "tab_break_general",
    "fieldtype": "Tab Break",

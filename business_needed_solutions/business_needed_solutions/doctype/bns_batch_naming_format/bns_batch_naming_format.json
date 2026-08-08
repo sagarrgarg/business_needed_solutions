@@ -1,0 +1,66 @@
+{
+ "actions": [],
+ "creation": "2026-08-08 10:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "target_doctype",
+  "stock_entry_purposes",
+  "format_string",
+  "append_suffix",
+  "is_active"
+ ],
+ "fields": [
+  {
+   "fieldname": "target_doctype",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Target Doctype",
+   "reqd": 1,
+   "description": "Comma-separated list of DocTypes (e.g., Stock Entry, Purchase Receipt)"
+  },
+  {
+   "fieldname": "stock_entry_purposes",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Stock Entry Purposes",
+   "description": "Comma-separated purposes (e.g., Manufacture, Repack). Leave blank for all."
+  },
+  {
+   "fieldname": "format_string",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Format String",
+   "reqd": 1,
+   "description": "e.g., {item_code}/{day_of_year}{year_1digit} or {item_code}/{day_of_year}{year_2digit}"
+  },
+  {
+   "default": "0",
+   "fieldname": "append_suffix",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Append Suffix",
+   "description": "Check to append -01, -02 for uniqueness. Uncheck to reuse the same batch for the day."
+  },
+  {
+   "default": "1",
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Active"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-08 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Business Needed Solutions",
+ "name": "BNS Batch Naming Format",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
