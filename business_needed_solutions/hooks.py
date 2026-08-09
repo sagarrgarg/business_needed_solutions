@@ -234,6 +234,7 @@ doc_events = {
         ]
     },
     "Stock Entry": {
+        "before_save": "business_needed_solutions.business_needed_solutions.overrides.batch_naming.set_custom_batch_nos",
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
         ],
@@ -267,6 +268,7 @@ doc_events = {
         ]
     },
     "Purchase Receipt": {
+        "before_save": "business_needed_solutions.business_needed_solutions.overrides.batch_naming.set_custom_batch_nos",
         "validate": [
             "business_needed_solutions.bns_branch_accounting.utils.ensure_internal_batch_bundle_mapping",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
