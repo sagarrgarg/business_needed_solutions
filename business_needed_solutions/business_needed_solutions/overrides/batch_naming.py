@@ -76,3 +76,62 @@ def set_custom_batch_nos(doc, method):
 				batch_doc.insert(ignore_permissions=True)
 			
 			item.batch_no = final_batch_no
+
+@frappe.whitelist()
+def get_expected_batch_no(item_code, doctype="Stock Entry", purpose="Manufacture"):
+	if not frappe.db.exists("DocType", "BNS Settings"):
+		return None
+		
+	try:
+		bns_settings = frappe.get_doc("BNS Settings")
+		if not bns_settings.get("batch_naming_formats"):
+			return None
+	except Exception:
+		return None
+
+	has_batch = frappe.get_cached_value("Item", item_code, "has_batch_no")
+	if not has_batch:
+		return None
+
+	now = now_datetime()
+	day_of_year = now.strftime("%j")
+	year_1digit = str(now.year)[-1]
+	year_2digit = now.strftime("%y")
+	year_4digit = now.strftime("%Y")
+
+	matched_rule = None
+	for row in bns_settings.batch_naming_formats:
+		if not row.is_active:
+			continue
+			
+		targets = [t.strip() for t in (row.target_doctype or "").split(",") if t.strip()]
+		if doctype not in targets:
+			continue
+			
+		purposes = [p.strip() for p in (row.stock_entry_purposes or "").split(",") if p.strip()]
+		if doctype == "Stock Entry" and purposes and purpose not in purposes:
+			continue
+			
+		matched_rule = row
+		break
+
+	if not matched_rule or not matched_rule.format_string:
+		return None
+
+	base_name = matched_rule.format_string.format(
+		item_code=item_code,
+		day_of_year=day_of_year,
+		year_1digit=year_1digit,
+		year_2digit=year_2digit,
+		year_4digit=year_4digit
+	)
+
+	final_batch_no = base_name
+
+	if matched_rule.append_suffix:
+		suffix_idx = 1
+		while frappe.db.exists("Batch", {"batch_id": f"{base_name}-{suffix_idx:02d}"}):
+			suffix_idx += 1
+		final_batch_no = f"{base_name}-{suffix_idx:02d}"
+
+	return final_batch_no
