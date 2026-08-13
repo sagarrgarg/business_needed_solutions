@@ -5420,15 +5420,33 @@ def _internal_stock_movement_uncaptured(doc) -> bool:
     return has_stock_item
 
 
+def _is_internal_stock_movement_enforced() -> bool:
+    """Master control for the stock-movement-captured rule: the BNS Setting
+    'Enforce Stock Update or Reference'. When OFF, internal invoice-only billing
+    is allowed (e.g. bill-to/ship-to cross entries where the goods physically move
+    on another leg); branch accounting then just books sale/debtor + GST with no
+    stock movement. When ON (default), the DN->SI / PR->PI flow or Update Stock is
+    required. Missing/unset setting is treated as OFF, matching
+    _is_stock_update_validation_enabled in overrides/stock_update_validation.py.
+    """
+    try:
+        return bool(cint(frappe.db.get_single_value("BNS Settings", "enforce_stock_update_or_reference")))
+    except Exception:
+        return False
+
+
 def validate_internal_stock_movement_captured(doc, method: Optional[str] = None) -> None:
     """before_submit guard: an internal SI/PI with stock items must capture
     stock movement — via the DN->SI / PR->PI flow or with Update Stock on.
 
-    Gated on the Phase-1 internal-transfer cutoff so historical amendments
-    are not retro-blocked; only current/forward internal documents are
+    Gated on the 'Enforce Stock Update or Reference' master switch (off => allow
+    invoice-only billing) and on the Phase-1 internal-transfer cutoff so historical
+    amendments are not retro-blocked; only current/forward internal documents are
     enforced. See [[_internal_stock_movement_uncaptured]].
     """
     if doc.doctype not in ("Sales Invoice", "Purchase Invoice"):
+        return
+    if not _is_internal_stock_movement_enforced():
         return
     if not is_after_internal_transfer_cutoff(doc.get("posting_date")):
         return

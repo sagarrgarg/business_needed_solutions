@@ -1216,7 +1216,7 @@ def _audit_delivery_notes(filters, settings):
 
 def _audit_sales_invoices(filters, settings):
 	"""Audit GL entries for BNS internal Sales Invoices (including credit notes)."""
-	from business_needed_solutions.bns_branch_accounting.utils import _internal_stock_movement_uncaptured
+	from business_needed_solutions.bns_branch_accounting.utils import _internal_stock_movement_uncaptured, _is_internal_stock_movement_enforced
 	conditions, values = _build_date_conditions(filters, alias="si")
 	conditions.append(
 		"(si.is_bns_internal_customer = 1"
@@ -1270,7 +1270,7 @@ def _audit_sales_invoices(filters, settings):
 		# movement recorded anywhere (Update Stock off + no Delivery Note).
 		# Informational — neither repost button picks this up (no sle_issue);
 		# the fix is a DN or Update Stock correction, not a repost.
-		if _internal_stock_movement_uncaptured(doc):
+		if _internal_stock_movement_uncaptured(doc) and _is_internal_stock_movement_enforced():
 			results.append(_build_row(
 				row, scope, "Stock Not Captured",
 				details=(
@@ -1407,7 +1407,7 @@ def _audit_purchase_receipts(filters, settings):
 
 def _audit_purchase_invoices(filters, settings):
 	"""Audit GL and SLE for BNS internal Purchase Invoices (including debit notes)."""
-	from business_needed_solutions.bns_branch_accounting.utils import _internal_stock_movement_uncaptured
+	from business_needed_solutions.bns_branch_accounting.utils import _internal_stock_movement_uncaptured, _is_internal_stock_movement_enforced
 	conditions, values = _build_date_conditions(filters, alias="pi")
 	conditions.append(
 		"(pi.is_bns_internal_supplier = 1"
@@ -1470,7 +1470,7 @@ def _audit_purchase_invoices(filters, settings):
 
 		# Stock-gap anomaly: stock items invoiced internally but no stock
 		# movement recorded anywhere (Update Stock off + no Purchase Receipt).
-		if _internal_stock_movement_uncaptured(doc):
+		if _internal_stock_movement_uncaptured(doc) and _is_internal_stock_movement_enforced():
 			results.append(_build_row(
 				row, scope, "Stock Not Captured",
 				details=(
