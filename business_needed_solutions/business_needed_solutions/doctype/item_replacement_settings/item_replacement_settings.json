@@ -1,0 +1,42 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-08-18 13:38:04.184439",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "enable_item_replacement",
+  "replacements"
+ ],
+ "fields": [
+  {
+   "default": "0",
+   "fieldname": "enable_item_replacement",
+   "fieldtype": "Check",
+   "label": "Enable Item Replacement"
+  },
+  {
+   "depends_on": "eval:doc.enable_item_replacement==1",
+   "fieldname": "replacements",
+   "fieldtype": "Table",
+   "label": "Replacements",
+   "options": "Item Replacement Mapping"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-08-18 15:40:33.280372",
+ "modified_by": "Administrator",
+ "module": "Business Needed Solutions",
+ "name": "Item Replacement Settings",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
