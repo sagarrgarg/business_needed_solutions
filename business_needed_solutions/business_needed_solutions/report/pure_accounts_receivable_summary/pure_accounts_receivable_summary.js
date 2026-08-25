@@ -147,6 +147,11 @@ frappe.query_reports["Pure Accounts Receivable Summary"] = {
 			fieldtype: "Check",
 		},
 		{
+			fieldname: "add_sales_person",
+			label: __("Add Sales Person ?"),
+			fieldtype: "Check",
+		},
+		{
 			fieldname: "adjust_running_accounts",
 			label: __("Adjust Ageing for Running Accounts (FIFO)"),
 			fieldtype: "Check",

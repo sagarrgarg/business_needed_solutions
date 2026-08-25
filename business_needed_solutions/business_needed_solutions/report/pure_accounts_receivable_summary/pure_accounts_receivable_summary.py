@@ -275,6 +275,43 @@ def execute(filters=None):
 				if row.get("party_type") == "Customer":
 					row["city"] = customer_cities.get(row.get("party"), "")
 
+	# Add sales person column if add_sales_person is checked.
+	# Source is the Customer's own Sales Team child table (not the transaction-level
+	# sales person), so the column reflects the customer master's current mapping.
+	if filters.get("add_sales_person"):
+		# Place it just before the Party / Customer Name columns
+		party_index = next(
+			(i for i, col in enumerate(main_columns) if col.get("fieldname") == "party"),
+			len(main_columns),
+		)
+		main_columns.insert(party_index, {
+			"label": _("Sales Person"),
+			"fieldname": "customer_sales_person",
+			"fieldtype": "Data",
+			"width": 160,
+		})
+
+		customer_list = [d.get("party") for d in main_data if d.get("party_type") == "Customer"]
+		sales_person_map = {}
+		if customer_list:
+			sales_team_rows = frappe.get_all(
+				"Sales Team",
+				fields=["parent", "sales_person"],
+				filters={"parenttype": "Customer", "parent": ["in", customer_list]},
+				order_by="parent asc, idx asc",
+			)
+			for r in sales_team_rows:
+				if not r.sales_person:
+					continue
+				# Dedupe while preserving child table order
+				persons = sales_person_map.setdefault(r.parent, [])
+				if r.sales_person not in persons:
+					persons.append(r.sales_person)
+
+		for row in main_data:
+			if row.get("party_type") == "Customer":
+				row["customer_sales_person"] = ", ".join(sales_person_map.get(row.get("party"), []))
+
 	# 2. Convert main_data and secondary_data to dictionaries keyed by 'party'.
 	main_dict = {}
 	for row in main_data:
