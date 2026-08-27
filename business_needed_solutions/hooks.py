@@ -247,8 +247,7 @@ doc_events = {
     "Delivery Note": {
         "validate": [
             "business_needed_solutions.bns_branch_accounting.overrides.billing_location.set_customer_address_from_billing_location",
-            "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_delivery_note_return",
-            "business_needed_solutions.business_needed_solutions.item_replacement.validate_item_replacement"
+            "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_delivery_note_return"
         ],
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
@@ -275,8 +274,7 @@ doc_events = {
         "before_save": "business_needed_solutions.business_needed_solutions.overrides.batch_naming.set_custom_batch_nos",
         "validate": [
             "business_needed_solutions.bns_branch_accounting.utils.ensure_internal_batch_bundle_mapping",
-            "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
-            "business_needed_solutions.business_needed_solutions.item_replacement.validate_item_replacement"
+            "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage"
         ],
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
@@ -395,7 +393,6 @@ doc_events = {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Purchase Order": {
-        "validate": "business_needed_solutions.business_needed_solutions.item_replacement.validate_item_replacement",
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Payment Request": {
@@ -446,9 +443,6 @@ scheduler_events = {
 override_whitelisted_methods = {
 	"frappe.desk.form.linked_with.get_submitted_linked_docs": "business_needed_solutions.bns_branch_accounting.overrides.cancel_dialog.get_submitted_linked_docs",
 	"frappe.client.get_value": "business_needed_solutions.business_needed_solutions.overrides.get_value_filters_fix.get_value",
-	"erpnext.selling.doctype.sales_order.sales_order.make_delivery_note": "business_needed_solutions.business_needed_solutions.item_replacement.make_delivery_note",
-	"erpnext.buying.doctype.purchase_order.purchase_order.make_purchase_receipt": "business_needed_solutions.business_needed_solutions.item_replacement.make_purchase_receipt",
-	"erpnext.stock.doctype.material_request.material_request.make_purchase_order": "business_needed_solutions.business_needed_solutions.item_replacement.make_purchase_order"
 }
 
 # Allow Delivery Note in Repost Accounting Ledger processing.
