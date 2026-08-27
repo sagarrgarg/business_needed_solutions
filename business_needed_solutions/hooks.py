@@ -227,6 +227,9 @@ doc_events = {
     "Asset Movement": {
         "validate": "business_needed_solutions.bns_branch_accounting.utils.bns_block_direct_asset_movement"
     },
+    "Batch": {
+        "autoname": "business_needed_solutions.business_needed_solutions.overrides.batch_naming.bns_batch_autoname"
+    },
     "Stock Ledger Entry": {
         "validate": [
             "business_needed_solutions.business_needed_solutions.overrides.warehouse_negative_stock.validate_sle_warehouse_negative_stock",
@@ -298,6 +301,7 @@ doc_events = {
         ]
     },
     "Stock Reconciliation": {
+        "before_save": "business_needed_solutions.business_needed_solutions.overrides.batch_naming.set_custom_batch_nos",
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
         ],
@@ -330,7 +334,11 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.utils.bns_ignore_repost_ledger_links_on_cancel"
         ]
     },
+    "Subcontracting Receipt": {
+        "before_save": "business_needed_solutions.business_needed_solutions.overrides.batch_naming.set_custom_batch_nos"
+    },
     "Purchase Invoice": {
+        "before_save": "business_needed_solutions.business_needed_solutions.overrides.batch_naming.set_custom_batch_nos",
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
             "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments",
