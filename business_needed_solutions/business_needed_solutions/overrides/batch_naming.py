@@ -114,6 +114,15 @@ def set_custom_batch_nos(doc, method=None):
 	if doc.get("is_return"):
 		return
 
+	# Identify internal transfer / inter-company transactions
+	is_internal_txn = (
+		doc.get("is_internal_supplier")
+		or doc.get("inter_company_invoice_reference")
+		or doc.get("is_internal_customer")
+		or doc.get("inter_company_sales_invoice_reference")
+		or doc.get("inter_company_order_reference")
+	)
+
 	for item in doc.get("items") or []:
 		if not item.get("item_code"):
 			continue
@@ -152,17 +161,22 @@ def set_custom_batch_nos(doc, method=None):
 			ensure_bns_batch_doc(item.item_code, final_batch_no)
 			item.batch_no = final_batch_no
 		else:
-			# Validate manually provided batch
+			# Validate manually provided or transferred batch
 			current_batch = item.get("batch_no") or ""
 			if current_batch and not current_batch.startswith(base_name):
+				has_batch_doc = frappe.db.exists("Batch", current_batch) or frappe.db.exists("Batch", {"batch_id": current_batch})
+				has_sles = frappe.db.exists("Stock Ledger Entry", {"batch_no": current_batch})
+				
+				# For internal transfers or existing batch documents / SLEs, preserve the transferred batch
+				if is_internal_txn or has_batch_doc or has_sles:
+					continue
+
 				# If it was an auto-generated random 7-char hash, fix it
-				if len(current_batch) == 7 and not frappe.db.exists("Stock Ledger Entry", {"batch_no": current_batch}):
+				if len(current_batch) == 7:
 					ensure_bns_batch_doc(item.item_code, final_batch_no)
 					item.batch_no = final_batch_no
 				else:
-					has_sles = frappe.db.exists("Stock Ledger Entry", {"batch_no": current_batch})
-					if not has_sles:
-						frappe.throw(f"Row #{item.idx}: Manually created Batch '{current_batch}' does not match the required format '{base_name}' for this transaction.")
+					frappe.throw(f"Row #{item.idx}: Manually created Batch '{current_batch}' does not match the required format '{base_name}' for this transaction.")
 
 @frappe.whitelist()
 def get_expected_batch_no(item_code, doctype="Stock Entry", purpose="Manufacture"):
