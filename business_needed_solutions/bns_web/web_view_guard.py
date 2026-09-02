@@ -23,14 +23,16 @@ Hence a renderer rather than a customization.
 import frappe
 from frappe.website.page_renderers.not_found_page import NotFoundPage
 
-# Same prefix as blog_api's cache so its invalidation clears this too.
-ROUTES_CACHE_KEY = "bns_blog_api:web_routes"
+from business_needed_solutions.bns_web.blog_api import WEB_ROUTES_CACHE_KEY
+
 ROUTES_CACHE_TTL = 300
 
 # Endpoints that expose blog content without being a document route:
 # "Blog Post" is what /blog resolves to via the DocType route rule, and
-# frappe's rss.xml lists every published post.
-STATIC_BLOCKED_ENDPOINTS = {"Blog Post", "Blog Category", "rss.xml", "rss"}
+# frappe's rss.xml lists every published post. Blog Category is deliberately
+# absent — its DocType-level `route` is empty, so no such endpoint is ever
+# produced; its *document* routes are covered by _blog_web_routes() below.
+STATIC_BLOCKED_ENDPOINTS = {"Blog Post", "rss.xml", "rss"}
 
 
 class BlogWebViewGuard:
@@ -58,7 +60,7 @@ class BlogWebViewGuard:
 
 def _blog_web_routes():
 	"""Published Blog Post routes + Blog Category routes, cached."""
-	routes = frappe.cache.get_value(ROUTES_CACHE_KEY)
+	routes = frappe.cache.get_value(WEB_ROUTES_CACHE_KEY)
 	if routes is None:
 		routes = [
 			r
@@ -68,5 +70,5 @@ def _blog_web_routes():
 			)
 			if r
 		]
-		frappe.cache.set_value(ROUTES_CACHE_KEY, routes, expires_in_sec=ROUTES_CACHE_TTL)
+		frappe.cache.set_value(WEB_ROUTES_CACHE_KEY, routes, expires_in_sec=ROUTES_CACHE_TTL)
 	return set(routes)

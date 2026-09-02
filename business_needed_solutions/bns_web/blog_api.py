@@ -25,9 +25,14 @@ from frappe.utils import cint, get_url
 from frappe.website.utils import get_html_content_based_on_type
 
 CACHE_PREFIX = "bns_blog_api"
-CACHE_TTL = 300  # seconds; also cleared explicitly on Blog Post / BNS Website updates
+CACHE_VERSION_KEY = f"{CACHE_PREFIX}:version"
+# consumed by web_view_guard; owned here so invalidation lives in one place
+WEB_ROUTES_CACHE_KEY = f"{CACHE_PREFIX}:web_routes"
+CACHE_TTL = 300  # seconds; also invalidated on Blog Post / BNS Website updates
 MAX_LIMIT = 50
-MAX_CHANGES_LIMIT = 200  # get_changes rows carry full content; keep the page bounded
+# get_changes rows carry full rendered content, so this is far lower than
+# MAX_LIMIT's content-free rows: 25 x ~200KB is already a 5MB response.
+MAX_CHANGES_LIMIT = 25
 
 LIST_FIELDS = {
 	"card": [
@@ -73,9 +78,17 @@ def _resolve_website():
 # ---------------------------------------------------------------------------
 
 
+def _cache_version():
+	version = frappe.cache.get_value(CACHE_VERSION_KEY)
+	if version is None:
+		version = 1
+		frappe.cache.set_value(CACHE_VERSION_KEY, version)
+	return version
+
+
 def _cache_key(website, endpoint, params):
 	digest = hashlib.md5(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()
-	return f"{CACHE_PREFIX}:{website}:{endpoint}:{digest}"
+	return f"{CACHE_PREFIX}:v{_cache_version()}:{website}:{endpoint}:{digest}"
 
 
 def _cached(website, endpoint, params, builder):
@@ -88,8 +101,19 @@ def _cached(website, endpoint, params, builder):
 
 
 def clear_blog_api_cache(doc=None, method=None):
-	"""doc_event on Blog Post (on_update / on_trash) — see hooks.py."""
-	frappe.cache.delete_keys(CACHE_PREFIX)
+	"""doc_event on Blog Post (on_update / on_trash) — see hooks.py.
+
+	Bumps a version counter rather than deleting by prefix: frappe's
+	delete_keys() runs redis KEYS, an O(keyspace) blocking scan, and this
+	fires on every Blog Post save. Orphaned entries expire via CACHE_TTL.
+	"""
+	# get/set rather than redis INCR: the wrapper's incr isn't namespaced by
+	# site, and a lost race here only means two savers pick the same new
+	# version — the old entries are abandoned either way.
+	frappe.cache.set_value(CACHE_VERSION_KEY, cint(_cache_version()) + 1)
+
+	# single-key delete, no keyspace scan
+	frappe.cache.delete_value(WEB_ROUTES_CACHE_KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -116,10 +140,47 @@ def _absolute(path):
 
 
 def _absolutize_content_urls(html):
-	"""Rewrite root-relative src/href (e.g. /files/x.png) to absolute ERP URLs
-	so images resolve when the HTML is rendered on another domain."""
+	"""Rewrite root-relative URLs (e.g. /files/x.png) to absolute ERP URLs so
+	images resolve when the HTML is rendered on another domain.
+
+	Handles srcset separately: it is a comma-separated list of
+	"url descriptor" pairs, so a plain attribute rewrite would miss every
+	candidate after the first and leave responsive images broken.
+	"""
+	html = html or ""
 	base = get_url()
-	return re.sub(r'(src|href)=(["\'])/(?!/)', rf"\1=\2{base}/", html or "")
+
+	# src="/x" / href='/x' — \b stops srcset= from matching here
+	html = re.sub(r'\b(src|href)=(["\'])/(?!/)', rf"\1=\2{base}/", html)
+
+	def _fix_srcset(match):
+		attr, quote, value = match.group(1), match.group(2), match.group(3)
+		candidates = []
+		for part in value.split(","):
+			part = part.strip()
+			if not part:
+				continue
+			if part.startswith("/") and not part.startswith("//"):
+				part = base + part
+			candidates.append(part)
+		return f"{attr}={quote}{', '.join(candidates)}{quote}"
+
+	return re.sub(r'\b(srcset)=(["\'])(.*?)\2', _fix_srcset, html, flags=re.DOTALL)
+
+
+MEDIA_URL_RE = re.compile(r'\b(?:src|href)=["\']([^"\']+)["\']')
+
+
+def _media_urls(html, *extra):
+	"""Absolute media URLs referenced by a post.
+
+	Saves the consumer from re-parsing the HTML to find what to download and
+	push to its CDN.
+	"""
+	urls = [u for u in MEDIA_URL_RE.findall(html or "") if u.startswith(("http://", "https://"))]
+	urls.extend(u for u in extra if u)
+	# order-preserving dedupe keeps output stable for diffing
+	return list(dict.fromkeys(urls))
 
 
 def _category_info(names):
@@ -131,10 +192,11 @@ def _category_info(names):
 	return out
 
 
-def _blogger_info(names):
+def _blogger_info(names, with_bio=False):
+	fields = ["full_name", "avatar", "bio"] if with_bio else ["full_name", "avatar"]
 	out = {}
 	for name in set(filter(None, names)):
-		info = frappe.db.get_value("Blogger", name, ["full_name", "avatar"], as_dict=True)
+		info = frappe.db.get_value("Blogger", name, fields, as_dict=True)
 		if info:
 			info.avatar = _absolute(info.avatar)
 		out[name] = info
@@ -200,21 +262,32 @@ def get_posts(start=0, limit=20, category=None, view="card"):
 	return _cached(website.name, "get_posts", params, build)
 
 
-def _post_payload(name, website):
-	"""Full single-post payload. Shared by get_post and get_changes."""
-	post = frappe.get_doc("Blog Post", name)
+FULL_POST_FIELDS = [
+	"name",
+	"title",
+	"route",
+	"content",
+	"content_md",
+	"content_html",
+	"content_type",
+	"blog_intro",
+	"published",
+	"published_on",
+	"modified",
+	"read_time",
+	"meta_title",
+	"meta_description",
+	"meta_image",
+	"blog_category",
+	"blogger",
+]
+
+
+def _build_payload(post, website, category, blogger):
 	content = _absolutize_content_urls(
 		get_html_content_based_on_type(post, "content", post.content_type)
 	)
-
-	category = frappe.db.get_value(
-		"Blog Category", post.blog_category, ["name", "title", "route"], as_dict=True
-	)
-	blogger = frappe.db.get_value(
-		"Blogger", post.blogger, ["full_name", "avatar", "bio"], as_dict=True
-	)
-	if blogger:
-		blogger.avatar = _absolute(blogger.avatar)
+	meta_image = _absolute(post.meta_image)
 
 	return {
 		"name": post.name,
@@ -224,6 +297,7 @@ def _post_payload(name, website):
 		# lets a sync re-process media only when the body actually changed,
 		# instead of on every metadata edit
 		"content_hash": hashlib.sha256((content or "").encode()).hexdigest(),
+		"media": _media_urls(content, meta_image),
 		"blog_intro": post.blog_intro,
 		"published": cint(post.published),
 		"published_on": str(post.published_on) if post.published_on else None,
@@ -231,11 +305,40 @@ def _post_payload(name, website):
 		"read_time": post.read_time,
 		"meta_title": post.meta_title,
 		"meta_description": post.meta_description,
-		"meta_image": _absolute(post.meta_image),
+		"meta_image": meta_image,
 		"category": category,
 		"blogger": blogger,
 		"canonical_url": f"{website.base_url}/{post.route}",
 	}
+
+
+def _post_payloads(names, website):
+	"""Full payloads for many posts using a fixed number of queries.
+
+	Building these one-by-one costs three round trips each (get_doc plus a
+	category and a blogger lookup), which is what made get_changes expensive.
+	"""
+	if not names:
+		return []
+
+	posts = frappe.get_all(
+		"Blog Post", filters={"name": ("in", list(names))}, fields=FULL_POST_FIELDS
+	)
+	categories = _category_info([p.blog_category for p in posts])
+	bloggers = _blogger_info([p.blogger for p in posts], with_bio=True)
+
+	by_name = {
+		p.name: _build_payload(p, website, categories.get(p.blog_category), bloggers.get(p.blogger))
+		for p in posts
+	}
+	# preserve the caller's ordering (get_changes relies on modified asc)
+	return [by_name[n] for n in names if n in by_name]
+
+
+def _post_payload(name, website):
+	"""Full single-post payload."""
+	payloads = _post_payloads([name], website)
+	return payloads[0] if payloads else None
 
 
 def _serves_site(name, website_name):
@@ -298,62 +401,121 @@ def get_changes(since=None, limit=100):
 	you happened to receive — as the cursor for the following call.
 	"""
 	website = _resolve_website()
-	limit = min(max(1, cint(limit) or 100), MAX_CHANGES_LIMIT)
+	limit = min(max(1, cint(limit) or MAX_CHANGES_LIMIT), MAX_CHANGES_LIMIT)
 	now = frappe.utils.now()
+	since = _validate_since(since)
 
-	filters = {}
-	if since:
-		filters["modified"] = (">", since)
+	# ---- posts this site should now hold -------------------------------
+	names, post_cursor, more_posts = _changed_post_names(website.name, since, now, limit)
+	changed = _post_payloads(names, website)
 
-	# No published/site filter here — that is the point. Posts are fetched
-	# regardless of state and partitioned below, so a post that no longer
-	# qualifies surfaces as a removal instead of silently vanishing.
-	rows = frappe.get_all(
-		"Blog Post",
-		filters=filters,
-		fields=["name", "route", "published", "modified"],
-		order_by="modified asc",
-		limit_page_length=limit + 1,
-	)
-	has_more = len(rows) > limit
-	rows = rows[:limit]
+	# ---- posts this site must drop --------------------------------------
+	removed, removal_cursor, more_removals = _removed_routes(website.name, since, now, limit)
 
-	serving = set(
-		frappe.get_all(
-			"BNS Website Link",
-			filters={"website": website.name, "parenttype": "Blog Post"},
-			pluck="parent",
-		)
-	)
-
-	changed, removed = [], []
-	for row in rows:
-		if row.published and row.name in serving:
-			changed.append(_post_payload(row.name, website))
-		elif since:
-			# On a full export the client rebuilds from scratch and deletes
-			# whatever isn't in `changed`, so removals are unnecessary there —
-			# and omitting them avoids handing this site the routes of every
-			# draft and every other brand's post.
-			removed.append(row.route)
-
-	# Hard deletes leave no Blog Post row at all; Frappe keeps the corpse here.
-	if since:
-		for doc in frappe.get_all(
-			"Deleted Document",
-			filters={"deleted_doctype": "Blog Post", "creation": (">", since)},
-			fields=["data"],
-		):
-			route = (frappe.parse_json(doc.data) or {}).get("route")
-			if route:
-				removed.append(route)
+	has_more = more_posts or more_removals
+	# Advance only as far as *both* streams are complete, otherwise the
+	# lagging one is skipped. Storing `now` mid-page loses rows permanently.
+	next_since = min(post_cursor, removal_cursor) if has_more else now
 
 	return {
 		"now": now,
-		# While paging, advance by the last row's modified — storing `now`
-		# mid-page would skip every row after this batch, permanently.
-		"next_since": str(rows[-1].modified) if (has_more and rows) else now,
+		"next_since": next_since,
 		"changed": changed,
-		"removed": sorted(set(removed)),
+		"removed": removed,
 		"has_more": has_more,
 	}
+
+
+def _validate_since(since):
+	"""Reject an unparseable cursor loudly.
+
+	MariaDB compares a datetime column against a junk string as simply
+	non-matching, so a corrupted cursor would otherwise make the sync return
+	nothing forever without ever erroring.
+	"""
+	if not since:
+		return None
+	if not frappe.utils.get_datetime(str(since).strip()):
+		frappe.throw(
+			_("Invalid `since` value {0} — expected YYYY-MM-DD HH:MM:SS[.ffffff]").format(since)
+		)
+	return str(since).strip()
+
+
+def _page_by_timestamp(rows, limit, field, fallback):
+	"""Trim a page so it never splits a group of identical timestamps.
+
+	Paging with `>` on the last row's timestamp drops any sibling row sharing
+	that exact value — reachable whenever a patch or bulk edit stamps many
+	rows at once. Trimming the trailing group keeps the cursor safe. If the
+	whole page shares one timestamp there is nothing to trim, so the group is
+	returned intact and the cursor steps past it.
+	"""
+	has_more = len(rows) > limit
+	if not has_more:
+		return rows, fallback, False
+
+	rows = rows[:limit]
+	last = rows[-1].get(field)
+	trimmed = [r for r in rows if r.get(field) != last]
+	if trimmed:
+		return trimmed, str(trimmed[-1].get(field)), True
+	return rows, str(last), True
+
+
+def _changed_post_names(website_name, since, now, limit):
+	"""Names of posts this site should hold that changed since `since`.
+
+	Category and Blogger edits reach consumers because propagation.py stamps
+	the affected posts' `modified` at write time — so a single cursor over
+	Blog Post stays authoritative, and a rename touching more posts than one
+	page can hold simply spans several pages instead of being truncated.
+	"""
+	filters = [
+		["Blog Post", "published", "=", 1],
+		["BNS Website Link", "website", "=", website_name],
+		["Blog Post", "modified", "<=", now],
+	]
+	if since:
+		filters.append(["Blog Post", "modified", ">", since])
+
+	rows = frappe.get_all(
+		"Blog Post",
+		filters=filters,
+		fields=["name", "modified"],
+		order_by="modified asc, name asc",
+		limit_page_length=limit + 1,
+		distinct=True,
+	)
+	rows, cursor, has_more = _page_by_timestamp(rows, limit, "modified", now)
+	return [r.name for r in rows], cursor, has_more
+
+
+def _removed_routes(website_name, since, now, limit):
+	"""Routes this site must delete, from the removal log.
+
+	Read from BNS Blog Removal rather than inferred by re-querying posts
+	without the site filter: inference would hand this site the routes of
+	every draft and every other brand's post (see removal_tracker).
+
+	A full export needs no removals — the consumer rebuilds from scratch and
+	drops whatever is absent from `changed`.
+	"""
+	if not since:
+		return [], now, False
+
+	rows = frappe.get_all(
+		"BNS Blog Removal",
+		filters=[
+			["website", "=", website_name],
+			["creation", ">", since],
+			["creation", "<=", now],
+		],
+		fields=["route", "creation"],
+		order_by="creation asc, name asc",
+		limit_page_length=limit + 1,
+	)
+	rows, cursor, has_more = _page_by_timestamp(rows, limit, "creation", now)
+
+	routes = list(dict.fromkeys(r.route for r in rows if r.route))
+	return routes, cursor, has_more

@@ -408,10 +408,26 @@ doc_events = {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
 
-    # BNS Web: keep the blog API response cache fresh
+    # BNS Web: keep the blog API response cache fresh, and record which sites
+    # lost a post so get_changes can tell consumers what to delete.
     "Blog Post": {
-        "on_update": "business_needed_solutions.bns_web.blog_api.clear_blog_api_cache",
-        "on_trash": "business_needed_solutions.bns_web.blog_api.clear_blog_api_cache"
+        "on_update": [
+            "business_needed_solutions.bns_web.removal_tracker.track_blog_post_removals",
+            "business_needed_solutions.bns_web.blog_api.clear_blog_api_cache",
+        ],
+        "on_trash": [
+            "business_needed_solutions.bns_web.removal_tracker.track_blog_post_deletion",
+            "business_needed_solutions.bns_web.blog_api.clear_blog_api_cache",
+        ]
+    },
+
+    # Category/Blogger details are embedded in blog payloads, so stamp the
+    # posts that carry them — get_changes pages on Blog Post.modified alone.
+    "Blog Category": {
+        "on_update": "business_needed_solutions.bns_web.propagation.propagate_category_change"
+    },
+    "Blogger": {
+        "on_update": "business_needed_solutions.bns_web.propagation.propagate_blogger_change"
     }
 }
 

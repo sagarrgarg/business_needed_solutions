@@ -50,28 +50,39 @@ Both derive the website from the authenticated user — there is no site
 parameter, and an unmapped/disabled caller gets a permission error, never
 another site's posts.
 
-`get_changes(since=None, limit=100)`
+`get_changes(since=None, limit=25)` — **the canonical delivery endpoint**
 → `{now, next_since, changed, removed, has_more}`. The sync endpoint: everything
 this site must add or drop. Omit `since` for a full export; pass the previous
 call's **`next_since`** thereafter.
 
 - Keyed off `modified` (database-owned), never `published_on` (author-controlled
-  and backdatable).
-- `removed` is **computed, not filtered**: posts are fetched without the
-  published/site filters and partitioned, so unpublishing, un-serving and
-  category moves all surface as removals through one rule. Hard deletes are
-  recovered from `Deleted Document`.
+  and backdatable). `since` is validated — a junk cursor throws instead of
+  silently matching nothing forever.
+- `limit` caps at 25, not 50: these rows carry full rendered content.
+- `removed` comes from the **BNS Blog Removal** log, written by
+  `removal_tracker` when a post is unpublished, un-served, re-routed or
+  deleted. Recording removals as they happen (rather than inferring them by
+  re-querying posts without the site filter) keeps the response precise and
+  stops one site being handed the routes of every draft and every other
+  brand's posts.
 - **Store `next_since`, not `now` and not the newest `modified` you received.**
-  While `has_more` is true it is the last row's `modified`; storing `now`
-  mid-page would permanently skip everything after that batch.
+  It advances only as far as *both* the change and removal streams are
+  complete, and never splits a group of rows sharing one timestamp.
 - Full export returns no `removed` — the client rebuilds from scratch and
   deletes whatever isn't in `changed`. This also avoids handing one site the
   routes of every draft and every other brand's posts.
 
 `get_post` accepts `include_drafts=1` for a preview route (opt-in per call,
-never affects `get_posts`, uncached). All payloads carry `modified` and
-`content_hash` (sha256 of rendered content) so a sync can skip media
-re-processing when only metadata changed.
+never affects `get_posts`, uncached). All payloads carry `modified`,
+`content_hash` (sha256 of rendered content) and `media` (absolute URLs to
+download) so a sync can skip media re-processing when only metadata changed.
+
+`get_posts` / `get_post` remain for preview and ad-hoc reads; `get_changes` is
+what a site should sync from.
+
+Blog Category and Blogger edits are stamped onto the posts that embed them
+(`propagation.py`), so they travel on the same `modified` cursor instead of
+needing a second one.
 
 ### Consumer sync loop
 

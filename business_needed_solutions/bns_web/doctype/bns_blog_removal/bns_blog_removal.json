@@ -1,0 +1,82 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-09-03 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "website",
+  "route",
+  "blog_post",
+  "reason"
+ ],
+ "fields": [
+  {
+   "fieldname": "website",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Website",
+   "options": "BNS Website",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "description": "The route the consumer knows this post by — what it must delete locally.",
+   "fieldname": "route",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Route",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "blog_post",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Blog Post",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reason",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Reason",
+   "options": "Unpublished\nUnserved\nDeleted\nRoute Changed",
+   "read_only": 1
+  }
+ ],
+ "links": [],
+ "modified": "2026-09-03 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "BNS Web",
+ "name": "BNS Blog Removal",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Website Manager",
+   "share": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}
