@@ -6,9 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Business Needed Solutions (BNS) is a Frappe/ERPNext app that adds enterprise controls, Indian compliance, and internal transfer accounting on top of standard ERPNext. It does NOT replace ERPNext — it adds guards, validations, and workflow controls via doc_events and override classes.
 
-Two main modules:
+Three modules:
 - **Business Needed Solutions (core)** — submission restrictions, PAN validation, negative stock enforcement, dynamic print formats, discount manipulation, attachment validation
 - **BNS Branch Accounting** — inter-branch internal transfers (DN↔PR, SI↔PI linking), GL rewrite, transfer rate mirroring, common party square-off, GST/e-waybill integration, reconciliation
+- **BNS Web** — serves Blog Posts to multiple external brand websites via a token-authenticated read-only API; per-post distribution via the Serving Websites field. See `bns_web/README.md`
 
 ## Common Commands
 

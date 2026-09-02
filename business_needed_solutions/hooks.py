@@ -397,15 +397,21 @@ doc_events = {
     },
     "Payment Request": {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
+    },
+
+    # BNS Web: keep the blog API response cache fresh
+    "Blog Post": {
+        "on_update": "business_needed_solutions.business_needed_solutions.bns_web.blog_api.clear_blog_api_cache",
+        "on_trash": "business_needed_solutions.business_needed_solutions.bns_web.blog_api.clear_blog_api_cache"
     }
 }
 
 fixtures = [
             # {"doctype": "Client Script", "filters": [["module" , "in" , ("Business Needed Solutions" )]]},
             # {"doctype": "Print Format", "filters": [["module" , "in" , ("Business Needed Solutions" )]],"overwrite": True},
-            {"doctype": "Custom Field", "filters": [["module" , "in" , ("Business Needed Solutions", "BNS Branch Accounting")]],"overwrite": True},
+            {"doctype": "Custom Field", "filters": [["module" , "in" , ("Business Needed Solutions", "BNS Branch Accounting", "BNS Web")]],"overwrite": True},
             {"doctype":"Terms and Conditions", "filters": [["name" , "in" , ("General" )]],"overwrite": True},
-            {"doctype":"Property Setter", "filters": [["module" , "in" , ("Business Needed Solutions", "BNS Branch Accounting")]],"overwrite": True}
+            {"doctype":"Property Setter", "filters": [["module" , "in" , ("Business Needed Solutions", "BNS Branch Accounting", "BNS Web")]],"overwrite": True}
         ]
 # fixtures = [{"doctype": "Report", "filters": [["module" , "in" , ("Business Needed Solutions" )]]}]
 
