@@ -34,7 +34,7 @@ disable the User). Audit = standard Frappe request log.
 
 ## API
 
-Base: `/api/method/business_needed_solutions.business_needed_solutions.bns_web.blog_api.<fn>`
+Base: `/api/method/business_needed_solutions.bns_web.blog_api.<fn>`
 
 `get_posts(start=0, limit=20, category=None, view="card")`
 → `{items, total, start, limit, has_more}`. `view="card"` includes

@@ -401,8 +401,8 @@ doc_events = {
 
     # BNS Web: keep the blog API response cache fresh
     "Blog Post": {
-        "on_update": "business_needed_solutions.business_needed_solutions.bns_web.blog_api.clear_blog_api_cache",
-        "on_trash": "business_needed_solutions.business_needed_solutions.bns_web.blog_api.clear_blog_api_cache"
+        "on_update": "business_needed_solutions.bns_web.blog_api.clear_blog_api_cache",
+        "on_trash": "business_needed_solutions.bns_web.blog_api.clear_blog_api_cache"
     }
 }
 
@@ -521,7 +521,7 @@ repost_allowed_doctypes = ["Delivery Note"]
 # Migration hooks: branch-accounting setup + BNS Web "Website API" role
 after_migrate = [
     "business_needed_solutions.bns_branch_accounting.migration.after_migrate",
-    "business_needed_solutions.business_needed_solutions.bns_web.setup.ensure_website_api_role",
+    "business_needed_solutions.bns_web.setup.ensure_website_api_role",
 ]
 
 # Runtime monkey-patches that must be available on any request/job.
