@@ -59,6 +59,37 @@ def ensure_website_api_role():
 	frappe.clear_cache()
 
 
+def ensure_crm_country_field():
+	"""Select field with all country names on CRM Lead (module BNS Web).
+
+	Options are generated from frappe's geo data at migrate time instead of
+	being hardcoded, and the field is only created where the CRM app exists.
+	"""
+	if not frappe.db.exists("DocType", "CRM Lead"):
+		return
+
+	from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+	from frappe.geo.country_info import get_all as get_all_countries
+
+	options = "\n".join(["", *sorted(get_all_countries().keys())])
+
+	create_custom_fields(
+		{
+			"CRM Lead": [
+				{
+					"fieldname": "country",
+					"label": "Country",
+					"fieldtype": "Select",
+					"options": options,
+					"insert_after": "territory",
+					"module": "BNS Web",
+				}
+			]
+		},
+		update=True,
+	)
+
+
 def _ensure_role():
 	if frappe.db.exists("Role", WEBSITE_API_ROLE):
 		return

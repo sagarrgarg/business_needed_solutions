@@ -522,6 +522,7 @@ repost_allowed_doctypes = ["Delivery Note"]
 after_migrate = [
     "business_needed_solutions.bns_branch_accounting.migration.after_migrate",
     "business_needed_solutions.bns_web.setup.ensure_website_api_role",
+    "business_needed_solutions.bns_web.setup.ensure_crm_country_field",
 ]
 
 # Runtime monkey-patches that must be available on any request/job.
