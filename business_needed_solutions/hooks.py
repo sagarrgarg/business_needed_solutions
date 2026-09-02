@@ -518,8 +518,11 @@ repost_allowed_doctypes = ["Delivery Note"]
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
 
-# Migration hook to ensure BNS branch-accounting setup is applied after migrations
-after_migrate = "business_needed_solutions.bns_branch_accounting.migration.after_migrate"
+# Migration hooks: branch-accounting setup + BNS Web "Website API" role
+after_migrate = [
+    "business_needed_solutions.bns_branch_accounting.migration.after_migrate",
+    "business_needed_solutions.business_needed_solutions.bns_web.setup.ensure_website_api_role",
+]
 
 # Runtime monkey-patches that must be available on any request/job.
 # Stock-specific patches are applied via doc_events (before_submit) instead.
