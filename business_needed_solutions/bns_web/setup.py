@@ -59,6 +59,30 @@ def ensure_website_api_role():
 	frappe.clear_cache()
 
 
+def ensure_blog_not_in_sitemap():
+	"""Keep ERP-hosted blog URLs out of sitemap.xml / search indexing.
+
+	www/sitemap.py skips doctypes whose meta.allow_guest_to_view is falsy, and
+	that path *does* read meta — so a Property Setter works here (unlike
+	has_web_view, which is read straight from tabDocType). Without this the
+	sitemap would advertise blog URLs that BlogWebViewGuard then 404s.
+	"""
+	from frappe.custom.doctype.property_setter.property_setter import make_property_setter
+
+	for doctype in ("Blog Post", "Blog Category"):
+		if not frappe.db.exists("DocType", doctype):
+			continue
+		make_property_setter(
+			doctype,
+			None,
+			"allow_guest_to_view",
+			0,
+			"Check",
+			for_doctype=True,
+			validate_fields_for_doctype=False,
+		)
+
+
 def ensure_crm_country_field():
 	"""Select field with all country names on CRM Lead (module BNS Web).
 

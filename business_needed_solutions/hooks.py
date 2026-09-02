@@ -119,6 +119,15 @@ doctype_list_js = {
 # automatically create page for each record of this doctype
 # website_generators = ["Web Page"]
 
+# Website
+# ----------
+
+# BNS Web: blogs are published for the external brand sites only — 404 their
+# web views on the ERP's own domain (guests only; staff preview still works).
+page_renderer = [
+    "business_needed_solutions.bns_web.web_view_guard.BlogWebViewGuard"
+]
+
 # Jinja
 # ----------
 
@@ -522,6 +531,7 @@ repost_allowed_doctypes = ["Delivery Note"]
 after_migrate = [
     "business_needed_solutions.bns_branch_accounting.migration.after_migrate",
     "business_needed_solutions.bns_web.setup.ensure_website_api_role",
+    "business_needed_solutions.bns_web.setup.ensure_blog_not_in_sitemap",
     "business_needed_solutions.bns_web.setup.ensure_crm_country_field",
 ]
 

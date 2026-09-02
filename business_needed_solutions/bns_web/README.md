@@ -59,3 +59,21 @@ another site's posts.
   Blog Post / BNS Website changes (doc_events in hooks.py).
 - Deleting a BNS Website is blocked while Blog Posts link it — retire sites
   with Enabled = 0 instead.
+
+## Blogs are not served on the ERP domain
+
+Posts must be `published=1` for the API to deliver them, which would normally
+also make Frappe serve them at `<erp-host>/blog/...`. Two mechanisms prevent
+that, so posts only appear on the brand websites:
+
+- **`web_view_guard.BlogWebViewGuard`** (`page_renderer` hook) — 404s the blog
+  index, post routes, category routes and `rss.xml` for **guests**. Logged-in
+  staff can still preview posts on the ERP. `has_web_view` cannot be disabled
+  with a Property Setter: `get_doctypes_with_web_view()` reads `tabDocType`
+  directly, bypassing meta — hence a renderer.
+- **`setup.ensure_blog_not_in_sitemap`** — Property Setter
+  `allow_guest_to_view = 0` on Blog Post / Blog Category, so `sitemap.xml`
+  stops advertising URLs the guard 404s (that path *does* read meta).
+
+Escape hatch: set `bns_allow_erp_blog_web_view: 1` in `site_config.json` to
+turn the guard off.
