@@ -50,6 +50,36 @@ Both derive the website from the authenticated user — there is no site
 parameter, and an unmapped/disabled caller gets a permission error, never
 another site's posts.
 
+`get_changes(since=None, limit=100)`
+→ `{now, next_since, changed, removed, has_more}`. The sync endpoint: everything
+this site must add or drop. Omit `since` for a full export; pass the previous
+call's **`next_since`** thereafter.
+
+- Keyed off `modified` (database-owned), never `published_on` (author-controlled
+  and backdatable).
+- `removed` is **computed, not filtered**: posts are fetched without the
+  published/site filters and partitioned, so unpublishing, un-serving and
+  category moves all surface as removals through one rule. Hard deletes are
+  recovered from `Deleted Document`.
+- **Store `next_since`, not `now` and not the newest `modified` you received.**
+  While `has_more` is true it is the last row's `modified`; storing `now`
+  mid-page would permanently skip everything after that batch.
+- Full export returns no `removed` — the client rebuilds from scratch and
+  deletes whatever isn't in `changed`. This also avoids handing one site the
+  routes of every draft and every other brand's posts.
+
+`get_post` accepts `include_drafts=1` for a preview route (opt-in per call,
+never affects `get_posts`, uncached). All payloads carry `modified` and
+`content_hash` (sha256 of rendered content) so a sync can skip media
+re-processing when only metadata changed.
+
+### Consumer sync loop
+
+Persist `{"since": "<last next_since>"}`. Each run: call `get_changes(since)`,
+looping while `has_more`; write each `changed` post; delete each `removed`
+route; save the final `next_since`. First run (no `since`) is a full export,
+every run after is a usually-empty delta.
+
 ## Notes
 
 - The consumer Users need no roles: queries use `frappe.get_all`
