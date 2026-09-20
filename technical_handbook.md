@@ -1,8 +1,60 @@
 # Business Needed Solutions – Technical Handbook
 
 **App:** business_needed_solutions  
-**Last updated:** 2026  
+**Last updated:** 2026-09-19  
 **Purpose:** Technical reference for developers – what exists, why, impacted modules, and migration implications.
+
+---
+
+## 2026-09-19 – BNS Counter Repack (new module): sell a grade sorted out of a bulk lot
+
+### What Changed
+New module **BNS Counter Repack** (`bns_counter_repack/`), built on Stock Value Conservation.
+
+- **Rule doctype `BNS Counter Repack Rule`** (`CRR-.#####`): company, sold item (the grade billed, B), bulk item (the purchased lot, A), margin % on sale price, effective from, bulk qty per unit (1 for Kg→Kg, 0.05 for a 50 g pack filled from Kg), disabled. Validation: B ≠ A, both stock items, no batch/serial, **A must be Moving Average**, 0 ≤ margin < 100, qty per unit > 0, one enabled rule per (company, B, date). The latest rule effective on the invoice's posting date applies.
+- **Sales Invoice Item fields** (fixtures): `bns_counter_repack` ("Repack from Bulk", shown only with Update Stock on a non-return) and `bns_counter_repack_entry` (read-only link to the repack).
+- **`sales_invoice.validate_invoice`** (SI validate): ticked rows need Update Stock, not a return, Stock Value Conservation active for the company and Repack on the posting date, and a rule per row.
+- **`sales_invoice.create_repacks`** (SI before_submit, last): per (bulk item, warehouse) — one plug per entry — posts a Repack at the invoice's posting time, before the invoice's own ledger entries: **A out = the whole remaining lot**, **B in = sold stock qty at `base_net_rate / conversion_factor × (1 − margin %)`, Set Basic Rate Manually**, **A in = lot − bulk used, the plug**. Links it on each row. Refuses the bill (`counter_repack.check_group`) when B already holds stock in that warehouse (its cost would blend with that stock), when the lot is not larger than what the rows use, or when the lot's value cannot cover the margin cost (owner's decision: block, do not cap).
+- **`sales_invoice.cancel_repacks`** (SI on_cancel, last): cancels the linked repacks after the invoice has put the grades back.
+- The repack is created with `ignore_permissions`: submission restriction puts a stock-updating Sales Invoice in the same category as a Stock Entry, so whoever may submit the one may move the other.
+
+### Why
+Hing is bought as one bulk item whose lots run from about ₹1,000 to ₹30,000 per kg; at the counter the customer sorts or mixes grades and takes them, so there is nothing to record separately — only the invoice. The business knows one thing for certain: the margin per product. Booking B at sale price less that margin gives every counter bill exactly the configured gross margin (the Retail Method; AS 2 / ICDS II permit it where it approximates cost), and the plug keeps the rest of the lot's value on the lot, so nothing reaches Stock Adjustment.
+
+### Impacted Modules
+- `bns_counter_repack/` (new: `counter_repack.py`, `sales_invoice.py`, `doctype/bns_counter_repack_rule/`, `test_counter_repack.py`), `modules.txt`, `hooks.py` (Sales Invoice validate / before_submit / on_cancel; fixture filters now include the module), `fixtures/custom_field.json`.
+
+### Migration Implications
+- `bench migrate` creates the Module Def, the rule doctype and the two Sales Invoice Item fields. Nothing happens until a row is ticked. Requires Stock Value Conservation on for the company (Repack ticked) and every bulk item on Moving Average (ERPNext allows FIFO → Moving Average at any time, not back).
+
+---
+
+## 2026-09-19 – Stock value conservation for Repack / Manufacture
+
+### What Changed
+New core-module feature, off by default: `overrides/stock_value_conservation.py`, wired through `BNSStockEntry` and doc_events. No monkey-patch.
+
+- **The plug.** On a governed Repack or Manufacture, exactly one incoming row — the *plug* — has Set Basic Rate Manually unticked and takes `(Σ outgoing basic − Σ other incoming basic) / plug qty`. Every other incoming row keeps its typed rate. On Manufacture the plug must be the finished good; scrap keeps the value ERPNext gives it.
+- **`BNSStockEntry` overrides** (each falls back to ERPNext unless `svc.governs(self)`):
+  - `validate_repack_entry` → `prepare_conserved_entry`: exactly one plug row (rows counted, not item codes; Allow Zero Valuation Rate rows are never plugs); every row's Difference Account forced to the Company Stock Adjustment account.
+  - `set_basic_rate` → plug marked manual during `super()` (so ERPNext's `get_valuation_rate` fallback cannot throw "Valuation Rate Missing" for a new grade), restored in `finally`, then `apply_plug_rate`.
+  - `distribute_additional_costs` → all additional cost on the plug; typed rows keep exactly their typed valuation.
+  - `get_finished_item_row` → returns the plug, so outgoing SLEs name it as their dependant and it carries `recalculate_rate=1`. Required on Manufacture, where repost re-rates only that row.
+- **Submit guard** `guard_stock_adjustment` (on_submit doc_event, index 1 on Stock Entry / Purchase Receipt / Purchase Invoice / Sales Invoice / Delivery Note): throws if the voucher's GL leaves more than a paisa per row on Company `stock_adjustment_account`. Skips: Stock Reconciliation (never guarded), Material Issue / Material Receipt, BNS internal documents (branch accounting's own balancer) and the FIFO repeated-row transient (`repost_required_for_queue`). Receiving into negative stock is **not** exempt: the revaluation it causes lands on Stock Adjustment, so the entry is blocked and the message names the rows (`negative_stock_fills`).
+- **Repost.** `set_basic_rate` also runs inside Repost Item Valuation (`recalculate_amounts_in_stock_entry`, `reset_outgoing_rate=False`). There it never throws (errors are logged): typed rows are restored from `bns_fixed_rate`, the plug recomputed. If the plug would go ≤ 0: Repack rescales every incoming row from its submit-time rate when the rescale reaches the ledger (`_rescale_reaches_ledger`), otherwise — and always on Manufacture — the plug floors at 0 and an Error Log `BNS stock value conservation: floored <entry>` is written.
+- **After a repost** `verify_after_repost` (Repost Item Valuation on_change, exception-proof, once per RIV) checks every conserved Stock Entry the repost touched and logs `BNS stock value conservation: Stock Adjustment after repost <RIV>` for any residual.
+- **Settings.** BNS Settings → Manufacturing → Stock Value Conservation: `enable_stock_value_conservation`, `stock_value_conservation_effective_from` (required once enabled; one date for every company), `stock_value_conservation_rules` (child `BNS Stock Value Conservation Rule`: company, apply_to_repack, apply_to_manufacture, is_active), `allow_balanced_entries_without_plug`, `exclude_transactions_from_adjustment_guard`. `BNSSettings.validate` refuses a missing Effective From, duplicate active company rows, rows with no purpose, and companies without a Stock Adjustment Account.
+- **Custom fields** (fixtures): `Stock Entry.bns_value_conserved` (stamped at submit), `Stock Entry Detail.bns_fixed_rate` (submit-time rate of every incoming row).
+
+### Why
+ERPNext v15 forces Set Basic Rate Manually on every finished good of a multi-output Repack, so incoming rates freeze while Repost Item Valuation reprices the outgoing side; incoming − outgoing lands on Stock Adjustment (FY26: ~₹6.39 Cr from Manufacture STEs alone). Stock Reconciliation is the only stock document that should post there.
+
+### Impacted Modules
+- `overrides/stock_value_conservation.py` (new), `overrides/stock_entry_component_qty_variance.py` (BNSStockEntry), `doctype/bns_settings/*`, `doctype/bns_stock_value_conservation_rule/` (new), `hooks.py`, `fixtures/custom_field.json`, `tests/test_stock_value_conservation.py` (new).
+
+### Migration Implications
+- `bench migrate` creates the child doctype, the BNS Settings fields and the two custom fields. No patch: every setting defaults to off, and history is never touched — Effective From keeps earlier entries on ERPNext's behaviour even when a backdated voucher reposts them, and a submitted entry keeps the method it was submitted under (`bns_value_conserved`) even if the settings change later.
+- Before enabling for a company, read "Before switching it on" in psychological_handbook.md.
 
 ---
 
@@ -281,8 +333,9 @@ BNS extends ERPNext with:
 ### 3.9 Stock Entry Override (`overrides/stock_entry_component_qty_variance.py`)
 
 - **What:** BNS variance qty for manufacturing; component qty variance control. Batch/serial safe: set-based item_code matching correctly handles batch-tracked items with the same item_code in multiple rows (different batches/SBBs).
-- **Impacted:** Stock Entry (override_doctype_class).
-- **Settings:** BNS Settings → `enable_bns_variance_qty`, `bns_default_variance_qty`.
+- **Also hosts stock value conservation:** `validate_repack_entry`, `set_basic_rate`, `distribute_additional_costs`, `get_finished_item_row` are overridden and delegate to `overrides/stock_value_conservation.py`; `validate` stamps `bns_value_conserved` / `bns_fixed_rate` at submit. See the 2026-09-19 entry.
+- **Impacted:** Stock Entry (override_doctype_class). Runs inside Repost Item Valuation too (ERPNext reloads the entry with `frappe.get_doc`, which resolves to this class).
+- **Settings:** BNS Settings → `enable_bns_variance_qty`, `bns_default_variance_qty`; Stock Value Conservation section.
 
 ### 3.10 Billing Location → Customer Address (`overrides/billing_location.py`)
 
@@ -301,13 +354,14 @@ BNS extends ERPNext with:
 | Customer, Supplier | validate | validate_pan_uniqueness |
 | Item | validate | validate_expense_account_for_non_stock_items |
 | Stock Ledger Entry | validate | validate_sle_warehouse_negative_stock |
-| Stock Entry | on_submit | validate_submission_permission |
-| Delivery Note | validate, on_submit, on_cancel | BNS internal + GST compliance |
-| Purchase Receipt | on_submit | submission + BNS internal |
+| Stock Entry | before_save, before_submit, on_submit, on_cancel | batch naming; ensure_stock_patches; validate_submission_permission + guard_stock_adjustment; ignore repost ledger links |
+| Delivery Note | validate, on_submit, on_cancel | BNS internal + GST compliance + guard_stock_adjustment |
+| Purchase Receipt | on_submit | submission + guard_stock_adjustment + BNS internal |
 | Stock Reconciliation | on_submit | validate_submission_permission |
-| Sales Invoice | validate, on_submit | stock update + BNS internal |
-| Purchase Invoice | validate, on_submit | stock update + same GSTIN + BNS internal |
+| Sales Invoice | validate, before_submit, on_submit, on_cancel | stock update + counter repack (validate_invoice, create_repacks, cancel_repacks) + guard_stock_adjustment + BNS internal |
+| Purchase Invoice | validate, on_submit | stock update + same GSTIN + guard_stock_adjustment + BNS internal |
 | Journal Entry, Payment Entry, SO, PO, Payment Request | on_submit | validate_submission_permission |
+| Repost Item Valuation | on_change | branch-accounting transfer-rate refresh ×3; verify_after_repost (stock value conservation, log-only) |
 
 ---
 

@@ -1,0 +1,104 @@
+{
+ "actions": [],
+ "autoname": "CRR-.#####",
+ "creation": "2026-09-19 18:00:00.000000",
+ "description": "Margin used to value a grade sorted out of a bulk hing lot at the counter. Read by the Sales Invoice when a row has Repack from Bulk ticked.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "sold_item",
+  "bulk_item",
+  "column_break_rule",
+  "margin_percent",
+  "effective_from",
+  "bulk_qty_per_unit",
+  "disabled"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "Company",
+   "remember_last_selected_value": 1,
+   "reqd": 1
+  },
+  {
+   "description": "The grade billed on the Sales Invoice (B). Created from the bulk lot at the counter, so it should hold no stock of its own.",
+   "fieldname": "sold_item",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Sold Item",
+   "options": "Item",
+   "reqd": 1
+  },
+  {
+   "description": "The purchased lot it is sorted out of (A). Its whole remaining stock passes through the repack and comes back at the plug rate.",
+   "fieldname": "bulk_item",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Bulk Item",
+   "options": "Item",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_rule",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Gross margin on the sale price: cost = net rate x (1 - margin %).",
+   "fieldname": "margin_percent",
+   "fieldtype": "Percent",
+   "in_list_view": 1,
+   "label": "Margin %",
+   "reqd": 1
+  },
+  {
+   "description": "Applies to invoices posted on or after this date, until a later rule for the same sold item takes over.",
+   "fieldname": "effective_from",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Effective From",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "description": "Stock-UOM quantity of the bulk item used for one stock-UOM unit of the sold item. 1 for Kg sold from Kg; 0.05 for a 50 g pack filled from Kg.",
+   "fieldname": "bulk_qty_per_unit",
+   "fieldtype": "Float",
+   "label": "Bulk Qty per Unit",
+   "non_negative": 1,
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "disabled",
+   "fieldtype": "Check",
+   "label": "Disabled"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-19 18:05:00.000000",
+ "modified_by": "Administrator",
+ "module": "BNS Counter Repack",
+ "name": "BNS Counter Repack Rule",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "email": 1, "export": 1, "print": 1, "read": 1, "report": 1, "role": "System Manager", "share": 1, "write": 1},
+  {"create": 1, "delete": 1, "email": 1, "export": 1, "print": 1, "read": 1, "report": 1, "role": "Accounts Manager", "share": 1, "write": 1},
+  {"read": 1, "report": 1, "role": "Stock Manager"},
+  {"read": 1, "role": "Sales User"}
+ ],
+ "sort_field": "effective_from",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "sold_item",
+ "track_changes": 1
+}

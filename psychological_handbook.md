@@ -18,6 +18,30 @@ The app is designed to be **configurable via settings** – most features can be
 
 ---
 
+### Decision note (2026-09-19, counter repack of bulk hing)
+- **The business fact is the margin, not the lot.** A single bulk item averages lots from ₹1,000 to ₹30,000/kg, and the grades a customer sorts out are never weighed separately. So the invoice's grade is costed at sale price less the product's margin, and the bulk lot absorbs the rest through the plug. Each counter bill shows exactly the configured margin; the lot's remaining value is where any error in the margins accumulates.
+- **The whole lot passes through each repack.** The value arithmetic is identical for any quantity, but only the whole lot keeps the leftover's rate near the average (and inside material_price_control's band), and the common case — the customer takes all they picked — leaves nothing else to plug.
+- **Bulk items must be Moving Average.** The repack's quantity is fixed at submit. Under FIFO a later, backdated purchase becomes the oldest layer and the posted repack draws from that layer alone; the plug goes negative and the gap reaches Stock Adjustment. Moving Average is also the owner's own description of the lot: "averaging out on a single item".
+- **A grade must hold no stock of its own.** Its cost is exactly the margin cost only when the repack's quantity is the only stock it has. Refused otherwise, with the reason.
+- **The bill is blocked when the lot's value cannot cover the margin cost (owner's decision).** That is the margins disagreeing with what the lot cost; capping silently would hide it.
+- **Per-row tick (owner's decision).** A mixed bill can sell some items from stock and repack others.
+
+### Decision note (2026-09-19, stock value conservation on Repack / Manufacture)
+- **What it protects.** Book COGS on Delhi Repacks and Guriya Manufacture drifted because every incoming rate was typed and frozen while reposts moved the outgoing side; the gap went to Stock Adjustment. One incoming line — the plug — now absorbs the balance, at submit and on every repost. Stock Reconciliation stays the only stock document that posts to Stock Adjustment.
+- **Fail-closed, deliberately departing from "graceful degradation" (§3).** Graceful degradation is right for convenience checks; here a skipped check *is* the bug (money silently reaching Stock Adjustment). So: an enabled company with a malformed entry is refused at submit, and misconfiguration is refused in `BNSSettings.validate`. Off (master switch, no active rule, or a date before Effective From) means exactly ERPNext.
+- **Zero is strict.** The two opt-outs (`allow_balanced_entries_without_plug`, `exclude_transactions_from_adjustment_guard`) are phrased so 0 is the safe value, because a Single that already has rows never receives a new field's JSON default.
+- **A submitted entry keeps its method.** `bns_value_conserved` is stamped at submit and governs every later repost and cancel, not today's settings. Otherwise switching the feature off would silently reprice conserved entries the next time a backdated voucher touched them.
+- **Repost never throws.** Anything inside Repost Item Valuation that raises rolls it back and marks it Failed for good. So the negative-plug case is handled, not refused: Repack rescales from submit-time rates when the rescale provably reaches the ledger, otherwise the plug floors at 0 and the residual is written to the Error Log for accounts to trace to the backdated voucher.
+- **Effective From is one Date on BNS Settings, not a Fiscal Year and not per company.** Required once the feature is on. Unlike branch-accounting cutoffs (anti-pattern 20), no pair of documents has to agree on it. But ICDS II / Sec 145A expects one valuation method across a year, so set it to the first day of a financial year (1 April) unless there is a reason not to.
+- **Negative stock is not exempt (owner's decision).** Receiving into a negative balance revalues stock issued before it existed and posts the gap to Stock Adjustment. That is blocked like any other leak; the message names the rows so the user clears the negative instead of hunting for a wrong typed rate.
+
+### Before switching it on for a company
+1. **material_price_control** checks every incoming row's valuation, plug included, against Cost Valuation Rules in before_submit, and blocks outside the band. That is intended (owner's decision): a plug outside the band is worth stopping at the counter. It never runs during a repost (Repost Item Valuation fires no doc_events), so backdated reposts reprice plugs unchecked in the background, also intended. With a 2% band and severe_multiplier = 1 expect blocks until rules on plug items are reviewed.
+2. **WarehouseSuite** `disallow_value_difference` and the plug agree: the plug makes value_difference 0. They differ only for an entry with additional costs, whose value_difference equals the additional cost by design (none of the 7,502 historical Repack/Manufacture entries use them).
+3. **Multi-output Repacks** that today type every line (ERPNext's own rule) must untick Set Basic Rate Manually on exactly one line.
+4. **Manufacture** allows exactly one finished-good row as the plug (split-batch finished goods must be one row). Set Basic Rate Manually is hidden for Manufacture in ERPNext's form; a typed scrap/packing rate needs a Property Setter to show it.
+5. **Negative stock.** An entry that receives into stock at or below zero is blocked when the revaluation reaches Stock Adjustment. Clear the negative balance first.
+
 ### Decision note (2026-04-09, PR/SI transfer-rate chain cutoff gate)
 - The same Phase 2 rule that applies to PI functions applies identically to PR functions: `_mirror_pr_item_valuation_from_transfer_rate`, `_sync_pr_sle_from_transfer_rate`, `_trigger_pr_repost_for_transfer_rate` must all check `is_after_accounting_rewrite_cutoff` before modifying ERPNext standard fields.
 - `_sync_si_item_incoming_rate_from_dn` modifies `Sales Invoice Item.incoming_rate` which feeds into downstream PI/PR transfer-rate resolution. Gating it behind Phase 2 prevents cascading rate changes for pre-cutoff documents.
@@ -198,6 +222,13 @@ The app is designed to be **configurable via settings** – most features can be
 19. **Checking target doc date instead of source doc date** – When evaluating cutoff for PR/PI, always use the source DN/SI's posting date, not the PR/PI's own posting date. A DN created before cutoff means the entire chain is pre-cutoff. Use `_resolve_source_posting_date(doc)` consistently.
 20. **Raw date cutoffs** – Cutoff dates must align with fiscal year boundaries. Never allow arbitrary dates as cutoffs; users select a Fiscal Year and the system resolves it to `year_start_date`. This prevents partial-FY cutoffs that could leave accounting in an inconsistent state.
 21. **Using `bool()` on DB checkbox values** – Never use raw `bool(value)` for checkbox values fetched from DB (`"0"` / `"1"` strings). `"0"` is truthy in Python and can silently bypass validations. Always cast with `cint(...)` (or equivalent numeric/strict boolean conversion) before branching.
+22. **Baking additional costs into the plug's basic rate** – `distribute_additional_costs` adds them on top of basic amount afterwards; putting them in the plug formula counts them twice and posts the double to Stock Adjustment.
+23. **Throwing on the repost path** – `set_basic_rate` (called with `reset_outgoing_rate=False` from `recalculate_amounts_in_stock_entry`) and Repost Item Valuation `on_change` handlers must never raise. Log and keep going; an exception fails the repost permanently.
+24. **Rescaling a row whose ledger entry is never re-rated** – ERPNext re-rates a Repack's incoming entries only through an outgoing entry that carries a dependant, and on Manufacture only the finished-item row. Changing any other row's rate during a repost leaves the row and its ledger entry disagreeing.
+25. **Detecting "repost" from `frappe.flags.through_repost_item_valuation`** – repost() sets it and never clears it, so it leaks into later work in the same process (tests especially). Use the call signature (`reset_outgoing_rate=False`) and, for submitted documents, what was stamped on the document.
+26. **Relying on a new field's JSON default on an existing Single** – it is never applied to a Single that already has rows. Name opt-out fields so that 0 is the strict value, or seed them in a patch.
+27. **Repacking only what the customer handled** – the leftover would often be zero (nothing to plug) or tiny (an extreme or negative rate). Pass the whole lot.
+28. **A FIFO bulk lot under counter repack** – a backdated purchase silently changes which layer a posted repack consumed. Require Moving Average.
 
 ---
 

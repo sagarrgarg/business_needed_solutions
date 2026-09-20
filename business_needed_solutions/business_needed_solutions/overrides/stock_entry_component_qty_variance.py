@@ -12,6 +12,8 @@ from frappe import _
 from frappe.utils import flt, cint, get_link_to_form
 from erpnext.stock.doctype.stock_entry.stock_entry import StockEntry
 
+from business_needed_solutions.business_needed_solutions.overrides import stock_value_conservation as svc
+
 
 class BNSStockEntry(StockEntry):
     """
@@ -20,6 +22,8 @@ class BNSStockEntry(StockEntry):
     Features:
     - Component quantity variance tolerance (±%) instead of strict BOM matching
     - BOM enforcement for Manufacture purpose Stock Entries
+    - Stock value conservation on Repack / Manufacture: one plug line takes the balance
+      (logic in overrides/stock_value_conservation.py; off unless configured in BNS Settings)
     """
     
     def validate(self):
@@ -31,7 +35,83 @@ class BNSStockEntry(StockEntry):
         
         # BNS: Enforce BOM for Manufacture purpose
         self._validate_bom_for_manufacture()
+
+        # BNS: at submit, stamp whether value conservation governs this entry and the submit-time
+        # rate of every incoming line (the basis for a non-compounding rescale on repost)
+        svc.record_submit_snapshot(self)
     
+    # ─── Stock value conservation ─────────────────────────────────────────────
+    # Each override falls back to ERPNext unchanged unless svc.governs(self): conservation switched
+    # on, an active rule for this company covering this posting date, and a configured purpose.
+
+    def validate_repack_entry(self):
+        """Replace ERPNext's 'type every finished good' rule with 'exactly one untyped plug line'."""
+        if svc.governs(self):
+            svc.prepare_conserved_entry(self)
+            return
+        super().validate_repack_entry()
+
+    def set_basic_rate(self, reset_outgoing_rate=True, raise_error_if_no_rate=True):
+        """
+        Price the plug from the outgoing side after ERPNext has priced everything else.
+
+        Also runs during Repost Item Valuation (recalculate_amounts_in_stock_entry reloads this
+        class with reset_outgoing_rate=False), which is how a backdated voucher reprices the plug.
+        """
+        if not svc.governs(self):
+            return super().set_basic_rate(reset_outgoing_rate, raise_error_if_no_rate)
+
+        plug = svc.get_plug_row(self)
+        # Keep ERPNext's pass away from the plug: for a multi-output Repack it would otherwise price
+        # the plug from the item's current valuation, which throws for a grade with no history yet.
+        # Restored in finally, because a repost db_updates every row and would persist a leaked flag.
+        if plug is not None:
+            plug.set_basic_rate_manually = 1
+        try:
+            super().set_basic_rate(reset_outgoing_rate, raise_error_if_no_rate)
+        finally:
+            if plug is not None:
+                plug.set_basic_rate_manually = 0
+
+        if reset_outgoing_rate:
+            svc.apply_plug_rate(self, plug, in_recalculation=False)
+            return
+
+        # reset_outgoing_rate=False is ERPNext re-pricing a submitted entry from its ledger: Repost
+        # Item Valuation, or the submit-time Serial and Batch Bundle recalculation. An exception
+        # here rolls a repost back and marks it Failed permanently, so a defect in our code must
+        # never escape — log it and leave ERPNext's figures in place.
+        try:
+            svc.apply_plug_rate(self, plug, in_recalculation=True)
+        except Exception:
+            frappe.log_error(
+                title=f"BNS stock value conservation: recalculation failed {self.name}",
+                reference_doctype="Stock Entry",
+                reference_name=self.name,
+            )
+
+    def distribute_additional_costs(self):
+        """Under conservation all additional cost lands on the plug; typed lines keep their rate."""
+        super().distribute_additional_costs()
+        if svc.governs(self):
+            plug = svc.get_plug_row(self)
+            if plug is not None:
+                svc.put_additional_costs_on_plug(self, plug)
+
+    def get_finished_item_row(self):
+        """
+        The row whose ledger entry ERPNext re-rates when an outgoing line is repriced.
+
+        ERPNext picks the LAST finished good, and on Manufacture that is the only incoming row a
+        repost re-rates. Returning the plug makes the outgoing rows point at it, so a backdated
+        voucher moves the plug's ledger entry and not some other line's.
+        """
+        if svc.governs(self):
+            plug = svc.get_plug_row(self)
+            if plug is not None:
+                return plug
+        return super().get_finished_item_row()
+
     def _validate_bom_for_manufacture(self):
         """
         Validate that BOM is provided when Stock Entry purpose is Manufacture.

@@ -59,6 +59,11 @@ def validate_sle_negative_stock_cutoff(doc, method=None):
 	if doc.is_cancelled:
 		return
 
+	# Counter repack backfill posts onto a ledger it reposts only once, at the end; it plans the
+	# quantities itself and checks the reposted balances (bns_counter_repack/backfill.py).
+	if frappe.flags.get("bns_counter_repack_backfill"):
+		return
+
 	if not _should_restrict(doc.posting_date):
 		return
 

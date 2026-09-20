@@ -250,7 +250,10 @@ doc_events = {
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
         ],
-        "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
+        "on_submit": [
+            "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
+            "business_needed_solutions.business_needed_solutions.overrides.stock_value_conservation.guard_stock_adjustment"
+        ],
         "on_cancel": "business_needed_solutions.bns_branch_accounting.utils.bns_ignore_repost_ledger_links_on_cancel"
     },
     "Delivery Note": {
@@ -266,6 +269,7 @@ doc_events = {
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
+            "business_needed_solutions.business_needed_solutions.overrides.stock_value_conservation.guard_stock_adjustment",
             "business_needed_solutions.bns_branch_accounting.gst_integration.validate_internal_dn_vehicle_no",
             "business_needed_solutions.bns_branch_accounting.utils.update_delivery_note_status_for_bns_internal",
             "business_needed_solutions.bns_branch_accounting.utils.backlink_internal_return_debit_note",
@@ -297,6 +301,7 @@ doc_events = {
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
+            "business_needed_solutions.business_needed_solutions.overrides.stock_value_conservation.guard_stock_adjustment",
             "business_needed_solutions.bns_branch_accounting.utils.update_purchase_receipt_status_for_bns_internal",
             "business_needed_solutions.bns_branch_accounting.utils.bns_apply_asset_transfer"
         ],
@@ -321,6 +326,7 @@ doc_events = {
             "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_customer_return",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_sales_invoice_linkage",
+            "business_needed_solutions.bns_counter_repack.sales_invoice.validate_invoice",
         ],
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
@@ -328,9 +334,11 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_return_credit_note_parity",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_address_parity",
             "business_needed_solutions.bns_branch_accounting.utils.bns_guard_asset_in_transit",
+            "business_needed_solutions.bns_counter_repack.sales_invoice.create_repacks",
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
+            "business_needed_solutions.business_needed_solutions.overrides.stock_value_conservation.guard_stock_adjustment",
             "business_needed_solutions.bns_branch_accounting.utils.update_sales_invoice_status_for_bns_internal",
             "business_needed_solutions.bns_branch_accounting.utils.backlink_internal_return_debit_note",
             "business_needed_solutions.bns_branch_accounting.utils.bns_create_asset_transfer_movement"
@@ -338,7 +346,8 @@ doc_events = {
         "on_cancel": [
             "business_needed_solutions.bns_branch_accounting.utils.cancel_linked_purchase_docs_for_sales_invoice",
             "business_needed_solutions.bns_branch_accounting.utils.bns_cancel_asset_transfer_movement",
-            "business_needed_solutions.bns_branch_accounting.utils.bns_ignore_repost_ledger_links_on_cancel"
+            "business_needed_solutions.bns_branch_accounting.utils.bns_ignore_repost_ledger_links_on_cancel",
+            "business_needed_solutions.bns_counter_repack.sales_invoice.cancel_repacks"
         ]
     },
     "Subcontracting Receipt": {
@@ -359,6 +368,7 @@ doc_events = {
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
+            "business_needed_solutions.business_needed_solutions.overrides.stock_value_conservation.guard_stock_adjustment",
             "business_needed_solutions.bns_branch_accounting.utils.update_purchase_invoice_status_for_bns_internal",
             "business_needed_solutions.bns_branch_accounting.utils.bns_apply_asset_transfer"
         ],
@@ -381,6 +391,7 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.utils.refresh_pr_transfer_rate_after_repost",
             "business_needed_solutions.bns_branch_accounting.utils.refresh_si_transfer_rate_after_repost",
             "business_needed_solutions.bns_branch_accounting.utils.refresh_bns_internal_status_after_repost",
+            "business_needed_solutions.business_needed_solutions.overrides.stock_value_conservation.verify_after_repost",
         ]
     },
     "Journal Entry": {
@@ -434,9 +445,9 @@ doc_events = {
 fixtures = [
             # {"doctype": "Client Script", "filters": [["module" , "in" , ("Business Needed Solutions" )]]},
             # {"doctype": "Print Format", "filters": [["module" , "in" , ("Business Needed Solutions" )]],"overwrite": True},
-            {"doctype": "Custom Field", "filters": [["module" , "in" , ("Business Needed Solutions", "BNS Branch Accounting", "BNS Web")]],"overwrite": True},
+            {"doctype": "Custom Field", "filters": [["module" , "in" , ("Business Needed Solutions", "BNS Branch Accounting", "BNS Web", "BNS Counter Repack")]],"overwrite": True},
             {"doctype":"Terms and Conditions", "filters": [["name" , "in" , ("General" )]],"overwrite": True},
-            {"doctype":"Property Setter", "filters": [["module" , "in" , ("Business Needed Solutions", "BNS Branch Accounting", "BNS Web")]],"overwrite": True}
+            {"doctype":"Property Setter", "filters": [["module" , "in" , ("Business Needed Solutions", "BNS Branch Accounting", "BNS Web", "BNS Counter Repack")]],"overwrite": True}
         ]
 # fixtures = [{"doctype": "Report", "filters": [["module" , "in" , ("Business Needed Solutions" )]]}]
 

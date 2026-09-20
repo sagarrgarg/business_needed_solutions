@@ -8,6 +8,7 @@ discount type configurations and field property management.
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.utils import cint
 from typing import Dict, List, Any
 import logging
 
@@ -28,6 +29,51 @@ class BNSSettings(Document):
     including discount type management and field property configurations.
     """
     
+    def validate(self) -> None:
+        self._validate_stock_value_conservation_rules()
+
+    def _validate_stock_value_conservation_rules(self) -> None:
+        """
+        Fail closed on a conservation rule set that cannot be applied unambiguously.
+
+        Only checked while the feature is switched on: rows may be drafted while it is off.
+        """
+        if not cint(self.get("enable_stock_value_conservation")):
+            return
+
+        title = _("Invalid Stock Value Conservation Configuration")
+        if not self.get("stock_value_conservation_effective_from"):
+            frappe.throw(
+                _("Set Effective From: Stock Entries posted before it keep ERPNext's behaviour."),
+                title=title,
+            )
+        seen: Dict[str, int] = {}
+        for row in self.get("stock_value_conservation_rules") or []:
+            if not cint(row.is_active):
+                continue
+            if row.company in seen:
+                frappe.throw(
+                    _("Company {0} has more than one active rule (rows {1} and {2}). Keep one.").format(
+                        frappe.bold(row.company), seen[row.company], row.idx
+                    ),
+                    title=title,
+                )
+            seen[row.company] = row.idx
+            if not (cint(row.apply_to_repack) or cint(row.apply_to_manufacture)):
+                frappe.throw(
+                    _("Row {0} ({1}): tick Repack, Manufacture or both.").format(
+                        row.idx, frappe.bold(row.company)
+                    ),
+                    title=title,
+                )
+            if not frappe.get_cached_value("Company", row.company, "stock_adjustment_account"):
+                frappe.throw(
+                    _("Row {0}: Company {1} has no Stock Adjustment Account, so there is nothing to protect. Set it on the Company first.").format(
+                        row.idx, frappe.bold(row.company)
+                    ),
+                    title=title,
+                )
+
     def on_update(self) -> None:
         """
         Handle document updates and apply settings when discount type changes.

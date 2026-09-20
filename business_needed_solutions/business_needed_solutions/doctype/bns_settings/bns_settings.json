@@ -50,6 +50,12 @@
   "enforce_bom_for_manufacture",
   "enable_bns_variance_qty",
   "bns_default_variance_qty",
+  "stock_value_conservation_section",
+  "enable_stock_value_conservation",
+  "stock_value_conservation_effective_from",
+  "stock_value_conservation_rules",
+  "allow_balanced_entries_without_plug",
+  "exclude_transactions_from_adjustment_guard",
   "tab_break_submission",
   "submission_section",
   "restrict_submission",
@@ -380,6 +386,51 @@
    "label": "Default Variance (%)"
   },
   {
+   "fieldname": "stock_value_conservation_section",
+   "fieldtype": "Section Break",
+   "label": "Stock Value Conservation",
+   "description": "On Repack and Manufacture, exactly one incoming line (the plug) takes whatever value the other lines leave, so the entry can never post to the Stock Adjustment account. Stock Reconciliation remains the only stock document that posts there."
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_stock_value_conservation",
+   "fieldtype": "Check",
+   "label": "Enable Stock Value Conservation",
+   "description": "Master switch. Off, or on with no active company rule, means ERPNext behaves exactly as standard."
+  },
+  {
+   "depends_on": "enable_stock_value_conservation",
+   "mandatory_depends_on": "enable_stock_value_conservation",
+   "fieldname": "stock_value_conservation_effective_from",
+   "fieldtype": "Date",
+   "label": "Effective From",
+   "description": "Stock Entries posted before this date keep ERPNext's behaviour, including when a backdated voucher reposts them. Use the first day of a financial year (1 April) so one valuation method holds across the year (ICDS II / Sec 145A)."
+  },
+  {
+   "depends_on": "enable_stock_value_conservation",
+   "fieldname": "stock_value_conservation_rules",
+   "fieldtype": "Table",
+   "label": "Company Rules",
+   "options": "BNS Stock Value Conservation Rule",
+   "description": "One active row per company. A company without an active row is not affected."
+  },
+  {
+   "default": "0",
+   "depends_on": "enable_stock_value_conservation",
+   "fieldname": "allow_balanced_entries_without_plug",
+   "fieldtype": "Check",
+   "label": "Allow Entries Without a Plug When They Balance",
+   "description": "Off (recommended): every Repack/Manufacture must have exactly one incoming line with Set Basic Rate Manually unticked. On: an entry with every incoming line typed may submit, but only if the typed values already balance to the paisa."
+  },
+  {
+   "default": "0",
+   "depends_on": "enable_stock_value_conservation",
+   "fieldname": "exclude_transactions_from_adjustment_guard",
+   "fieldtype": "Check",
+   "label": "Do Not Guard Transactions",
+   "description": "Off (recommended): for companies with an active rule, Purchase Receipt, Purchase Invoice, Sales Invoice, Delivery Note and Material Transfer are also blocked from leaving a net balance on the company's Stock Adjustment account. On: only Repack/Manufacture are guarded."
+  },
+  {
    "fieldname": "tab_break_submission",
    "fieldtype": "Tab Break",
    "label": "Submission"
@@ -650,7 +701,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-07-18 12:00:00.000000",
+ "modified": "2026-09-19 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Business Needed Solutions",
  "name": "BNS Settings",
