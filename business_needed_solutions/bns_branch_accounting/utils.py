@@ -4285,18 +4285,10 @@ def _apply_bns_repost_accounting_ledger_patch() -> None:
 
     try:
         from erpnext.accounts.doctype.repost_accounting_ledger import repost_accounting_ledger as ral
-        original_start_repost = ral.start_repost
 
-        if getattr(original_start_repost, "_bns_repost_accounting_patched", False):
-            _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = True
-            return
-
-        def patched_start_repost(account_repost_doc=str):
-            result = original_start_repost(account_repost_doc)
-            doc_lock_scope = "repost_accounting_ledger"
+        def _bns_after_repost(account_repost_doc) -> None:
+            """Run the BNS correction and drop the lock, whichever ERPNext entry point ran."""
             doc_lock_repost = str(account_repost_doc or "")
-            doc_lock_voucher_type = "Repost Accounting Ledger"
-            doc_lock_voucher_no = str(account_repost_doc or "")
             try:
                 _run_bns_gl_repost_accounting_correction(account_repost_doc)
             except Exception as e:
@@ -4304,17 +4296,54 @@ def _apply_bns_repost_accounting_ledger_patch() -> None:
             finally:
                 if doc_lock_repost:
                     _release_bns_repost_lock(
-                        doc_lock_scope,
+                        "repost_accounting_ledger",
                         doc_lock_repost,
-                        doc_lock_voucher_type,
-                        doc_lock_voucher_no,
+                        "Repost Accounting Ledger",
+                        doc_lock_repost,
                     )
-            return result
 
-        patched_start_repost._bns_repost_accounting_patched = True
-        ral.start_repost = patched_start_repost
-        _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = True
-        logger.info("Applied BNS Repost Accounting Ledger patch")
+        # ERPNext up to ~15.104 exposes a module level start_repost(account_repost_doc) that
+        # reposts inline, so the correction belongs right after it returns.
+        original_start_repost = getattr(ral, "start_repost", None)
+        if callable(original_start_repost):
+            if getattr(original_start_repost, "_bns_repost_accounting_patched", False):
+                _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = True
+                return
+
+            def patched_start_repost(account_repost_doc=None):
+                result = original_start_repost(account_repost_doc)
+                _bns_after_repost(account_repost_doc)
+                return result
+
+            patched_start_repost._bns_repost_accounting_patched = True
+            ral.start_repost = patched_start_repost
+            _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = True
+            logger.info("Applied BNS Repost Accounting Ledger patch (start_repost)")
+            return
+
+        # From ~15.120 start_repost is a method on the doctype that only enqueues; the work is
+        # done by the module level repost(), which the background job calls by dotted path.
+        original_repost = getattr(ral, "repost", None)
+        if callable(original_repost):
+            if getattr(original_repost, "_bns_repost_accounting_patched", False):
+                _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = True
+                return
+
+            def patched_repost(repost_doc_name, *args, **kwargs):
+                result = original_repost(repost_doc_name, *args, **kwargs)
+                _bns_after_repost(repost_doc_name)
+                return result
+
+            patched_repost._bns_repost_accounting_patched = True
+            ral.repost = patched_repost
+            _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = True
+            logger.info("Applied BNS Repost Accounting Ledger patch (repost)")
+            return
+
+        logger.error(
+            "Failed to apply BNS Repost Accounting Ledger patch: neither start_repost nor repost "
+            "found on erpnext repost_accounting_ledger"
+        )
     except Exception as e:
         logger.error("Failed to apply BNS Repost Accounting Ledger patch: %s", str(e))
 
@@ -5264,6 +5293,7 @@ def bns_transferable_asset_query(doctype, txt, searchfield, start, page_len, fil
     """Link-field query for the transfer picker: only assets eligible to be
     dispatched -- submitted, transferable status, of the row's item + company,
     and NOT already in transit."""
+    frappe.has_permission("Asset", throw=True)
     filters = filters or {}
     conditions = [
         "a.docstatus = 1",
@@ -9503,6 +9533,7 @@ def _bulk_diff_gstin_set_progress(token: str, state: Dict[str, Any]) -> None:
 @frappe.whitelist()
 def bulk_switch_diff_gstin_progress(token: str) -> Dict[str, Any]:
     """Poll fallback for the bulk-switch progress dialog (realtime is primary)."""
+    frappe.has_permission("Delivery Note", throw=True)
     if not token:
         return {}
     return frappe.cache().get_value(_bulk_diff_gstin_progress_key(token)) or {}
