@@ -613,10 +613,14 @@ def get_party_names(party_keys) -> dict:
 def get_columns(filters, ranges=None) -> list:
 	columns = [
 		{
+			# Data, not a Link to DocType. Frappe treats a Link column as a linked doctype and
+			# demands read permission on it before returning any row, so "options": "DocType"
+			# made the whole report throw "No permission to read DocType" for anyone without
+			# DocType read — which is every ordinary Accounts User. The value is still a doctype
+			# name, so the Dynamic Link on `party` below keeps working.
 			"fieldname": "party_type",
 			"label": _("Party Type"),
-			"fieldtype": "Link",
-			"options": "DocType",
+			"fieldtype": "Data",
 			"width": 110,
 		},
 		{
