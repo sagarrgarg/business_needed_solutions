@@ -42,8 +42,16 @@ def _get_roles():
 
 @frappe.whitelist()
 def can_backfill_tds(user: str = None) -> bool:
+    # Answers False rather than throwing: every submitted Purchase Invoice form
+    # asks this to decide whether to draw the button.
+    if frappe.session.user == "Guest":
+        return False
     if not _feature_enabled():
         return False
+    # Only a System Manager may ask about somebody else; anyone else gets the
+    # answer for themselves, whatever `user` the request carried.
+    if user and user != frappe.session.user and "System Manager" not in frappe.get_roles():
+        user = None
     roles = set(frappe.get_roles(user or frappe.session.user))
     return "System Manager" in roles or bool(_get_roles() & roles)
 
@@ -326,10 +334,10 @@ def _persist_tds_row_and_totals(pi, tds_row):
     # apply_tds=1) for later invoices in the FY.
     updates["apply_tds"] = 1
     updates["tax_withholding_category"] = pi.get("tax_withholding_category")
-    if pi.get("round_off_applicable_accounts_for_tax_withholding"):
-        updates["round_off_applicable_accounts_for_tax_withholding"] = pi.get(
-            "round_off_applicable_accounts_for_tax_withholding"
-        )
+    # `round_off_applicable_accounts_for_tax_withholding` is NOT persisted: ERPNext
+    # sets it on the in-memory doc only (when the category has "Round Off Tax
+    # Amount"), there is no such column, and writing it threw 1054 for every
+    # round-off category. The rounding it drives is already in the totals above.
     frappe.db.set_value("Purchase Invoice", pi.name, updates, update_modified=True)
 
 
