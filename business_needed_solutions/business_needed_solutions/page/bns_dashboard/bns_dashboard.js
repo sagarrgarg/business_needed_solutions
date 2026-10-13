@@ -824,6 +824,26 @@ class BNSDashboard {
 								</div>
 							</div>
 
+							<div class="sub-section mb-3" id="subsection-suppliers-tds-redo">
+								<div class="sub-section-header d-flex justify-content-between align-items-center"
+									 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
+									 data-subsection="suppliers-tds-redo">
+									<strong>
+										<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-suppliers-tds-redo"></i>
+										${__("Suppliers Needing TDS Redo (category removed or changed)")}
+										<span class="badge badge-danger ml-2" id="badge-suppliers-tds-redo">0</span>
+									</strong>
+								</div>
+								<div class="sub-section-content" id="subcontent-suppliers-tds-redo" style="display: none; padding-top: 10px;">
+									<p class="text-muted" style="font-size: 0.8rem;">
+										${__("A supplier's TDS Category was removed or changed after TDS had already gone onto this fiscal year's invoices. Redo takes TDS off every one of those invoices and, if the supplier still has a category, applies it again from the first invoice of the year.")}
+									</p>
+									<div id="table-suppliers-tds-redo">
+										<p class="text-muted">${__("Loading...")}</p>
+									</div>
+								</div>
+							</div>
+
 							<div class="sub-section" id="subsection-all-suppliers-tds">
 								<div class="sub-section-header d-flex justify-content-between align-items-center"
 									 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
@@ -855,8 +875,94 @@ class BNSDashboard {
 		await Promise.all([
 			this.load_suppliers_missing_tds(),
 			this.load_pi_wrong_tds(),
+			this.load_suppliers_tds_redo(),
 			this.load_all_suppliers_tds(),
 		]);
+	}
+
+	async load_suppliers_tds_redo() {
+		const self = this;
+		if (!this._onTdsRedoComplete) {
+			this._onTdsRedoComplete = function (data) {
+				const d = data || {};
+				let msg = __("{0}: TDS removed from {1} invoice(s) ({2})", [frappe.utils.escape_html(d.supplier || ""), d.removed || 0, format_currency(d.removed_amount || 0)]);
+				if (d.category) {
+					msg += d.reapplied
+						? "<br>" + __("Applied again under {0} on {1} invoice(s) ({2})", [frappe.utils.escape_html(d.category), d.applied || 0, format_currency(d.applied_amount || 0)])
+						: "<br>" + __("NOT applied again, because some invoices could not be cleared.");
+				}
+				if (d.error_count) {
+					msg += "<br><br>" + __("{0} invoice(s) failed:", [d.error_count]) + "<br>" + (d.errors || []).slice(0, 10).map(function (e) {
+						return frappe.utils.escape_html(e.purchase_invoice + ": " + e.error);
+					}).join("<br>");
+				}
+				frappe.msgprint({ title: __("TDS Redo finished"), message: msg, indicator: d.error_count ? "orange" : "green" });
+				self.load_tds_fixables();
+			};
+			frappe.realtime.on("bns_tds_redo_complete", this._onTdsRedoComplete);
+		}
+		try {
+			const result = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.overrides.tds_backfill.get_suppliers_needing_tds_redo",
+				args: { company: this.get_company() },
+			});
+			const data = result.message || {};
+			this.wrapper.find("#badge-suppliers-tds-redo").text(data.count || 0);
+			this.render_suppliers_tds_redo_table(data.suppliers || []);
+		} catch (e) {
+			console.error("Failed to load suppliers needing TDS redo:", e);
+			this.wrapper.find("#table-suppliers-tds-redo").html('<p class="text-danger">' + __("Failed to load data") + "</p>");
+		}
+	}
+
+	render_suppliers_tds_redo_table(suppliers) {
+		const container = this.wrapper.find("#table-suppliers-tds-redo");
+		if (!suppliers || suppliers.length === 0) {
+			container.html('<p class="text-success mb-0">' + __("No supplier's invoices disagree with its TDS Category.") + "</p>");
+			return;
+		}
+		const self = this;
+		let html = '<table class="table table-sm"><thead><tr>';
+		html += "<th>" + __("Supplier") + "</th><th>" + __("Reason") + "</th><th>" + __("On invoices → Supplier now") + "</th><th>" + __("Invoices") + "</th><th>" + __("TDS on them") + '</th><th style="width: 90px;"></th></tr></thead><tbody>';
+		suppliers.forEach(function (s) {
+			html += "<tr>";
+			html += '<td><a href="/app/supplier/' + encodeURIComponent(s.supplier) + '" target="_blank">' + frappe.utils.escape_html(s.supplier_name || s.supplier) + "</a></td>";
+			html += '<td><span class="badge badge-' + (s.supplier_category ? "warning" : "danger") + '">' + frappe.utils.escape_html(s.reason || "") + "</span></td>";
+			html += '<td><small><span class="text-danger">' + frappe.utils.escape_html(s.invoice_categories || "—") + '</span> → <span class="text-success">' + frappe.utils.escape_html(s.supplier_category || __("none")) + "</span></small></td>";
+			html += "<td>" + (s.invoices || 0) + "</td>";
+			html += "<td>" + format_currency(s.tds_amount || 0) + "</td>";
+			html += '<td><button class="btn btn-danger btn-xs btn-redo-tds" data-supplier="' + frappe.utils.escape_html(s.supplier) + '" data-name="' + frappe.utils.escape_html(s.supplier_name || s.supplier) + '" data-category="' + frappe.utils.escape_html(s.supplier_category || "") + '" data-invoices="' + (s.invoices || 0) + '">' + __("Redo all") + "</button></td>";
+			html += "</tr>";
+		});
+		html += "</tbody></table>";
+		container.html(html);
+		container.find(".btn-redo-tds").on("click", function () {
+			self.redo_supplier_tds($(this));
+		});
+	}
+
+	redo_supplier_tds(btn) {
+		const supplier = btn.data("supplier");
+		const category = btn.data("category");
+		const self = this;
+		const what = category
+			? __("TDS will be taken off this fiscal year's invoices of {0} and applied again under {1}, from the first invoice of the year. Payments on invoices that get TDS are unreconciled first.", [frappe.utils.escape_html(btn.data("name")), frappe.utils.escape_html(category)])
+			: __("{0} has no TDS Category now. TDS will be taken off {1} invoice(s) of this fiscal year and not applied again.", [frappe.utils.escape_html(btn.data("name")), btn.data("invoices")]);
+		frappe.confirm(
+			what + "<br><br>" + __("This changes posted ledgers, including months whose TDS may already be deposited or filed. Runs in the background."),
+			async function () {
+				btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> ' + __("Queued"));
+				try {
+					await frappe.call({
+						method: "business_needed_solutions.business_needed_solutions.overrides.tds_backfill.redo_supplier_tds",
+						args: { supplier: supplier, company: self.get_company() },
+					});
+					frappe.show_alert({ message: __("TDS redo queued. You will get a message when it finishes."), indicator: "blue" }, 6);
+				} catch (e) {
+					btn.prop("disabled", false).text(__("Redo all"));
+				}
+			}
+		);
 	}
 
 	async load_tax_withholding_categories() {

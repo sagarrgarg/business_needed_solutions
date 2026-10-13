@@ -18,7 +18,7 @@ Manager always allowed). Frozen accounting periods are refused. PREVIEW first.
 
 import frappe
 from frappe import _
-from frappe.utils import cint, flt, getdate
+from frappe.utils import cint, cstr, flt, getdate
 
 
 def _feature_enabled() -> bool:
@@ -305,7 +305,7 @@ def reverse_tds_backfill(name):
     return reverse_tds_backfill_on_pi(name)
 
 
-def reverse_tds_backfill_on_pi(name):
+def reverse_tds_backfill_on_pi(name, allow_native=False):
     """Exact inverse of backfill_tds_on_pi, step for step and by the same means.
 
     Forward did: (1) unreconcile payments, (2) append the TDS row and let ERPNext
@@ -318,8 +318,9 @@ def reverse_tds_backfill_on_pi(name):
     which payment belongs where is the accountant's call, and the audit log of
     the original backfill names them.
 
-    Only a TDS row the backfill added is touched. A row booked at submit has no
-    "TDS backfill" GL behind it and is refused - that one is a cancel-and-amend.
+    Only a TDS row the backfill added is touched, unless `allow_native` is set: a
+    row booked at submit has no "TDS backfill" GL behind it, and is refused here
+    and removed only by the supplier-wide redo, which posts the opposite pair.
     An invoice the backfill merely flagged (nothing was due) has its flags cleared.
     """
     from erpnext.accounts.general_ledger import make_reverse_gl_entries
@@ -332,8 +333,12 @@ def reverse_tds_backfill_on_pi(name):
     tds_row = _existing_tds_row(pi)
     gl_rows = _backfill_gl_rows(name)
 
-    if tds_row and not gl_rows:
+    if tds_row and not gl_rows and not allow_native:
         return {"changed": False, "reason": _("TDS row was not added by a backfill; cancel and amend instead.")}
+    if pi.get("advance_tax"):
+        # TDS already withheld on an advance and allocated here. Unpicking that is
+        # a Payment Entry question, not an invoice one.
+        return {"changed": False, "reason": _("TDS on this invoice is allocated from an advance; fix by hand.")}
     if not tds_row and gl_rows:
         frappe.throw(_("{0} has backfill GL but no TDS row. Needs a manual look.").format(name))
     if not tds_row and not cint(pi.apply_tds) and not pi.tax_withholding_category:
@@ -342,19 +347,26 @@ def reverse_tds_backfill_on_pi(name):
     tds_amt = 0.0
     if tds_row:
         tds_amt = flt(tds_row.base_tax_amount or tds_row.tax_amount)
-        posted = sum(flt(g.credit) for g in gl_rows)
-        if len(gl_rows) != 2 or abs(posted - tds_amt) > 0.01:
-            frappe.throw(
-                _("{0}: backfill GL ({1} rows, {2}) does not match the TDS row ({3}). Needs a manual look.")
-                .format(name, len(gl_rows), posted, tds_amt)
-            )
         old_grand = flt(pi.grand_total)
 
-        # 3') the two GL legs, and with them the Payment Ledger Entry
-        make_reverse_gl_entries(gl_entries=gl_rows)
+        if gl_rows:
+            posted = sum(flt(g.credit) for g in gl_rows)
+            if len(gl_rows) != 2 or abs(posted - tds_amt) > 0.01:
+                frappe.throw(
+                    _("{0}: backfill GL ({1} rows, {2}) does not match the TDS row ({3}). Needs a manual look.")
+                    .format(name, len(gl_rows), posted, tds_amt)
+                )
+            # 3') the two GL legs, and with them the Payment Ledger Entry
+            make_reverse_gl_entries(gl_entries=gl_rows)
+        else:
+            # Booked at submit: the TDS is inside the invoice's own GL, so there
+            # is nothing of ours to cancel. Post the opposite pair instead - the
+            # supplier is owed the amount again, and TDS payable gives it back.
+            _post_incremental_tds_gl(pi, tds_row.account_head, tds_amt, removing=True)
 
         # 2') the row, then ERPNext's own totals without it
         frappe.db.delete("Purchase Taxes and Charges", {"name": tds_row.name})
+        frappe.db.delete("Tax Withheld Vouchers", {"parent": name, "parenttype": "Purchase Invoice"})
         pi = frappe.get_doc("Purchase Invoice", name)
         pi.apply_tds = 0
         pi.tax_withholding_category = None
@@ -392,6 +404,158 @@ def reverse_tds_backfill_on_pi(name):
         "new_grand_total": new_grand,
         "new_outstanding": flt(frappe.db.get_value("Purchase Invoice", name, "outstanding_amount")),
     }
+
+
+def _current_fy(company):
+    from erpnext.accounts.utils import get_fiscal_year
+    from frappe.utils import today
+
+    fy = get_fiscal_year(today(), company=company)
+    return fy[1], fy[2]
+
+
+def _default_company(company=None):
+    return (
+        company
+        or frappe.defaults.get_user_default("Company")
+        or frappe.db.get_single_value("Global Defaults", "default_company")
+    )
+
+
+@frappe.whitelist()
+def get_suppliers_needing_tds_redo(company=None):
+    """Suppliers whose TDS category was REMOVED or CHANGED after TDS had already
+    gone onto their invoices this fiscal year. Each one is offered a redo."""
+    _bns_require_read()
+    if not can_backfill_tds():
+        return {"count": 0, "suppliers": []}
+    company = _default_company(company)
+    fy_start, fy_end = _current_fy(company)
+    rows = frappe.db.sql(
+        """
+        SELECT
+            pi.supplier,
+            MAX(pi.supplier_name) AS supplier_name,
+            IFNULL(MAX(s.tax_withholding_category), '') AS supplier_category,
+            GROUP_CONCAT(DISTINCT NULLIF(pi.tax_withholding_category, '') SEPARATOR ', ') AS invoice_categories,
+            COUNT(*) AS invoices,
+            SUM((
+                SELECT IFNULL(SUM(t.base_tax_amount), 0)
+                FROM `tabPurchase Taxes and Charges` t
+                WHERE t.parent = pi.name AND t.parenttype = 'Purchase Invoice'
+                    AND t.is_tax_withholding_account = 1
+            )) AS tds_amount
+        FROM `tabPurchase Invoice` pi
+        INNER JOIN `tabSupplier` s ON s.name = pi.supplier
+        WHERE
+            pi.docstatus = 1
+            AND pi.company = %(company)s
+            AND pi.posting_date BETWEEN %(fy_start)s AND %(fy_end)s
+            AND (
+                (
+                    IFNULL(pi.tax_withholding_category, '') != IFNULL(s.tax_withholding_category, '')
+                    AND IFNULL(pi.tax_withholding_category, '') != ''
+                )
+                OR (IFNULL(s.tax_withholding_category, '') = '' AND pi.apply_tds = 1)
+            )
+        GROUP BY pi.supplier
+        ORDER BY supplier_name
+        LIMIT 500
+        """,
+        {"company": company, "fy_start": fy_start, "fy_end": fy_end},
+        as_dict=True,
+    )
+    for r in rows:
+        r["reason"] = _("Category removed") if not r["supplier_category"] else _("Category changed")
+        r["tds_amount"] = flt(r["tds_amount"], 2)
+    return {
+        "count": len(rows), "suppliers": rows, "company": company,
+        "fiscal_year_start": str(fy_start), "fiscal_year_end": str(fy_end),
+    }
+
+
+@frappe.whitelist()
+def redo_supplier_tds(supplier, company=None):
+    """Redo TDS on every current-fiscal-year invoice of one supplier, to match the
+    supplier's category as it stands NOW: no category -> TDS comes off; a different
+    category -> TDS comes off and is applied afresh. Runs in the background."""
+    _bns_require_write()
+    if not can_backfill_tds():
+        frappe.throw(
+            _("You are not permitted to redo TDS (feature disabled or role missing)."),
+            frappe.PermissionError,
+        )
+    if not frappe.db.exists("Supplier", supplier):
+        frappe.throw(_("Supplier {0} does not exist.").format(supplier))
+    company = _default_company(company)
+    frappe.enqueue(
+        _redo_supplier_tds,
+        queue="long",
+        timeout=3600,
+        job_id=f"bns_tds_redo::{company}::{supplier}",
+        deduplicate=True,
+        supplier=supplier,
+        company=company,
+        user=frappe.session.user,
+    )
+    return {"status": "queued", "supplier": supplier}
+
+
+def _redo_supplier_tds(supplier, company, user=None):
+    """Worker. Two passes, and the order is the point.
+
+    ERPNext's threshold is cumulative over the supplier's year, and it reads the
+    invoices that already carry TDS. So every invoice is cleared FIRST, newest to
+    oldest, and only then is TDS applied again, oldest to newest - otherwise an
+    invoice is judged against a year that is half old category and half new.
+    If anything fails to clear, nothing is re-applied: a partial year would give
+    wrong amounts that look right.
+    """
+    fy_start, fy_end = _current_fy(company)
+    base = {"supplier": supplier, "company": company, "docstatus": 1,
+            "posting_date": ["between", [fy_start, fy_end]]}
+    all_pis = frappe.get_all("Purchase Invoice", filters=base, fields=["name", "apply_tds", "tax_withholding_category"],
+                             order_by="posting_date asc, name asc")
+    category = frappe.db.get_value("Supplier", supplier, "tax_withholding_category")
+
+    removed, removed_amt, applied, applied_amt, errors = 0, 0.0, 0, 0.0, []
+
+    for row in reversed(all_pis):
+        try:
+            res = reverse_tds_backfill_on_pi(row.name, allow_native=True)
+            if res.get("changed"):
+                removed += 1
+                removed_amt += flt(res.get("tds_reversed"))
+            elif cint(row.apply_tds) or row.tax_withholding_category:
+                # still flagged and we could not clear it - say why, and stop short
+                errors.append({"purchase_invoice": row.name, "error": cstr(res.get("reason"))})
+        except Exception as e:
+            frappe.db.rollback()
+            errors.append({"purchase_invoice": row.name, "error": cstr(e)})
+
+    reapplied = bool(category) and not errors
+    if reapplied:
+        for row in all_pis:
+            try:
+                res = backfill_tds_on_pi(row.name)
+                if res.get("changed"):
+                    applied += 1
+                    applied_amt += flt(res.get("tds_amount"))
+            except Exception as e:
+                frappe.db.rollback()
+                errors.append({"purchase_invoice": row.name, "error": cstr(e)})
+
+    frappe.db.commit()
+    summary = {
+        "supplier": supplier, "category": category or "", "invoices": len(all_pis),
+        "removed": removed, "removed_amount": flt(removed_amt, 2),
+        "applied": applied, "applied_amount": flt(applied_amt, 2),
+        "reapplied": reapplied,
+        "error_count": len(errors), "errors": errors[:50],
+    }
+    frappe.log_error(message=frappe.as_json(summary), title="BNS TDS Redo")
+    frappe.publish_realtime("bns_tds_redo_complete", summary, user=user)
+    return summary
 
 
 def repair_tds_totals_on_pi(name):
@@ -481,10 +645,41 @@ def _persist_tds_row_and_totals(pi, tds_row):
     frappe.db.set_value("Purchase Invoice", pi.name, updates, update_modified=True)
 
 
-def _post_incremental_tds_gl(pi, tds_account, tds_amt):
+def _post_incremental_tds_gl(pi, tds_account, tds_amt, removing=False):
     """Post ONLY the TDS legs: Dr Creditors(party) / Cr TDS payable. GST/expense
-    legs stay as-is, so Input Tax / ITC is never re-posted."""
+    legs stay as-is, so Input Tax / ITC is never re-posted. `removing` posts the
+    same pair the other way round, for a TDS row that was booked at submit."""
     from erpnext.accounts.general_ledger import make_gl_entries
+
+    if removing:
+        gl = [
+            pi.get_gl_dict(
+                {
+                    "account": pi.credit_to,
+                    "party_type": "Supplier",
+                    "party": pi.supplier,
+                    "against": tds_account,
+                    "credit": tds_amt,
+                    "credit_in_account_currency": tds_amt,
+                    "against_voucher": pi.name,
+                    "against_voucher_type": "Purchase Invoice",
+                    "cost_center": pi.get("cost_center"),
+                    "remarks": _("TDS removal"),
+                },
+            ),
+            pi.get_gl_dict(
+                {
+                    "account": tds_account,
+                    "against": pi.supplier,
+                    "debit": tds_amt,
+                    "debit_in_account_currency": tds_amt,
+                    "cost_center": pi.get("cost_center"),
+                    "remarks": _("TDS removal"),
+                },
+            ),
+        ]
+        make_gl_entries(gl, merge_entries=False)
+        return
 
     gl = [
         pi.get_gl_dict(
