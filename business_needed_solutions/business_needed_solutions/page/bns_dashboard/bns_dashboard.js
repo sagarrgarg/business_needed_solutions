@@ -844,6 +844,31 @@ class BNSDashboard {
 								</div>
 							</div>
 
+							<div class="sub-section mb-3" id="subsection-tds-account-remap">
+								<div class="sub-section-header d-flex justify-content-between align-items-center"
+									 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
+									 data-subsection="tds-account-remap">
+									<strong>
+										<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-tds-account-remap"></i>
+										${__("Invoices on an Old TDS Account")}
+										<span class="badge badge-warning ml-2" id="badge-tds-account-remap">0</span>
+									</strong>
+								</div>
+								<div class="sub-section-content" id="subcontent-tds-account-remap" style="display: none; padding-top: 10px;">
+									<p class="text-muted" style="font-size: 0.8rem;">
+										${__("The account on a Tax Withholding Category was changed after these invoices were booked. Re-map moves each invoice's TDS to the category's current account. The amount, the supplier's balance and payments are not touched.")}
+									</p>
+									<div class="mb-2">
+										<button class="btn btn-primary btn-xs" id="btn-remap-tds-accounts" disabled>
+											<i class="fa fa-exchange"></i> ${__("Re-map all")}
+										</button>
+									</div>
+									<div id="table-tds-account-remap">
+										<p class="text-muted">${__("Loading...")}</p>
+									</div>
+								</div>
+							</div>
+
 							<div class="sub-section" id="subsection-all-suppliers-tds">
 								<div class="sub-section-header d-flex justify-content-between align-items-center"
 									 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
@@ -876,8 +901,68 @@ class BNSDashboard {
 			this.load_suppliers_missing_tds(),
 			this.load_pi_wrong_tds(),
 			this.load_suppliers_tds_redo(),
+			this.load_tds_account_remap(),
 			this.load_all_suppliers_tds(),
 		]);
+	}
+
+	async load_tds_account_remap() {
+		const self = this;
+		const btn = this.wrapper.find("#btn-remap-tds-accounts");
+		if (!this._onTdsRemapComplete) {
+			this._onTdsRemapComplete = function (data) {
+				const d = data || {};
+				let msg = __("{0} of {1} invoice(s) moved to the mapped account ({2}).", [d.remapped || 0, d.invoices || 0, format_currency(d.amount || 0)]);
+				if (d.error_count) {
+					msg += "<br><br>" + __("{0} invoice(s) failed:", [d.error_count]) + "<br>" + (d.errors || []).slice(0, 10).map(function (e) {
+						return frappe.utils.escape_html(e.purchase_invoice + ": " + e.error);
+					}).join("<br>");
+				}
+				frappe.msgprint({ title: __("TDS account re-map finished"), message: msg, indicator: d.error_count ? "orange" : "green" });
+				self.load_tds_account_remap();
+			};
+			frappe.realtime.on("bns_tds_remap_complete", this._onTdsRemapComplete);
+			btn.on("click", function () {
+				frappe.confirm(
+					__("Move the TDS on every listed invoice to its category's current account? One transfer pair is posted per invoice, on the invoice's date. Runs in the background."),
+					async function () {
+						btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> ' + __("Queued"));
+						try {
+							await frappe.call({
+								method: "business_needed_solutions.business_needed_solutions.overrides.tds_backfill.remap_tds_accounts",
+								args: { company: self.get_company() },
+							});
+							frappe.show_alert({ message: __("Re-map queued. You will get a message when it finishes."), indicator: "blue" }, 6);
+						} catch (e) {
+							btn.prop("disabled", false).html('<i class="fa fa-exchange"></i> ' + __("Re-map all"));
+						}
+					}
+				);
+			});
+		}
+		const container = this.wrapper.find("#table-tds-account-remap");
+		try {
+			const result = await frappe.call({
+				method: "business_needed_solutions.business_needed_solutions.overrides.tds_backfill.get_tds_account_remap_summary",
+				args: { company: this.get_company() },
+			});
+			const data = result.message || {};
+			this.wrapper.find("#badge-tds-account-remap").text(data.count || 0);
+			btn.prop("disabled", !(data.count > 0)).html('<i class="fa fa-exchange"></i> ' + __("Re-map all"));
+			if (!data.groups || data.groups.length === 0) {
+				container.html('<p class="text-success mb-0">' + __("Every invoice's TDS is on its category's account.") + "</p>");
+				return;
+			}
+			let html = '<table class="table table-sm"><thead><tr><th>' + __("Category") + "</th><th>" + __("On invoices") + "</th><th>" + __("Category account now") + "</th><th>" + __("Invoices") + "</th><th>" + __("TDS") + "</th></tr></thead><tbody>";
+			data.groups.forEach(function (g) {
+				html += "<tr><td>" + frappe.utils.escape_html(g.category || "") + '</td><td><span class="text-danger">' + frappe.utils.escape_html(g.old_account || "") + '</span></td><td><span class="text-success">' + frappe.utils.escape_html(g.new_account || "") + "</span></td><td>" + (g.invoices || 0) + "</td><td>" + format_currency(g.amount || 0) + "</td></tr>";
+			});
+			html += "</tbody></table>";
+			container.html(html);
+		} catch (e) {
+			console.error("Failed to load TDS account remap:", e);
+			container.html('<p class="text-danger">' + __("Failed to load data") + "</p>");
+		}
 	}
 
 	async load_suppliers_tds_redo() {

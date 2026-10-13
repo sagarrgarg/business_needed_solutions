@@ -259,6 +259,7 @@ def backfill_tds_on_pi(name):
 
 
 BACKFILL_REMARK = "TDS backfill"
+REMAP_REMARK = "TDS account remap"
 
 _HEADER_TOTAL_FIELDS = (
     "taxes_and_charges_added", "base_taxes_and_charges_added",
@@ -280,13 +281,14 @@ def _is_internal_transfer(pi) -> bool:
     return bool(supplier_pan) and supplier_pan == company_pan
 
 
-def _backfill_gl_rows(name):
-    """The two legs the backfill posted for this PI that are still live."""
+def _backfill_gl_rows(name, remark=None):
+    """The two legs the backfill posted for this PI that are still live. With
+    `remark`, the live legs of one of our other postings instead."""
     return frappe.get_all(
         "GL Entry",
         filters={
             "voucher_type": "Purchase Invoice", "voucher_no": name,
-            "remarks": BACKFILL_REMARK, "is_cancelled": 0,
+            "remarks": remark or BACKFILL_REMARK, "is_cancelled": 0,
         },
         fields=["*"],
         order_by="creation asc, name asc",
@@ -356,8 +358,10 @@ def reverse_tds_backfill_on_pi(name, allow_native=False):
                     _("{0}: backfill GL ({1} rows, {2}) does not match the TDS row ({3}). Needs a manual look.")
                     .format(name, len(gl_rows), posted, tds_amt)
                 )
-            # 3') the two GL legs, and with them the Payment Ledger Entry
-            make_reverse_gl_entries(gl_entries=gl_rows)
+            # 3') the two GL legs, and with them the Payment Ledger Entry. If the
+            # TDS was later moved to another account, that pair goes with them -
+            # left behind it would be a transfer of an amount that no longer exists.
+            make_reverse_gl_entries(gl_entries=gl_rows + _backfill_gl_rows(name, REMAP_REMARK))
         else:
             # Booked at submit: the TDS is inside the invoice's own GL, so there
             # is nothing of ours to cancel. Post the opposite pair instead - the
@@ -555,6 +559,174 @@ def _redo_supplier_tds(supplier, company, user=None):
     }
     frappe.log_error(message=frappe.as_json(summary), title="BNS TDS Redo")
     frappe.publish_realtime("bns_tds_redo_complete", summary, user=user)
+    return summary
+
+
+def _category_account(category, company):
+    return frappe.db.get_value(
+        "Tax Withholding Account", {"parent": category, "company": company}, "account"
+    )
+
+
+def remap_tds_account_on_pi(name):
+    """Move one invoice's TDS to the account its category is mapped to NOW.
+
+    The Tax Withholding Category's account was corrected after invoices had been
+    booked on the old one. Nothing about the tax changes - not the amount, not the
+    supplier's balance, not outstanding - so this is the smallest thing that is
+    still true everywhere: the tax row names the new account, and one pair on the
+    invoice's own date carries the amount from the old account to the new. A later
+    ledger repost rebuilds from the row and lands on the new account by itself.
+    """
+    from erpnext.accounts.general_ledger import make_gl_entries
+
+    pi = frappe.get_doc("Purchase Invoice", name)
+    if pi.docstatus != 1:
+        return {"changed": False, "reason": _("Not submitted")}
+    tds_row = _existing_tds_row(pi)
+    if not tds_row:
+        return {"changed": False, "reason": _("No TDS row")}
+    if not pi.tax_withholding_category:
+        return {"changed": False, "reason": _("No TDS Category on the invoice")}
+    new_account = _category_account(pi.tax_withholding_category, pi.company)
+    old_account = tds_row.account_head
+    if not new_account:
+        return {"changed": False, "reason": _("Category has no account for this company")}
+    if new_account == old_account:
+        return {"changed": False, "reason": _("Already on the mapped account")}
+    _check_not_frozen(pi.posting_date)
+
+    amt = flt(tds_row.base_tax_amount or tds_row.tax_amount)
+    booked = flt(frappe.db.sql(
+        """
+        SELECT IFNULL(SUM(credit - debit), 0) FROM `tabGL Entry`
+        WHERE voucher_type = 'Purchase Invoice' AND voucher_no = %s
+            AND account = %s AND is_cancelled = 0
+        """,
+        (name, old_account),
+    )[0][0])
+    if abs(booked - amt) > 0.01:
+        frappe.throw(
+            _("{0}: {1} holds {2} for this invoice, the TDS row says {3}. Needs a manual look.")
+            .format(name, old_account, booked, amt)
+        )
+
+    gl = [
+        pi.get_gl_dict({
+            "account": old_account, "against": new_account,
+            "debit": amt, "debit_in_account_currency": amt,
+            "cost_center": tds_row.cost_center or pi.get("cost_center"),
+            "remarks": REMAP_REMARK,
+        }),
+        pi.get_gl_dict({
+            "account": new_account, "against": old_account,
+            "credit": amt, "credit_in_account_currency": amt,
+            "cost_center": tds_row.cost_center or pi.get("cost_center"),
+            "remarks": REMAP_REMARK,
+        }),
+    ]
+    make_gl_entries(gl, merge_entries=False)
+    frappe.db.set_value(
+        "Purchase Taxes and Charges", tds_row.name, "account_head", new_account, update_modified=False
+    )
+    frappe.db.commit()
+    return {"changed": True, "amount": amt, "from_account": old_account, "to_account": new_account}
+
+
+_REMAP_FROM = """
+    FROM `tabPurchase Invoice` pi
+    INNER JOIN `tabPurchase Taxes and Charges` t
+        ON t.parent = pi.name AND t.parenttype = 'Purchase Invoice' AND t.is_tax_withholding_account = 1
+    INNER JOIN `tabTax Withholding Account` a
+        ON a.parent = pi.tax_withholding_category AND a.company = pi.company
+    WHERE
+        pi.docstatus = 1
+        AND pi.company = %(company)s
+        AND pi.posting_date BETWEEN %(fy_start)s AND %(fy_end)s
+        AND a.account != t.account_head
+"""
+
+
+@frappe.whitelist()
+def get_tds_account_remap_summary(company=None):
+    """Current-fiscal-year invoices whose TDS sits on an account other than the
+    one their category is mapped to now, grouped by category and account."""
+    _bns_require_read()
+    if not can_backfill_tds():
+        return {"count": 0, "groups": []}
+    company = _default_company(company)
+    fy_start, fy_end = _current_fy(company)
+    groups = frappe.db.sql(
+        """
+        SELECT
+            pi.tax_withholding_category AS category,
+            t.account_head AS old_account,
+            a.account AS new_account,
+            COUNT(*) AS invoices,
+            SUM(t.base_tax_amount) AS amount
+        """ + _REMAP_FROM + """
+        GROUP BY pi.tax_withholding_category, t.account_head, a.account
+        ORDER BY pi.tax_withholding_category, t.account_head
+        """,
+        {"company": company, "fy_start": fy_start, "fy_end": fy_end},
+        as_dict=True,
+    )
+    for g in groups:
+        g["amount"] = flt(g["amount"], 2)
+    return {
+        "count": sum(cint(g["invoices"]) for g in groups),
+        "amount": flt(sum(g["amount"] for g in groups), 2),
+        "groups": groups,
+        "company": company,
+    }
+
+
+@frappe.whitelist()
+def remap_tds_accounts(company=None):
+    """Re-map every such invoice of the current fiscal year. Background job."""
+    _bns_require_write()
+    if not can_backfill_tds():
+        frappe.throw(
+            _("You are not permitted to re-map TDS accounts (feature disabled or role missing)."),
+            frappe.PermissionError,
+        )
+    company = _default_company(company)
+    frappe.enqueue(
+        _remap_tds_accounts,
+        queue="long",
+        timeout=3600,
+        job_id=f"bns_tds_remap::{company}",
+        deduplicate=True,
+        company=company,
+        user=frappe.session.user,
+    )
+    return {"status": "queued"}
+
+
+def _remap_tds_accounts(company, user=None):
+    fy_start, fy_end = _current_fy(company)
+    names = frappe.db.sql(
+        "SELECT pi.name " + _REMAP_FROM + " ORDER BY pi.posting_date, pi.name",
+        {"company": company, "fy_start": fy_start, "fy_end": fy_end},
+        pluck=True,
+    )
+    done, amount, errors = 0, 0.0, []
+    for name in names:
+        try:
+            res = remap_tds_account_on_pi(name)
+            if res.get("changed"):
+                done += 1
+                amount += flt(res.get("amount"))
+        except Exception as e:
+            frappe.db.rollback()
+            errors.append({"purchase_invoice": name, "error": cstr(e)})
+    frappe.db.commit()
+    summary = {
+        "invoices": len(names), "remapped": done, "amount": flt(amount, 2),
+        "error_count": len(errors), "errors": errors[:50],
+    }
+    frappe.log_error(message=frappe.as_json(summary), title="BNS TDS Account Remap")
+    frappe.publish_realtime("bns_tds_remap_complete", summary, user=user)
     return summary
 
 
