@@ -194,6 +194,10 @@ def backfill_tds_on_pi(name):
     if pi.docstatus != 1:
         frappe.throw(_("Purchase Invoice {0} is not submitted.").format(name))
     _check_not_frozen(pi.posting_date)
+    if _is_internal_transfer(pi):
+        # A branch of the same company is not a deductee: the "supplier" shares
+        # our PAN, and withholding on it only moves money between our own books.
+        return {"changed": False, "reason": _("Internal transfer - TDS does not apply.")}
     if _existing_tds_row(pi):
         return {"changed": False, "reason": _("Already has a tax-withholding row.")}
 
@@ -251,6 +255,142 @@ def backfill_tds_on_pi(name):
         "tds_account": tds_account,
         "unreconciled": unrec,
         "new_grand_total": flt(pi.grand_total),
+    }
+
+
+BACKFILL_REMARK = "TDS backfill"
+
+_HEADER_TOTAL_FIELDS = (
+    "taxes_and_charges_added", "base_taxes_and_charges_added",
+    "taxes_and_charges_deducted", "base_taxes_and_charges_deducted",
+    "total_taxes_and_charges", "base_total_taxes_and_charges",
+    "grand_total", "base_grand_total",
+    "rounding_adjustment", "base_rounding_adjustment",
+    "rounded_total", "base_rounded_total",
+)
+
+
+def _is_internal_transfer(pi) -> bool:
+    """A purchase from a branch of the same legal entity (BNS internal supplier,
+    ERPNext internal supplier, or simply a supplier carrying the company's PAN)."""
+    if cint(pi.get("is_bns_internal_supplier")) or cint(pi.get("is_internal_supplier")):
+        return True
+    supplier_pan = (frappe.db.get_value("Supplier", pi.supplier, "pan") or "").strip().upper()
+    company_pan = (frappe.db.get_value("Company", pi.company, "pan") or "").strip().upper()
+    return bool(supplier_pan) and supplier_pan == company_pan
+
+
+def _backfill_gl_rows(name):
+    """The two legs the backfill posted for this PI that are still live."""
+    return frappe.get_all(
+        "GL Entry",
+        filters={
+            "voucher_type": "Purchase Invoice", "voucher_no": name,
+            "remarks": BACKFILL_REMARK, "is_cancelled": 0,
+        },
+        fields=["*"],
+        order_by="creation asc, name asc",
+    )
+
+
+@frappe.whitelist()
+def reverse_tds_backfill(name):
+    """Undo a TDS backfill on a submitted PI. Same gate as applying one."""
+    _bns_require_write()
+    if not can_backfill_tds():
+        frappe.throw(
+            _("You are not permitted to reverse a TDS backfill (feature disabled or role missing)."),
+            frappe.PermissionError,
+        )
+    return reverse_tds_backfill_on_pi(name)
+
+
+def reverse_tds_backfill_on_pi(name):
+    """Exact inverse of backfill_tds_on_pi, step for step and by the same means.
+
+    Forward did: (1) unreconcile payments, (2) append the TDS row and let ERPNext
+    recompute totals, persist row + header, (3) post two GL legs through
+    make_gl_entries (which also wrote a Payment Ledger Entry), (4) refresh
+    outstanding. So this (3') reverses those two legs through ERPNext's own
+    make_reverse_gl_entries - which delinks the Payment Ledger Entry too -
+    (2') deletes the row and lets ERPNext recompute the totals without it, and
+    (4') refreshes outstanding. Payments unreconciled in step 1 are NOT re-linked:
+    which payment belongs where is the accountant's call, and the audit log of
+    the original backfill names them.
+
+    Only a TDS row the backfill added is touched. A row booked at submit has no
+    "TDS backfill" GL behind it and is refused - that one is a cancel-and-amend.
+    An invoice the backfill merely flagged (nothing was due) has its flags cleared.
+    """
+    from erpnext.accounts.general_ledger import make_reverse_gl_entries
+
+    pi = frappe.get_doc("Purchase Invoice", name)
+    if pi.docstatus != 1:
+        frappe.throw(_("Purchase Invoice {0} is not submitted.").format(name))
+    _check_not_frozen(pi.posting_date)
+
+    tds_row = _existing_tds_row(pi)
+    gl_rows = _backfill_gl_rows(name)
+
+    if tds_row and not gl_rows:
+        return {"changed": False, "reason": _("TDS row was not added by a backfill; cancel and amend instead.")}
+    if not tds_row and gl_rows:
+        frappe.throw(_("{0} has backfill GL but no TDS row. Needs a manual look.").format(name))
+    if not tds_row and not cint(pi.apply_tds) and not pi.tax_withholding_category:
+        return {"changed": False, "reason": _("No backfilled TDS on this invoice.")}
+
+    tds_amt = 0.0
+    if tds_row:
+        tds_amt = flt(tds_row.base_tax_amount or tds_row.tax_amount)
+        posted = sum(flt(g.credit) for g in gl_rows)
+        if len(gl_rows) != 2 or abs(posted - tds_amt) > 0.01:
+            frappe.throw(
+                _("{0}: backfill GL ({1} rows, {2}) does not match the TDS row ({3}). Needs a manual look.")
+                .format(name, len(gl_rows), posted, tds_amt)
+            )
+        old_grand = flt(pi.grand_total)
+
+        # 3') the two GL legs, and with them the Payment Ledger Entry
+        make_reverse_gl_entries(gl_entries=gl_rows)
+
+        # 2') the row, then ERPNext's own totals without it
+        frappe.db.delete("Purchase Taxes and Charges", {"name": tds_row.name})
+        pi = frappe.get_doc("Purchase Invoice", name)
+        pi.apply_tds = 0
+        pi.tax_withholding_category = None
+        pi.calculate_taxes_and_totals()
+        updates = {f: flt(pi.get(f)) for f in _HEADER_TOTAL_FIELDS}
+    else:
+        old_grand = flt(pi.grand_total)
+        updates = {}
+
+    updates["apply_tds"] = 0
+    updates["tax_withholding_category"] = None
+    frappe.db.set_value("Purchase Invoice", name, updates, update_modified=True)
+
+    # 4') outstanding from the whole party ledger of this voucher. No account
+    # filter: an internal invoice's payable sits in the internal creditor account,
+    # not in `credit_to`, and filtering on `credit_to` is what left these invoices
+    # showing minus-the-TDS as their outstanding.
+    if tds_row:
+        from erpnext.accounts.utils import update_voucher_outstanding
+
+        update_voucher_outstanding("Purchase Invoice", name, None, "Supplier", pi.supplier)
+
+    frappe.db.commit()
+    new_grand = flt(frappe.db.get_value("Purchase Invoice", name, "grand_total"))
+    frappe.log_error(
+        message=(
+            "TDS backfill REVERSED %s: tds=%s grand %s->%s by %s"
+            % (name, tds_amt, old_grand, new_grand, frappe.session.user)
+        ),
+        title="BNS TDS Backfill Reversed",
+    )
+    return {
+        "changed": True,
+        "tds_reversed": tds_amt,
+        "new_grand_total": new_grand,
+        "new_outstanding": flt(frappe.db.get_value("Purchase Invoice", name, "outstanding_amount")),
     }
 
 
