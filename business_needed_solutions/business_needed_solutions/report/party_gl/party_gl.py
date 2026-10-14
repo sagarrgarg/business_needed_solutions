@@ -163,12 +163,31 @@ def get_result(filters, account_details):
 	if filters.get("show_tds_breakup", 1):
 		data = inject_tds_breakup(data, filters)
 
+	# In account currency, pure company-currency lines (FX gain/loss: 0 FC, non-zero INR)
+	# carry nothing to show; drop them rather than print 0/0 rows.
+	if _use_account_currency(filters):
+		data = [
+			d
+			for d in data
+			if not d.get("voucher_no")
+			or flt(d.get("debit_in_account_currency"))
+			or flt(d.get("credit_in_account_currency"))
+		]
+
 	result = get_result_as_list(data, filters)
 
 	if filters.get("itemised"):
 		result = inject_item_rows(result, filters)
 
 	return result
+
+
+def _use_account_currency(filters):
+	return bool(
+		filters.get("show_in_account_currency")
+		and filters.get("account_currency")
+		and filters.get("account_currency") != filters.get("company_currency")
+	)
 
 
 def inject_item_rows(result, filters):
@@ -661,8 +680,13 @@ def get_conditions(filters):
 	if not filters.get("show_cancelled_entries"):
 		conditions.append("is_cancelled = 0")
 	
-	# Exclude system-generated Journal Entries (used for inter-party settlements etc.)
-	conditions.append("voucher_no NOT IN (SELECT name FROM `tabJournal Entry` WHERE is_system_generated = 1)")
+	# Exclude system-generated Journal Entries (used for inter-party settlements etc.),
+	# but keep Exchange Gain Or Loss: ERPNext books realised FX on the party leg as a
+	# system-generated JE, and dropping it leaves the company-currency balance wrong.
+	conditions.append(
+		"voucher_no NOT IN (SELECT name FROM `tabJournal Entry` WHERE is_system_generated = 1"
+		" AND voucher_type != 'Exchange Gain Or Loss')"
+	)
 
 	from frappe.desk.reportview import build_match_conditions
 
