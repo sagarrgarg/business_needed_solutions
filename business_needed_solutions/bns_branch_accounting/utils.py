@@ -25,6 +25,11 @@ import logging
 import json
 import time
 
+from business_needed_solutions.bns_branch_accounting.transfer_value_conservation import (
+    queue_transfer_rate_repost,
+    rate_precision,
+)
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -420,10 +425,23 @@ def _apply_bns_transfer_rate_stock_ledger_patch() -> None:
 
         def patched_process_sle(self, sle):
             transfer_rate = _get_bns_transfer_rate_for_sle(sle)
-            if transfer_rate is not None:
-                sle.incoming_rate = transfer_rate
-                sle.recalculate_rate = 1
-            return original_process_sle(self, sle)
+            if transfer_rate is None or flt(sle.actual_qty) <= 0:
+                return original_process_sle(self, sle)
+
+            sle.incoming_rate = transfer_rate
+            sle.recalculate_rate = 1
+            # Captured before ERPNext prices the row, to tell whether it did and what it changed.
+            svd_before = flt(sle.get("stock_value_difference"))
+            doctype_before = sle.get("doctype")
+            result = original_process_sle(self, sle)
+            # Conserve the sender's value (qty x transfer rate) inside the engine, so the row's
+            # stock value moves with its value difference and every later row builds on it.
+            from business_needed_solutions.bns_branch_accounting.transfer_value_conservation import (
+                conserve_transfer_value_in_engine,
+            )
+
+            conserve_transfer_value_in_engine(self, sle, transfer_rate, svd_before, doctype_before)
+            return result
 
         patched_get_incoming_outgoing_rate_from_transaction._bns_transfer_rate_patched = True
         patched_process_sle._bns_transfer_rate_patched = True
@@ -6752,11 +6770,19 @@ def _mirror_pr_item_valuation_from_transfer_rate(pr_name: str) -> int:
 
 
 def _sync_pr_sle_from_transfer_rate(pr_name: str) -> int:
-    """Sync PR Stock Ledger Entry incoming values from PR Item transfer-rate.
+    """Bring PR Stock Ledger Entries in line with PR Item transfer-rate.
+
+    The stock ledger engine owns every SLE value: the BNS process_sle patch prices the
+    receipt at the transfer rate and conserves qty x rate inside the engine (see
+    transfer_value_conservation). So this never writes SLE values by hand. When a row was
+    valued at a stale rate (SLE incoming_rate != bns_transfer_rate) it queues one Repost
+    Item Valuation for the receipt; the repost re-prices it and every later row, and its
+    GL repost plus the rebuild below post the conserved value.
 
     Only applies when the PR's governing source date is after the accounting
-    rewrite cutoff. Modifying SLE without the corresponding GL rewrite causes
-    valuation drift.
+    rewrite cutoff, the same gate as the GL rewrite.
+
+    Returns the number of stale rows found.
     """
     if not pr_name or not frappe.db.exists("Purchase Receipt", pr_name):
         return 0
@@ -6784,42 +6810,45 @@ def _sync_pr_sle_from_transfer_rate(pr_name: str) -> int:
     if not transfer_rate_by_item:
         return 0
 
+    stale_count = _count_sle_rows_at_stale_transfer_rate("Purchase Receipt", pr_name, transfer_rate_by_item)
+    if stale_count:
+        queued = queue_transfer_rate_repost("Purchase Receipt", pr_name, context="pr_transfer_rate_sle_sync")
+        logger.info(
+            "PR %s: %s SLE rows valued at a stale transfer rate; repost %s",
+            pr_name,
+            stale_count,
+            "queued" if queued else "already pending or capped",
+        )
+    _force_rebuild_bns_gl_for_voucher("Purchase Receipt", pr_name, context="pr_transfer_rate_sle_sync")
+    return stale_count
+
+
+def _count_sle_rows_at_stale_transfer_rate(
+    voucher_type: str, voucher_no: str, transfer_rate_by_item: dict[str, float]
+) -> int:
+    """Count the voucher's forward SLE rows whose incoming_rate differs from the item's transfer rate.
+
+    Only the rate is compared: the engine sets incoming_rate to the transfer rate on every
+    re-price, so after a repost these match and no further repost is queued (no loop). A row
+    whose value difference differs from qty x rate while its rate matches is a legitimately
+    partial conservation (see transfer_value_conservation), which a repost cannot change.
+    """
+    precision = rate_precision()
     sle_rows = frappe.get_all(
         "Stock Ledger Entry",
-        filters={"voucher_type": "Purchase Receipt", "voucher_no": pr_name},
-        fields=["name", "voucher_detail_no", "actual_qty", "incoming_rate", "stock_value_difference"],
+        filters={"voucher_type": voucher_type, "voucher_no": voucher_no, "is_cancelled": 0},
+        fields=["voucher_detail_no", "actual_qty", "incoming_rate"],
     )
-    if not sle_rows:
-        return 0
-
-    updated_count = 0
+    stale = 0
     for sle in sle_rows:
         if flt(sle.get("actual_qty") or 0) <= 0:
             continue
         transfer_rate = transfer_rate_by_item.get(sle.get("voucher_detail_no"))
         if not transfer_rate:
             continue
-
-        expected_svd = flt(sle.get("actual_qty") or 0) * transfer_rate
-        updates = {}
-        if flt(sle.get("incoming_rate") or 0) != transfer_rate:
-            updates["incoming_rate"] = transfer_rate
-        if flt(sle.get("stock_value_difference") or 0) != expected_svd:
-            updates["stock_value_difference"] = expected_svd
-
-        if updates:
-            frappe.db.set_value("Stock Ledger Entry", sle.get("name"), updates, update_modified=False)
-            updated_count += 1
-
-    if updated_count:
-        frappe.clear_cache(doctype="Stock Ledger Entry")
-        logger.info(
-            "Synced PR SLE incoming/stock diff from transfer-rate for %s rows in %s",
-            updated_count,
-            pr_name,
-        )
-    _force_rebuild_bns_gl_for_voucher("Purchase Receipt", pr_name, context="pr_transfer_rate_sle_sync")
-    return updated_count
+        if flt(sle.get("incoming_rate") or 0, precision) != flt(transfer_rate, precision):
+            stale += 1
+    return stale
 
 
 def _mirror_pi_item_valuation_from_transfer_rate(pi_name: str) -> int:
@@ -6875,11 +6904,16 @@ def _mirror_pi_item_valuation_from_transfer_rate(pi_name: str) -> int:
 
 
 def _sync_pi_sle_from_transfer_rate(pi_name: str) -> int:
-    """Sync PI Stock Ledger Entry incoming values from PI Item transfer-rate.
+    """Bring update-stock PI Stock Ledger Entries in line with PI Item transfer-rate.
+
+    Same contract as _sync_pr_sle_from_transfer_rate: SLE values are owned by the stock
+    ledger engine (which conserves qty x transfer rate); a row valued at a stale rate gets
+    one queued Repost Item Valuation instead of a hand-written overwrite.
 
     Only applies when the PI's governing source date is after the accounting
-    rewrite cutoff. Modifying SLE without the corresponding GL rewrite causes
-    debit/credit imbalance on the PI.
+    rewrite cutoff, the same gate as the GL rewrite.
+
+    Returns the number of stale rows found.
     """
     if not pi_name or not frappe.db.exists("Purchase Invoice", pi_name):
         return 0
@@ -6898,39 +6932,14 @@ def _sync_pi_sle_from_transfer_rate(pi_name: str) -> int:
     if not transfer_rate_by_item:
         return 0
 
-    sle_rows = frappe.get_all(
-        "Stock Ledger Entry",
-        filters={"voucher_type": "Purchase Invoice", "voucher_no": pi_name},
-        fields=["name", "voucher_detail_no", "actual_qty", "incoming_rate", "stock_value_difference"],
-    )
-    if not sle_rows:
-        return 0
-
-    updated_count = 0
-    for sle in sle_rows:
-        if flt(sle.get("actual_qty") or 0) <= 0:
-            continue
-        transfer_rate = transfer_rate_by_item.get(sle.get("voucher_detail_no"))
-        if not transfer_rate:
-            continue
-
-        expected_svd = flt(sle.get("actual_qty") or 0) * transfer_rate
-        updates = {}
-        if flt(sle.get("incoming_rate") or 0) != transfer_rate:
-            updates["incoming_rate"] = transfer_rate
-        if flt(sle.get("stock_value_difference") or 0) != expected_svd:
-            updates["stock_value_difference"] = expected_svd
-
-        if updates:
-            frappe.db.set_value("Stock Ledger Entry", sle.get("name"), updates, update_modified=False)
-            updated_count += 1
-
-    if updated_count:
-        frappe.clear_cache(doctype="Stock Ledger Entry")
+    stale_count = _count_sle_rows_at_stale_transfer_rate("Purchase Invoice", pi_name, transfer_rate_by_item)
+    if stale_count:
+        queued = queue_transfer_rate_repost("Purchase Invoice", pi_name, context="pi_transfer_rate_sle_sync")
         logger.info(
-            "Synced PI SLE incoming/stock diff from transfer-rate for %s rows in %s",
-            updated_count,
+            "PI %s: %s SLE rows valued at a stale transfer rate; repost %s",
             pi_name,
+            stale_count,
+            "queued" if queued else "already pending or capped",
         )
     # Keep accounting ledger in lockstep with SLE transfer-rate authority.
     _force_rebuild_bns_gl_for_voucher(
@@ -6938,7 +6947,7 @@ def _sync_pi_sle_from_transfer_rate(pi_name: str) -> int:
         pi_name,
         context="pi_transfer_rate_sle_sync",
     )
-    return updated_count
+    return stale_count
 
 
 def _sync_pr_item_transfer_rate_from_dn(dn_name: str, pr_name: Optional[str] = None) -> int:
