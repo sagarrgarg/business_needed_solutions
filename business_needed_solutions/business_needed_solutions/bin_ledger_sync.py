@@ -70,17 +70,19 @@ def bin_ledger_sync_enabled() -> bool:
 
 
 def _scope_conditions(
-	company: str | None, item_code: str | None, warehouse: str | None
+	company: str | None, item_code: str | None, warehouse: str | None, alias: str = ""
 ) -> tuple[str, dict[str, Any]]:
+	"""SQL tail (starting with AND) and params for the optional scope filters."""
+	prefix = f"{alias}." if alias else ""
 	conds, params = [], {}
 	if company:
-		conds.append("company = %(company)s")
+		conds.append(f"{prefix}company = %(company)s")
 		params["company"] = company
 	if item_code:
-		conds.append("item_code = %(item_code)s")
+		conds.append(f"{prefix}item_code = %(item_code)s")
 		params["item_code"] = item_code
 	if warehouse:
-		conds.append("warehouse = %(warehouse)s")
+		conds.append(f"{prefix}warehouse = %(warehouse)s")
 		params["warehouse"] = warehouse
 	return (" AND " + " AND ".join(conds)) if conds else "", params
 
@@ -130,7 +132,7 @@ def bin_rows(
 	warehouse: str | None = None,
 	pairs: list[Pair] | None = None,
 ) -> dict[Pair, dict[str, Any]]:
-	extra, params = _scope_conditions(None, item_code, warehouse)
+	extra, params = _scope_conditions(None, item_code, warehouse, alias="b")
 	pair_filter = ""
 	if pairs is not None:
 		if not pairs:
@@ -145,7 +147,7 @@ def bin_rows(
 		f"""
         SELECT b.name, b.item_code, b.warehouse, b.actual_qty, b.stock_value, b.valuation_rate
         FROM `tabBin` b {company_join}
-        WHERE 1 = 1 {extra.replace("item_code", "b.item_code").replace("warehouse =", "b.warehouse =")} {pair_filter}
+        WHERE 1 = 1 {extra} {pair_filter}
         """,
 		params,
 		as_dict=True,

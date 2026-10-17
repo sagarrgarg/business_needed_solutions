@@ -36,10 +36,6 @@ class TestBinLedgerCompare(FrappeTestCase):
 		)
 
 
-class _Reco(frappe._dict):
-	pass
-
-
 class TestStockBalanceRecoFix(FrappeTestCase):
 	"""The patched method must take a reconciliation's qty_after_transaction as the balance
 	on a plain (company, item, warehouse) key, and treat it as a delta on a dimension key."""
