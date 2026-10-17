@@ -421,8 +421,14 @@ doc_events = {
 
     # BNS Web: keep the blog API response cache fresh, and record which sites
     # lost a post so get_changes can tell consumers what to delete.
+    # The blog_compat hooks give BNS's own copy of the blog doctypes (Frappe v16
+    # without the blog app) v15's save behaviour; they do nothing on v15 or when
+    # the frappe/blog app provides the doctypes.
     "Blog Post": {
+        "autoname": "business_needed_solutions.bns_web.blog_compat.blog_post_autoname",
+        "validate": "business_needed_solutions.bns_web.blog_compat.blog_post_validate",
         "on_update": [
+            "business_needed_solutions.bns_web.blog_compat.blog_post_on_update",
             "business_needed_solutions.bns_web.removal_tracker.track_blog_post_removals",
             "business_needed_solutions.bns_web.blog_api.clear_blog_api_cache",
         ],
@@ -435,10 +441,19 @@ doc_events = {
     # Category/Blogger details are embedded in blog payloads, so stamp the
     # posts that carry them — get_changes pages on Blog Post.modified alone.
     "Blog Category": {
+        "autoname": "business_needed_solutions.bns_web.blog_compat.blog_category_autoname",
+        "validate": "business_needed_solutions.bns_web.blog_compat.blog_category_validate",
         "on_update": "business_needed_solutions.bns_web.propagation.propagate_category_change"
     },
     "Blogger": {
-        "on_update": "business_needed_solutions.bns_web.propagation.propagate_blogger_change"
+        "validate": "business_needed_solutions.bns_web.blog_compat.blogger_validate",
+        "on_update": [
+            "business_needed_solutions.bns_web.blog_compat.blogger_on_update",
+            "business_needed_solutions.bns_web.propagation.propagate_blogger_change",
+        ]
+    },
+    "Blog Settings": {
+        "on_update": "business_needed_solutions.bns_web.blog_compat.blog_settings_on_update"
     }
 }
 
@@ -561,7 +576,15 @@ repost_allowed_doctypes = ["Delivery Note"]
 # }
 
 # Migration hooks: branch-accounting setup + BNS Web "Website API" role
+# Frappe v16 dropped the blog doctypes from the framework. BNS provides them when no
+# app does, before Frappe syncs BNS's custom-field fixture (one field is on Blog Post,
+# and a missing doctype makes Frappe skip the whole file) and before it deletes the
+# orphaned v15 definitions. See bns_web/blog_compat.
+before_install = "business_needed_solutions.bns_web.blog_compat.ensure_blog_doctypes"
+before_migrate = ["business_needed_solutions.bns_web.blog_compat.ensure_blog_doctypes"]
+
 after_migrate = [
+    "business_needed_solutions.bns_web.blog_compat.ensure_blog_doctypes",
     "business_needed_solutions.bns_branch_accounting.migration.after_migrate",
     "business_needed_solutions.bns_web.setup.ensure_website_api_role",
     "business_needed_solutions.bns_web.setup.ensure_blog_not_in_sitemap",

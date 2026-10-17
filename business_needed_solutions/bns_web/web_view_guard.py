@@ -62,13 +62,18 @@ def _blog_web_routes():
 	"""Published Blog Post routes + Blog Category routes, cached."""
 	routes = frappe.cache.get_value(WEB_ROUTES_CACHE_KEY)
 	if routes is None:
-		routes = [
-			r
-			for r in (
-				(frappe.get_all("Blog Post", filters={"published": 1}, pluck="route") or [])
-				+ (frappe.get_all("Blog Category", pluck="route") or [])
-			)
-			if r
-		]
+		try:
+			routes = [
+				r
+				for r in (
+					(frappe.get_all("Blog Post", filters={"published": 1}, pluck="route") or [])
+					+ (frappe.get_all("Blog Category", pluck="route") or [])
+				)
+				if r
+			]
+		except frappe.DoesNotExistError:
+			# No blog doctypes on this site (Frappe v16 before blog_compat ran): nothing to
+			# guard. Never let the guard break every guest page (e.g. /login) instead.
+			return set()
 		frappe.cache.set_value(WEB_ROUTES_CACHE_KEY, routes, expires_in_sec=ROUTES_CACHE_TTL)
 	return set(routes)
