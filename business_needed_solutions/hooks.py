@@ -460,9 +460,15 @@ fixtures = [
 # last_run_on stamp, so ticking daily is cheap and lets operators change the
 # cadence without restarting anything.
 scheduler_events = {
+    "hourly": [
+        # Bin == last live Stock Ledger Entry, for pairs that moved in the last day.
+        "business_needed_solutions.business_needed_solutions.bin_ledger_sync.scheduled_bin_ledger_sync_recent"
+    ],
     "daily": [
         "business_needed_solutions.bns_branch_accounting.common_party_squareoff.scheduled_squareoff_run",
-        "business_needed_solutions.bns_branch_accounting.utils.reassert_bns_internal_invoice_status"
+        "business_needed_solutions.bns_branch_accounting.utils.reassert_bns_internal_invoice_status",
+        # Bin == last live Stock Ledger Entry, every pair.
+        "business_needed_solutions.business_needed_solutions.bin_ledger_sync.scheduled_bin_ledger_sync_full"
     ],
     "weekly": [
         "business_needed_solutions.business_needed_solutions.gl_sle_audit.scheduled_auto_fix_missing_ledgers"
@@ -560,6 +566,8 @@ after_migrate = [
     "business_needed_solutions.bns_web.setup.ensure_website_api_role",
     "business_needed_solutions.bns_web.setup.ensure_blog_not_in_sitemap",
     "business_needed_solutions.bns_web.setup.ensure_crm_country_field",
+    # Rewrite every Bin that disagrees with its ledger as soon as the new code is live.
+    "business_needed_solutions.business_needed_solutions.bin_ledger_sync.after_migrate_bin_ledger_sync",
 ]
 
 # Runtime monkey-patches that must be available on any request/job.
@@ -570,6 +578,9 @@ _global_runtime_patches = [
 	# Temporary: fix Purchase Register tax doubling when PI name = PR name
 	# Remove when ERPNext merges upstream fix
 	"business_needed_solutions.business_needed_solutions.overrides.purchase_register_fix.apply_purchase_register_fix",
+	# Temporary: Stock Balance drops Stock Reconciliation quantities (erpnext ec0a515d, v15.123.0).
+	# Self-retiring: applies only while the installed method still carries the bug.
+	"business_needed_solutions.business_needed_solutions.overrides.stock_balance_reco_fix.apply_stock_balance_reco_fix",
 ]
 before_request = _global_runtime_patches
 before_job = _global_runtime_patches

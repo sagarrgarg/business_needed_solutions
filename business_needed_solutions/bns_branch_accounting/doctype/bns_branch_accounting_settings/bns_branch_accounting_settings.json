@@ -33,7 +33,8 @@
   "enable_auto_fix_missing_ledgers",
   "auto_fix_lookback_days",
   "tab_reposting",
-  "prioritize_repost_item_valuation"
+  "prioritize_repost_item_valuation",
+  "sync_bins_with_ledger"
  ],
  "fields": [
   {
@@ -223,12 +224,19 @@
    "fieldname": "prioritize_repost_item_valuation",
    "fieldtype": "Check",
    "label": "Prioritise Repost Item Valuation (keep draining continuously)"
+  },
+  {
+   "default": "1",
+   "description": "When ON (default), BNS keeps every Bin's Actual Qty, Stock Value and Valuation Rate equal to the last live Stock Ledger Entry of that item and warehouse: hourly for pairs that moved in the last day, daily for every pair, and once after each migrate. Pairs with a Repost Item Valuation In Progress are left to the repost. Bins with no live ledger rows are set to zero. Manual run: business_needed_solutions.business_needed_solutions.bin_ledger_sync.run_bin_ledger_sync (dry_run=1 lists, dry_run=0 writes).",
+   "fieldname": "sync_bins_with_ledger",
+   "fieldtype": "Check",
+   "label": "Keep Bins equal to the Stock Ledger (hourly, daily, after migrate)"
   }
  ],
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-07-18 14:00:00.000000",
+ "modified": "2026-10-17 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "BNS Branch Accounting",
  "name": "BNS Branch Accounting Settings",
