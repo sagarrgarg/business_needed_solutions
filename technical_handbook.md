@@ -1,8 +1,28 @@
 # Business Needed Solutions – Technical Handbook
 
 **App:** business_needed_solutions  
-**Last updated:** 2026-09-19  
+**Last updated:** 2026-10-17  
 **Purpose:** Technical reference for developers – what exists, why, impacted modules, and migration implications.
+
+---
+
+## 2026-10-17 – Stock Balance reconciliation fix + Bin↔Stock Ledger sync
+
+### What Changed
+- **`overrides/stock_balance_reco_fix.py`** (runtime patch, in `_global_runtime_patches`): replaces `StockBalanceReport.prepare_item_warehouse_map` with the v15.123.0 body whose reconciliation guard reads `len(group_by_key) == 3` instead of `== 2`. **Self-retiring**: `installed_method_has_bug()` inspects the installed source and the method is only swapped while the buggy test is present.
+- **`bin_ledger_sync.py`** (new): `audit_bin_ledger` (read only), `sync_bin_ledger(dry_run=True, …)` (rewrites `actual_qty`, `stock_value`, `valuation_rate` on every Bin that disagrees with the last live SLE of its item/warehouse — `posting_datetime desc, creation desc`, ERPNext's own order — then `set_projected_qty()` + `db_update()`), whitelisted `run_bin_ledger_sync` (needs write on Bin), and three entry points: **hourly** `scheduled_bin_ledger_sync_recent` (pairs whose SLE or Bin changed in the last 26 h), **daily** `scheduled_bin_ledger_sync_full`, **after_migrate** `after_migrate_bin_ledger_sync`. Bins with no live SLE are set to 0/0; SLE pairs with no Bin get one. Pairs with an item/warehouse Repost Item Valuation `In Progress` are skipped. Every write run that changed something logs a `BNS Bin Ledger Sync` Error Log with the rows.
+- **BNS Branch Accounting Settings** → Reposting tab: `sync_bins_with_ledger` (Check, default 1). Missing field/row counts as ON.
+- Tests: `tests/test_bin_ledger_sync.py` (compare helpers; patched method on a 3-part vs dimension key; self-retire check).
+
+### Why
+erpnext commit `ec0a515d` (10 Oct 2026, in v15.123.0 and still on version-15/develop) added `len(group_by_key) == 2` to the reconciliation branch of Stock Balance, but the key is `(company, item_code, warehouse)`. Every Stock Reconciliation row is therefore counted as `actual_qty` (0) and the balance it set is lost; values stay right. Seen on KGO: FN259 at `Dispatch Area - Gurukul HR - KGOPL` reconciled +110 twice → report −220, ledger and Bin 0; 312 of 353 rows in that warehouse wrong on qty. All ten group sites are on 15.123.0.
+Separately, Bins had drifted from the ledger on five sites (KGO 7 qty + 286 orphan bins; old KGO 69 qty + 3 value + 282 orphan; Hing 2 temp items at −72 L qty; GGIL 13 orphan; GGSPL 2 orphan) because failed/skipped reposts never revisit a pair. The user's rule: **Bin must equal the ledger in every circumstance.**
+
+### Impacted Modules
+- `hooks.py` (`_global_runtime_patches`, `scheduler_events.hourly` (new key), `scheduler_events.daily`, `after_migrate`), `business_needed_solutions/overrides/stock_balance_reco_fix.py`, `business_needed_solutions/bin_ledger_sync.py`, `bns_branch_accounting/doctype/bns_branch_accounting_settings/*.json`, `business_needed_solutions/tests/test_bin_ledger_sync.py`.
+
+### Migration Implications
+- `bench migrate` adds the Check field and then runs the full Bin sync once (`after_migrate`), so every site's Bins match their ledger at deploy; expect one `BNS Bin Ledger Sync` Error Log per site listing what moved. The report fix is live on the first request after deploy; no cache or build step. When ERPNext ships the upstream correction the patch stops applying by itself; delete the module then.
 
 ---
 
