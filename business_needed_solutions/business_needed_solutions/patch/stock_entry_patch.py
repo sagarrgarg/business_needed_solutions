@@ -66,4 +66,8 @@ def patched_get_bom_raw_materials(self, qty):
 
 def execute():
     # monkey patch StockEntry method
-    StockEntry.get_bom_raw_materials = patched_get_bom_raw_materials
+    from business_needed_solutions.business_needed_solutions.site_gate import site_gated
+
+    # site_gated: a multi-site migrate runs every site in one process; sites without BNS
+    # that it migrates after this one keep ERPNext's own method.
+    StockEntry.get_bom_raw_materials = site_gated(StockEntry.get_bom_raw_materials, patched_get_bom_raw_materials)

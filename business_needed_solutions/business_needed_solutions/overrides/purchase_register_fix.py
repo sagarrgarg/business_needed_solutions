@@ -77,5 +77,8 @@ def apply_purchase_register_fix():
     if _upstream_is_fixed(purchase_register.get_invoice_tax_map):
         _PATCHED = True
         return
-    purchase_register.get_invoice_tax_map = get_invoice_tax_map
+    from business_needed_solutions.business_needed_solutions.site_gate import site_gated
+
+    # site_gated: other sites served by this worker keep ERPNext's own function.
+    purchase_register.get_invoice_tax_map = site_gated(purchase_register.get_invoice_tax_map, get_invoice_tax_map)
     _PATCHED = True

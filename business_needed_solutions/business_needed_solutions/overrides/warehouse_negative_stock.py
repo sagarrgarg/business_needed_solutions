@@ -276,10 +276,14 @@ def apply_patches():
 		# This ensures warehouse restriction is always checked when ERPNext allows negative stock
 		validate_warehouse_negative_stock(args)
 	
-	stock_ledger_module.validate_negative_qty_in_future_sle = patched_validate
+	from business_needed_solutions.business_needed_solutions.site_gate import site_gated
+
+	# site_gated: other sites served by this worker keep ERPNext's own functions.
+	gated_validate = site_gated(stock_ledger_module._original_validate_negative_qty_in_future_sle, patched_validate)
+	stock_ledger_module.validate_negative_qty_in_future_sle = gated_validate
 	
 	# Verify patch was applied
-	if stock_ledger_module.validate_negative_qty_in_future_sle != patched_validate:
+	if stock_ledger_module.validate_negative_qty_in_future_sle != gated_validate:
 		frappe.log_error("Failed to patch validate_negative_qty_in_future_sle", "BNS Warehouse Negative Stock")
 	
 	# Patch make_entry to validate BEFORE submitting SLE
@@ -313,7 +317,7 @@ def apply_patches():
 		# Call original make_entry
 		return stock_ledger_module._original_make_entry(args, allow_negative_stock, via_landed_cost_voucher)
 	
-	stock_ledger_module.make_entry = patched_make_entry
+	stock_ledger_module.make_entry = site_gated(stock_ledger_module._original_make_entry, patched_make_entry)
 	
 	# Patch update_entries_after.validate_negative_stock method
 	if not hasattr(stock_ledger_module.update_entries_after, '_original_validate_negative_stock'):
@@ -347,7 +351,9 @@ def apply_patches():
 		# No negative stock or allowed - return True
 		return True
 	
-	stock_ledger_module.update_entries_after.validate_negative_stock = patched_method
+	stock_ledger_module.update_entries_after.validate_negative_stock = site_gated(
+		stock_ledger_module.update_entries_after._original_validate_negative_stock, patched_method
+	)
 
 
 def validate_sle_warehouse_negative_stock(doc, method=None):

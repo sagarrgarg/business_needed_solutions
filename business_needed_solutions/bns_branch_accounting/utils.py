@@ -30,6 +30,7 @@ from business_needed_solutions.bns_branch_accounting.transfer_value_conservation
     rate_precision,
 )
 from business_needed_solutions.business_needed_solutions.compat import asset_purchase_amount_field
+from business_needed_solutions.business_needed_solutions.site_gate import site_gated
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -446,8 +447,11 @@ def _apply_bns_transfer_rate_stock_ledger_patch() -> None:
 
         patched_get_incoming_outgoing_rate_from_transaction._bns_transfer_rate_patched = True
         patched_process_sle._bns_transfer_rate_patched = True
-        update_entries_after.get_incoming_outgoing_rate_from_transaction = patched_get_incoming_outgoing_rate_from_transaction
-        update_entries_after.process_sle = patched_process_sle
+        # site_gated: other sites served by this worker keep ERPNext's own methods.
+        update_entries_after.get_incoming_outgoing_rate_from_transaction = site_gated(
+            original_method, patched_get_incoming_outgoing_rate_from_transaction
+        )
+        update_entries_after.process_sle = site_gated(original_process_sle, patched_process_sle)
         _BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED = True
         logger.info("Applied BNS stock-ledger patch: PR/PI repost valuation uses bns_transfer_rate")
     except Exception as e:
@@ -3407,10 +3411,11 @@ def _apply_bns_internal_gl_rewrite_patch() -> None:
         patched_pr_get_gl_entries._bns_internal_gl_rewrite_patched = True
         patched_pi_get_gl_entries._bns_internal_gl_rewrite_patched = True
         patched_si_get_gl_entries._bns_internal_gl_rewrite_patched = True
-        StockController.get_gl_entries = patched_stock_get_gl_entries
-        PurchaseReceipt.get_gl_entries = patched_pr_get_gl_entries
-        PurchaseInvoice.get_gl_entries = patched_pi_get_gl_entries
-        SalesInvoice.get_gl_entries = patched_si_get_gl_entries
+        # site_gated: other sites served by this worker keep ERPNext's own methods.
+        StockController.get_gl_entries = site_gated(original_stock_get_gl_entries, patched_stock_get_gl_entries)
+        PurchaseReceipt.get_gl_entries = site_gated(original_pr_get_gl_entries, patched_pr_get_gl_entries)
+        PurchaseInvoice.get_gl_entries = site_gated(original_pi_get_gl_entries, patched_pi_get_gl_entries)
+        SalesInvoice.get_gl_entries = site_gated(original_si_get_gl_entries, patched_si_get_gl_entries)
         _BNS_INTERNAL_GL_PATCHED = True
         logger.info("Applied BNS internal GL rewrite patch for Delivery Note, Purchase Receipt, Purchase Invoice, and Sales Invoice")
 
@@ -4288,7 +4293,7 @@ def _apply_bns_repost_gl_failsafe_patch() -> None:
                     )
 
         patched_repost_gl_entries._bns_repost_gl_failsafe_patched = True
-        riv.repost_gl_entries = patched_repost_gl_entries
+        riv.repost_gl_entries = site_gated(original_repost_gl_entries, patched_repost_gl_entries)
         _BNS_REPOST_GL_FAILSAFE_PATCHED = True
         logger.info("Applied BNS repost GL failsafe patch")
 
@@ -4335,7 +4340,7 @@ def _apply_bns_repost_accounting_ledger_patch() -> None:
                 return result
 
             patched_start_repost._bns_repost_accounting_patched = True
-            ral.start_repost = patched_start_repost
+            ral.start_repost = site_gated(original_start_repost, patched_start_repost)
             _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = True
             logger.info("Applied BNS Repost Accounting Ledger patch (start_repost)")
             return
@@ -4354,7 +4359,7 @@ def _apply_bns_repost_accounting_ledger_patch() -> None:
                 return result
 
             patched_repost._bns_repost_accounting_patched = True
-            ral.repost = patched_repost
+            ral.repost = site_gated(original_repost, patched_repost)
             _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = True
             logger.info("Applied BNS Repost Accounting Ledger patch (repost)")
             return
@@ -4420,7 +4425,8 @@ def _suppress_repost_error_emails() -> None:
             pass
 
         _noop._bns_suppressed = True
-        riv_module.notify_error_to_stock_managers = _noop
+        # Sites without BNS keep ERPNext's emails.
+        riv_module.notify_error_to_stock_managers = site_gated(riv_module.notify_error_to_stock_managers, _noop)
         _BNS_REPOST_EMAIL_SUPPRESSED = True
         logger.info("Suppressed Repost Item Valuation error emails")
     except Exception as e:
@@ -4475,8 +4481,10 @@ def _apply_bns_asset_internal_patches() -> None:
 
         patched_process_fixed_asset._bns_asset_internal_patched = True
         patched_process_asset_depreciation._bns_asset_internal_patched = True
-        BuyingController.process_fixed_asset = patched_process_fixed_asset
-        SalesInvoice.process_asset_depreciation = patched_process_asset_depreciation
+        BuyingController.process_fixed_asset = site_gated(original_process_fixed_asset, patched_process_fixed_asset)
+        SalesInvoice.process_asset_depreciation = site_gated(
+            original_process_asset_depreciation, patched_process_asset_depreciation
+        )
         _BNS_ASSET_INTERNAL_PATCHED = True
         logger.info("Applied BNS asset internal-transfer patches (no auto-asset, no disposal)")
     except Exception as e:
@@ -4552,8 +4560,10 @@ def _apply_bns_sticky_status_patch() -> None:
         if getattr(SalesInvoice.set_status, "_bns_sticky_status_patched", False):
             _BNS_STICKY_STATUS_PATCHED = True
             return
-        SalesInvoice.set_status = _wrap_bns_sticky_set_status(SalesInvoice.set_status)
-        PurchaseInvoice.set_status = _wrap_bns_sticky_set_status(PurchaseInvoice.set_status)
+        original_si_set_status = SalesInvoice.set_status
+        original_pi_set_status = PurchaseInvoice.set_status
+        SalesInvoice.set_status = site_gated(original_si_set_status, _wrap_bns_sticky_set_status(original_si_set_status))
+        PurchaseInvoice.set_status = site_gated(original_pi_set_status, _wrap_bns_sticky_set_status(original_pi_set_status))
         _BNS_STICKY_STATUS_PATCHED = True
         logger.info("Applied BNS sticky-status patch (internal SI/PI keep 'BNS Internally Transferred')")
     except Exception as e:

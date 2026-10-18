@@ -118,6 +118,11 @@ def apply_stock_balance_reco_fix() -> None:
 		return
 
 	if installed_method_has_bug(StockBalanceReport):
+		from business_needed_solutions.business_needed_solutions.site_gate import site_gated
+
 		prepare_item_warehouse_map._bns_patched = True
-		StockBalanceReport.prepare_item_warehouse_map = prepare_item_warehouse_map
+		# site_gated: other sites served by this worker keep ERPNext's own method.
+		StockBalanceReport.prepare_item_warehouse_map = site_gated(
+			StockBalanceReport.prepare_item_warehouse_map, prepare_item_warehouse_map
+		)
 	_PATCHED = True
