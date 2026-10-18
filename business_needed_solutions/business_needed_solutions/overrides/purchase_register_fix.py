@@ -55,11 +55,27 @@ def get_invoice_tax_map(invoice_list, invoice_expense_map, expense_accounts, inc
     return invoice_expense_map, invoice_tax_map
 
 
+def _upstream_is_fixed(func) -> bool:
+    """True once the installed function already filters by parenttype: fixed upstream
+    by erpnext#54272 / #54443 (v15.106.0+ and v16), where this copy changes nothing and
+    would only mask later upstream changes to the function."""
+    import inspect
+    import re
+
+    try:
+        return bool(re.search(r"parenttype\s*=\s*'Purchase Invoice'", inspect.getsource(func)))
+    except (OSError, TypeError):
+        return False
+
+
 def apply_purchase_register_fix():
     """Monkey-patch the broken function in ERPNext's purchase_register module."""
     global _PATCHED
     if _PATCHED:
         return
     from erpnext.accounts.report.purchase_register import purchase_register
+    if _upstream_is_fixed(purchase_register.get_invoice_tax_map):
+        _PATCHED = True
+        return
     purchase_register.get_invoice_tax_map = get_invoice_tax_map
     _PATCHED = True

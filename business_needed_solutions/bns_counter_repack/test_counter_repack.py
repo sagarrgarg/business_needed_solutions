@@ -102,17 +102,18 @@ class TestCounterRepack(FrappeTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
 		self._started = frappe.utils.now_datetime()
+		perpetual_inventory = {
+			"enable_perpetual_inventory": 1,
+			"default_inventory_account": "Stock In Hand - _TIRC",
+			"stock_adjustment_account": ADJUSTMENT,
+			"expenses_included_in_valuation": "Expenses Included In Valuation - _TIRC",
+			"stock_received_but_not_billed": "Stock Received But Not Billed - _TIRC",
+			"default_expense_account": "Cost of Goods Sold - _TIRC",
+		}
+		# ERPNext v16 dropped some of these from Company (e.g. expenses_included_in_valuation).
+		company_meta = frappe.get_meta("Company")
 		frappe.db.set_value(
-			"Company",
-			COMPANY,
-			{
-				"enable_perpetual_inventory": 1,
-				"default_inventory_account": "Stock In Hand - _TIRC",
-				"stock_adjustment_account": ADJUSTMENT,
-				"expenses_included_in_valuation": "Expenses Included In Valuation - _TIRC",
-				"stock_received_but_not_billed": "Stock Received But Not Billed - _TIRC",
-				"default_expense_account": "Cost of Goods Sold - _TIRC",
-			},
+			"Company", COMPANY, {k: v for k, v in perpetual_inventory.items() if company_meta.has_field(k)}
 		)
 		frappe.clear_document_cache("Company", COMPANY)
 		frappe.local.enable_perpetual_inventory = {}

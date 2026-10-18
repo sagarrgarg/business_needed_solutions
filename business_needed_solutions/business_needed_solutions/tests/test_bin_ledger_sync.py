@@ -108,5 +108,12 @@ class TestStockBalanceRecoFix(FrappeTestCase):
 				if len(group_by_key) == 2:
 					return None
 
+		# ERPNext v16: two-part key, so `== 2` is correct, and a different signature.
+		class V16:
+			def prepare_item_warehouse_map(self, entry, group_by_key):
+				if len(group_by_key) == 2:
+					return None
+
 		self.assertFalse(stock_balance_reco_fix.installed_method_has_bug(Fixed))
 		self.assertTrue(stock_balance_reco_fix.installed_method_has_bug(Buggy))
+		self.assertFalse(stock_balance_reco_fix.installed_method_has_bug(V16))

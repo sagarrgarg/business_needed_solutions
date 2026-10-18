@@ -14,6 +14,8 @@ from erpnext.stock.doctype.stock_entry.stock_entry import StockEntry
 
 from business_needed_solutions.business_needed_solutions.overrides import stock_value_conservation as svc
 
+from business_needed_solutions.business_needed_solutions.compat import is_secondary_output_row
+
 
 class BNSStockEntry(StockEntry):
     """
@@ -171,7 +173,7 @@ class BNSStockEntry(StockEntry):
         component_rows = [
             row
             for row in self.items
-            if row.s_warehouse and not row.is_finished_item and not row.is_scrap_item
+            if row.s_warehouse and not row.is_finished_item and not is_secondary_output_row(row)
         ]
 
         if not component_rows and self._has_paired_consumption_entry():
@@ -291,7 +293,7 @@ class BNSStockEntry(StockEntry):
         found = False
         for row in self.items:
             if row.item_code == item_code or row.original_item == item_code:
-                if row.s_warehouse and not row.is_finished_item and not row.is_scrap_item:
+                if row.s_warehouse and not row.is_finished_item and not is_secondary_output_row(row):
                     total += flt(row.qty)
                     found = True
         return total if found else None

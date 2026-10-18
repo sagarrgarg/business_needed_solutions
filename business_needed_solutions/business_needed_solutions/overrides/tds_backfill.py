@@ -20,11 +20,23 @@ import frappe
 from frappe import _
 from frappe.utils import cint, cstr, flt, getdate
 
+from business_needed_solutions.business_needed_solutions.compat import get_frozen_accounts_settings
+
 
 def _feature_enabled() -> bool:
     # Merged toggle: one BNS Settings switch governs both the dashboard TDS
     # Category Fixables and the per-PI TDS backfill API.
+    if not _tax_withholding_on_invoice():
+        return False
     return bool(frappe.db.get_single_value("BNS Settings", "enable_tds_category_fixables", cache=True))
+
+
+def _tax_withholding_on_invoice() -> bool:
+    """These tools implement ERPNext v15's tax withholding, which keeps the category on
+    the invoice. v16 moved it to Tax Withholding Entries and removed Purchase Invoice
+    `tax_withholding_category`; the tools are not ported to that yet, so they stay
+    switched off there (no PI button, no dashboard section, endpoints refuse)."""
+    return frappe.get_meta("Purchase Invoice").has_field("tax_withholding_category")
 
 
 def _get_roles():
@@ -56,12 +68,12 @@ def can_backfill_tds(user: str = None) -> bool:
     return "System Manager" in roles or bool(_get_roles() & roles)
 
 
-def _check_not_frozen(posting_date) -> None:
-    frozen = frappe.db.get_single_value("Accounts Settings", "acc_frozen_upto")
+def _check_not_frozen(posting_date, company=None) -> None:
+    # Site-wide on ERPNext v15, per Company on v16 (see compat.get_frozen_accounts_settings).
+    frozen, modifier = get_frozen_accounts_settings(company)
     if not frozen or not posting_date:
         return
     if getdate(posting_date) <= getdate(frozen):
-        modifier = frappe.db.get_single_value("Accounts Settings", "frozen_accounts_modifier")
         if not (modifier and modifier in frappe.get_roles()):
             frappe.throw(
                 _("Posting date {0} is within the frozen accounting period (up to {1}).").format(
@@ -93,9 +105,20 @@ def _compute_tds(pi, category):
     """Return (tax_row, tds_amount) using ERPNext's own cumulative TDS logic.
     tds_amount is the base-currency withholding for THIS invoice (0 if the
     threshold isn't crossed)."""
-    from erpnext.accounts.doctype.tax_withholding_category.tax_withholding_category import (
-        get_party_tax_withholding_details,
-    )
+    try:
+        from erpnext.accounts.doctype.tax_withholding_category.tax_withholding_category import (
+            get_party_tax_withholding_details,
+        )
+    except ImportError:
+        # ERPNext v16 replaced row-based TDS with Tax Withholding Entries; this tool
+        # still implements the v15 model and has not been ported yet.
+        frappe.throw(
+            _(
+                "TDS backfill works with ERPNext v15's tax withholding. This ERPNext version "
+                "uses Tax Withholding Entries instead, which this tool does not support yet."
+            ),
+            title=_("Not available on this ERPNext version"),
+        )
 
     # get_party_tax_withholding_details reads apply_tds/category off the doc.
     pi.apply_tds = 1
@@ -193,7 +216,7 @@ def backfill_tds_on_pi(name):
     pi = frappe.get_doc("Purchase Invoice", name)
     if pi.docstatus != 1:
         frappe.throw(_("Purchase Invoice {0} is not submitted.").format(name))
-    _check_not_frozen(pi.posting_date)
+    _check_not_frozen(pi.posting_date, pi.company)
     if _is_internal_transfer(pi):
         # A branch of the same company is not a deductee: the "supplier" shares
         # our PAN, and withholding on it only moves money between our own books.
@@ -330,7 +353,7 @@ def reverse_tds_backfill_on_pi(name, allow_native=False):
     pi = frappe.get_doc("Purchase Invoice", name)
     if pi.docstatus != 1:
         frappe.throw(_("Purchase Invoice {0} is not submitted.").format(name))
-    _check_not_frozen(pi.posting_date)
+    _check_not_frozen(pi.posting_date, pi.company)
 
     tds_row = _existing_tds_row(pi)
     gl_rows = _backfill_gl_rows(name)
@@ -594,7 +617,7 @@ def remap_tds_account_on_pi(name):
         return {"changed": False, "reason": _("Category has no account for this company")}
     if new_account == old_account:
         return {"changed": False, "reason": _("Already on the mapped account")}
-    _check_not_frozen(pi.posting_date)
+    _check_not_frozen(pi.posting_date, pi.company)
 
     amt = flt(tds_row.base_tax_amount or tds_row.tax_amount)
     booked = flt(frappe.db.sql(

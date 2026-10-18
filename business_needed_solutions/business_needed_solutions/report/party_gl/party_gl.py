@@ -408,12 +408,25 @@ def _load_withholding(wh, tax_table, inv_table, parents):
 	)
 	if not rows:
 		return
+	inv_doctype = inv_table[3:] if inv_table.startswith("tab") else inv_table
+	section_params = {"p": [r.parent for r in rows]}
+	if frappe.db.has_column(inv_doctype, "tax_withholding_category"):
+		section_query = f"""select name, tax_withholding_category as section, is_return
+			from `{inv_table}` where name in %(p)s"""
+	else:
+		# ERPNext v16 keeps the category on the invoice's Tax Withholding Entry rows.
+		section_query = f"""select inv.name, max(twe.tax_withholding_category) as section, inv.is_return
+			from `{inv_table}` inv
+			left join `tabTax Withholding Entry` twe
+				on twe.parent = inv.name and twe.parenttype = %(dt)s
+			where inv.name in %(p)s
+			group by inv.name, inv.is_return"""
+		section_params["dt"] = inv_doctype
 	meta = {
 		m.name: m
 		for m in frappe.db.sql(
-			f"""select name, tax_withholding_category as section, is_return
-			from `{inv_table}` where name in %(p)s""",
-			{"p": [r.parent for r in rows]},
+			section_query,
+			section_params,
 			as_dict=1,
 		)
 	}

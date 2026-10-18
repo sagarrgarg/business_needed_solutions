@@ -4,7 +4,7 @@ authors = [
     { name = "Sagar Ratan Garg", email = "sagar1ratan1garg1@gmail.com"}
 ]
 description = "Enterprise-grade business solutions for ERPNext including document submission controls, PAN validation, dynamic print formats, internal transfer management, and Indian compliance features."
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]
 dependencies = [

@@ -21,6 +21,11 @@ keep upstream's delta treatment, which was the point of the upstream commit.
 Self-retiring: the method is replaced only while the installed source still contains
 the buggy test, so an upstream correction takes over without a code change here.
 
+v15 only: ERPNext v16 keys the map by ``(item_code, warehouse)``, so ``== 2`` is correct
+there, and its method has a different signature ``(self, entry, group_by_key)``. The
+replacement is installed only on the v15 method shape (it takes ``item_warehouse_map``);
+installing it on v16 broke the report with a TypeError.
+
 Remove when: ERPNext fixes the condition upstream and every site runs that release.
 Affected file: erpnext/stock/report/stock_balance/stock_balance.py
 Affected method: StockBalanceReport.prepare_item_warehouse_map
@@ -94,8 +99,11 @@ def installed_method_has_bug(report_cls=None) -> bool:
 	if method is None or getattr(method, "_bns_patched", False):
 		return False
 	try:
+		# The v15 shape (three-part key, buggy == 2) takes item_warehouse_map; v16's does not.
+		if "item_warehouse_map" not in inspect.signature(method).parameters:
+			return False
 		return _BUG_MARKER in inspect.getsource(method)
-	except (OSError, TypeError):
+	except (OSError, TypeError, ValueError):
 		return False
 
 

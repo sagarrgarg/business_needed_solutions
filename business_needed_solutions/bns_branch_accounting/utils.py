@@ -29,6 +29,7 @@ from business_needed_solutions.bns_branch_accounting.transfer_value_conservation
     queue_transfer_rate_repost,
     rate_precision,
 )
+from business_needed_solutions.business_needed_solutions.compat import asset_purchase_amount_field
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -4657,6 +4658,12 @@ def bns_repost_drain_oldest():
     dedup), so there is no concurrent double-processing with itself."""
     from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as riv
 
+    # ERPNext v16 runs a repost through execute_reposting_entry(): the same repost +
+    # deduplication as below, but it holds an accounting-only repost until the stock
+    # repost it depends on has finished. Use it where it exists; v15 has no such guard.
+    execute_reposting_entry = getattr(riv, "execute_reposting_entry", None)
+    held = set()  # entries v16's guard is holding back: skip them for the rest of this run
+
     processed = 0
     while processed < BNS_REPOST_DRAIN_MAX_ITER:
         if not _bns_prioritize_repost_live():
@@ -4664,9 +4671,12 @@ def bns_repost_drain_oldest():
             break
         row = frappe.db.sql(
             """SELECT name FROM `tabRepost Item Valuation`
-               WHERE docstatus=1 AND status='Queued'
+               WHERE docstatus=1 AND status='Queued' {held_filter}
                ORDER BY timestamp(posting_date, posting_time) ASC, creation ASC
-               LIMIT 1""",
+               LIMIT 1""".format(
+                held_filter="AND name NOT IN %(held)s" if held else ""
+            ),
+            {"held": tuple(held)},
             as_dict=True,
         )
         if not row:
@@ -4676,8 +4686,13 @@ def bns_repost_drain_oldest():
             doc = frappe.get_doc("Repost Item Valuation", name)
             if doc.status != "Queued":
                 continue
-            riv.repost(doc)                  # repost now (bypasses the hourly timeslot gate)
-            doc.deduplicate_similar_repost()
+            if execute_reposting_entry:
+                execute_reposting_entry(name)  # repost now (bypasses the hourly timeslot gate)
+                if frappe.db.get_value("Repost Item Valuation", name, "status") == "Queued":
+                    held.add(name)
+            else:
+                riv.repost(doc)                  # repost now (bypasses the hourly timeslot gate)
+                doc.deduplicate_similar_repost()
         except Exception:
             logger.exception("BNS repost drain: error on %s", name)
         processed += 1
@@ -4771,10 +4786,11 @@ def _asset_net_book_value_on_date(asset_name, as_of_date, finance_book=None) -> 
     """
     if not asset_name:
         return 0.0
+    purchase_amount_field = asset_purchase_amount_field()
     asset = frappe.db.get_value(
         "Asset",
         asset_name,
-        ["gross_purchase_amount", "opening_accumulated_depreciation"],
+        [purchase_amount_field, "opening_accumulated_depreciation"],
         as_dict=True,
     )
     if not asset:
@@ -4787,7 +4803,7 @@ def _asset_net_book_value_on_date(asset_name, as_of_date, finance_book=None) -> 
         return flt(get_value_after_depreciation_on_disposal_date(asset_name, as_of_date, finance_book))
     except Exception:
         logger.exception("BNS: NBV-on-date fallback for asset %s as of %s", asset_name, as_of_date)
-        return flt(asset.get("gross_purchase_amount") or 0) - flt(
+        return flt(asset.get(purchase_amount_field) or 0) - flt(
             asset.get("opening_accumulated_depreciation") or 0
         )
 
@@ -4845,7 +4861,7 @@ def _bns_asset_transfer_rows(doc) -> List[Dict[str, Any]]:
         asset_name = (item.get(field) or "").strip()
         if not asset_name or not frappe.db.exists("Asset", asset_name):
             continue
-        gross = flt(frappe.db.get_value("Asset", asset_name, "gross_purchase_amount") or 0)
+        gross = flt(frappe.db.get_value("Asset", asset_name, asset_purchase_amount_field()) or 0)
         nbv = _asset_net_book_value_on_date(asset_name, as_of)
         accum = flt(gross - nbv)
         if accum < 0:

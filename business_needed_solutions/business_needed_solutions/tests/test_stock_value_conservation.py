@@ -83,24 +83,30 @@ def _entry(purpose: str, rows: list[dict], days_ago: int, additional: float = 0,
 	se.set_posting_time = 1
 	se.posting_date = add_days(nowdate(), -days_ago)
 	se.posting_time = "12:00:00"
+	# ERPNext v16 replaced is_scrap_item with secondary_item_type (erpnext#53975).
+	has_secondary = frappe.get_meta("Stock Entry Detail").has_field("secondary_item_type")
 	for r in rows:
-		se.append(
-			"items",
-			{
-				"item_code": r["item"],
-				"qty": r["qty"],
-				"transfer_qty": r["qty"],
-				"uom": "Nos",
-				"stock_uom": "Nos",
-				"conversion_factor": 1,
-				"s_warehouse": WAREHOUSE if r.get("out") else None,
-				"t_warehouse": None if r.get("out") else WAREHOUSE,
-				"basic_rate": r.get("rate", 0),
-				"set_basic_rate_manually": r.get("manual", 0),
-				"is_finished_item": r.get("fg", 0),
-				"is_scrap_item": r.get("scrap", 0),
-			},
-		)
+		row = {
+			"item_code": r["item"],
+			"qty": r["qty"],
+			"transfer_qty": r["qty"],
+			"uom": "Nos",
+			"stock_uom": "Nos",
+			"conversion_factor": 1,
+			"s_warehouse": WAREHOUSE if r.get("out") else None,
+			"t_warehouse": None if r.get("out") else WAREHOUSE,
+			"basic_rate": r.get("rate", 0),
+			"set_basic_rate_manually": r.get("manual", 0),
+			"is_finished_item": r.get("fg", 0),
+		}
+		if has_secondary:
+			if r.get("scrap"):
+				row["secondary_item_type"] = "Scrap"
+				# v16 derives set_basic_rate_manually from valuation_type on BOM-less secondary rows.
+				row["valuation_type"] = "Manual" if r.get("manual") else "Valuation Rate"
+		else:
+			row["is_scrap_item"] = r.get("scrap", 0)
+		se.append("items", row)
 	if additional:
 		se.append(
 			"additional_costs",
@@ -134,7 +140,10 @@ class TestStockValueConservation(FrappeTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
 		self._started = frappe.utils.now_datetime()
-		frappe.db.set_value("Company", COMPANY, PERPETUAL_INVENTORY)
+		company_meta = frappe.get_meta("Company")  # v16 dropped some of these fields
+		frappe.db.set_value(
+			"Company", COMPANY, {k: v for k, v in PERPETUAL_INVENTORY.items() if company_meta.has_field(k)}
+		)
 		frappe.clear_document_cache("Company", COMPANY)
 		frappe.local.enable_perpetual_inventory = {}  # erpnext caches this per company per request
 		settings = frappe.get_single("BNS Settings")

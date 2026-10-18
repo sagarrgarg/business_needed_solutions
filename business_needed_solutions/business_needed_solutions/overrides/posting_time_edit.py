@@ -20,6 +20,8 @@ import frappe
 from frappe import _
 from frappe.utils import getdate
 
+from business_needed_solutions.business_needed_solutions.compat import get_frozen_accounts_settings
+
 # Vouchers whose posting order actually drives stock valuation.
 ALLOWED_DOCTYPES = {
     "Purchase Receipt",
@@ -60,14 +62,14 @@ def can_edit_posting_time(user: str = None) -> bool:
     return bool(_get_editor_roles() & roles)
 
 
-def _check_not_frozen(posting_date) -> None:
+def _check_not_frozen(posting_date, company=None) -> None:
     """Refuse dates inside the frozen accounting period unless the user holds the
     Accounts-Settings frozen-accounts-modifier role."""
-    frozen = frappe.db.get_single_value("Accounts Settings", "acc_frozen_upto")
+    # Site-wide on ERPNext v15, per Company on v16 (see compat.get_frozen_accounts_settings).
+    frozen, modifier = get_frozen_accounts_settings(company)
     if not frozen or not posting_date:
         return
     if getdate(posting_date) <= getdate(frozen):
-        modifier = frappe.db.get_single_value("Accounts Settings", "frozen_accounts_modifier")
         if not (modifier and modifier in frappe.get_roles()):
             frappe.throw(
                 _("Posting date {0} is within the frozen accounting period (up to {1}).").format(
@@ -109,8 +111,8 @@ def bns_update_posting_time(doctype: str, docname: str, posting_date: str, posti
     new_date = getdate(posting_date)
     new_time = posting_time or "00:00:00"
 
-    _check_not_frozen(old_date)
-    _check_not_frozen(new_date)
+    _check_not_frozen(old_date, doc.get("company"))
+    _check_not_frozen(new_date, doc.get("company"))
 
     old_dt = get_combine_datetime(old_date, old_time)
     new_dt = get_combine_datetime(new_date, new_time)

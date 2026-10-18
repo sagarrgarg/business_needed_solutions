@@ -101,19 +101,20 @@ def provider_of(doctype: str, known_files: set | None = None) -> str:
 	if cint(row.custom):
 		return "bns"
 	if known_files is None:
-		known_files = _doctypes_with_source_files()
+		known_files = _doctypes_with_source_files(also=(doctype,))
 	return "app" if doctype in known_files else "orphan"
 
 
-def _doctypes_with_source_files() -> set:
+def _doctypes_with_source_files(also: tuple = ()) -> set:
 	"""DocType names that have a schema file in an installed app — Frappe's own orphan test."""
 	try:
 		from frappe.model.sync import create_entity_file_map
 
 		return set(create_entity_file_map(["DocType"])["DocType"])
 	except (ImportError, AttributeError, KeyError):
-		# Older Frappe (v15 still ships these doctypes): look for each blog doctype's file.
-		return {doctype for doctype in BLOG_DOCTYPES if _has_source_file(doctype)}
+		# Older Frappe (v15 still ships these doctypes): look for each blog doctype's file,
+		# and for any other doctype the caller asks about.
+		return {doctype for doctype in (*BLOG_DOCTYPES, *also) if _has_source_file(doctype)}
 
 
 def _has_source_file(doctype: str) -> bool:
