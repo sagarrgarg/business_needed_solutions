@@ -20,6 +20,8 @@
   "column_break_gst",
   "address_section",
   "suppress_preferred_billing_shipping_address",
+  "block_same_party_company_address",
+  "same_address_match_threshold",
   "tab_break_grid",
   "item_grid_section",
   "enable_uom_restriction",
@@ -189,6 +191,21 @@
    "fieldname": "suppress_preferred_billing_shipping_address",
    "fieldtype": "Check",
    "label": "Suppress Preferred Billing & Shipping Address"
+  },
+  {
+   "default": "0",
+   "description": "Block submission of Sales Order, Sales Invoice, Delivery Note, Purchase Order, Purchase Invoice and Purchase Receipt when the customer/supplier address is the company's own address (same Address, or the same text and numbers) and the GSTIN is the same or missing. A different GSTIN at the same premises is allowed. Returns are not checked.",
+   "fieldname": "block_same_party_company_address",
+   "fieldtype": "Check",
+   "label": "Block Party Address Same as Company Address"
+  },
+  {
+   "default": "90",
+   "depends_on": "eval:doc.block_same_party_company_address",
+   "description": "How closely the two address texts must match to count as the same address. Every number in them (shed / plot no., PIN) must also match exactly.",
+   "fieldname": "same_address_match_threshold",
+   "fieldtype": "Percent",
+   "label": "Address Match Threshold (%)"
   },
   {
    "fieldname": "tab_break_grid",
@@ -701,7 +718,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-09-19 12:00:00.000000",
+ "modified": "2026-10-21 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Business Needed Solutions",
  "name": "BNS Settings",

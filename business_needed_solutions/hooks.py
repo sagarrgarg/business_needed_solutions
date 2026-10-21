@@ -263,6 +263,7 @@ doc_events = {
         ],
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
+            "business_needed_solutions.business_needed_solutions.overrides.same_address_validation.validate_party_company_address_differ",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_return_credit_note_parity",
             "business_needed_solutions.bns_branch_accounting.utils.bns_guard_asset_in_transit",
@@ -291,6 +292,7 @@ doc_events = {
         ],
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
+            "business_needed_solutions.business_needed_solutions.overrides.same_address_validation.validate_party_company_address_differ",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_accounting_settings_for_dn_pr",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_address_parity",
@@ -330,6 +332,7 @@ doc_events = {
         ],
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
+            "business_needed_solutions.business_needed_solutions.overrides.same_address_validation.validate_party_company_address_differ",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_stock_movement_captured",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_return_credit_note_parity",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_address_parity",
@@ -357,6 +360,7 @@ doc_events = {
         "before_save": "business_needed_solutions.business_needed_solutions.overrides.batch_naming.set_custom_batch_nos",
         "before_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.ensure_stock_patches.before_submit",
+            "business_needed_solutions.business_needed_solutions.overrides.same_address_validation.validate_party_company_address_differ",
             "business_needed_solutions.business_needed_solutions.overrides.attachment_validation.validate_purchase_attachments",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_invoice_si_parity",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_address_parity",
@@ -410,9 +414,11 @@ doc_events = {
     },
     "Sales Order": {
         "validate": "business_needed_solutions.bns_branch_accounting.overrides.billing_location.set_customer_address_from_billing_location",
+        "before_submit": "business_needed_solutions.business_needed_solutions.overrides.same_address_validation.validate_party_company_address_differ",
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Purchase Order": {
+        "before_submit": "business_needed_solutions.business_needed_solutions.overrides.same_address_validation.validate_party_company_address_differ",
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Payment Request": {

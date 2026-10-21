@@ -544,7 +544,7 @@ def update_child_items(
 				child_item.price_list_rate = flt(item_details["price_list_rate"], plr_precision)
 				# Recompute rate when client sent 0 (no price_list_rate to compute from)
 				if not flt(d.get("rate")):
-					computed_rate, _ = _compute_rate_from_price_list(
+					computed_rate, _computed_disc = _compute_rate_from_price_list(
 						parent_doctype=parent_doctype,
 						discount_type=discount_type,
 						price_list_rate=child_item.price_list_rate,
