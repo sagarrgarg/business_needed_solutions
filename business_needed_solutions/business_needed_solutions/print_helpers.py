@@ -32,14 +32,16 @@ def get_einvoice_qr_code(qr_text: str, size_px_per_module: int = 6) -> str:
 # under the items, the items page is filled to its foot and the block sits at the foot of
 # the next page.
 
-FILL_MARKERS = ("BNSMKT", "BNSMKH", "BNSMKA", "BNSMKB", "BNSMKC", "BNSMKZ")
+FILL_MARKERS = ("BNSMKS", "BNSMKT", "BNSMKH", "BNSMKA", "BNSMKB", "BNSMKC", "BNSMKZ")
 # Measuring pass prints a column of BNSMKZ lines, each RULER_STEP_PT tall, after the
 # closing block. The last one on that page shows exactly where the page body ends.
 RULER_STEP_PT = 3.0
-# wkhtmltopdf draws a ruler line that straddles the page cut on both pages, so the ruler
-# reads ~9pt low; this slack absorbs that and keeps the block whole (tested 8pt splits).
-_SLACK_PT = 10.0
+# wkhtmltopdf draws a ruler line that straddles the page cut on both pages, so the last
+# ruler line can sit ~7pt past the real cut. Keeping the block 12pt above the last ruler
+# line (~4mm) held across 1-60 line invoices; 8pt split the block on some pages.
+_SLACK_PT = 12.0
 _MIN_ROW_PT = 4.0
+_BLOCK_GAP_PT = 5.7  # .final-tax-total-table margin-top: 2mm
 
 
 def get_tally_fill_plan(doc, print_format: str) -> dict:
@@ -77,35 +79,53 @@ def get_tally_fill_plan(doc, print_format: str) -> dict:
 
 def _plan_from_pdf(pdf: bytes) -> dict | None:
 	marks = _marker_positions(pdf)
+	# A marker that falls exactly on a page cut is drawn on both pages. What follows a
+	# start marker continues on the later page, so it belongs there; end markers close
+	# what came before, so they belong to the earlier page.
 	try:
 		page_a, items_end = marks["BNSMKA"][0]
-		page_b, _block_top = marks["BNSMKB"][0]
+		page_b, block_top = marks["BNSMKB"][-1]
 		page_c, block_end = marks["BNSMKC"][0]
+		body_top = marks["BNSMKS"][0][1]
 	except (KeyError, IndexError):
 		return None
 
-	if page_b != page_c:
-		# Closing block is taller than a page: let it flow, no fill.
-		return {"measure": False, "rows": [], "keep_block": False}
+	no_fill = {"measure": False, "rows": [], "keep_block": False}
 
-	# Every page has the same header and footer, so one body bottom fits all pages.
+	# Every page has the same header and footer, so one body top/bottom fits all pages.
 	ruler = [top for page, top in marks.get("BNSMKZ", []) if page == page_c]
 	if not ruler:
-		return {"measure": False, "rows": [], "keep_block": True}
-	body_bottom = max(ruler) + RULER_STEP_PT
+		return no_fill
+	body_bottom = max(ruler)
 
 	head = 0.0
 	if marks.get("BNSMKT") and marks.get("BNSMKH"):
 		head = max(0.0, marks["BNSMKH"][0][1] - marks["BNSMKT"][0][1])
 
-	rows = []
-	if page_b == page_a:
-		rows.append(body_bottom - block_end - _SLACK_PT)
-	elif page_b == page_a + 1:
-		rows.append(body_bottom - items_end - _SLACK_PT)
-		rows.append(body_bottom - block_end - head - _SLACK_PT)
+	# wkhtmltopdf does not reliably keep the block whole, so it may have split across a
+	# page cut while measuring; rebuild its height from both halves.
+	if page_c == page_b:
+		block_height = block_end - block_top
+	elif page_c == page_b + 1:
+		block_height = (body_bottom - block_top) + (block_end - body_top)
 	else:
-		return {"measure": False, "rows": [], "keep_block": True}
+		return no_fill
+	# Space between the item table and the block (the block's top margin).
+	gap = block_top - items_end if page_b == page_a else _BLOCK_GAP_PT
+
+	if block_height + head + gap + _SLACK_PT > body_bottom - body_top:
+		return no_fill  # the block alone is taller than a page: let it flow
+
+	rows = []
+	room_under_items = body_bottom - _SLACK_PT - (items_end + gap + block_height)
+	if page_b == page_a and page_c == page_a and room_under_items >= 0:
+		# Fits under the items with the safety gap: one fill row pushes it to the foot.
+		rows.append(room_under_items)
+	else:
+		# Does not fit: fill the items page to its foot, then on the next page (item
+		# header repeats) fill down to where the block must start to end at the foot.
+		rows.append(body_bottom - items_end - _SLACK_PT)
+		rows.append(body_bottom - body_top - head - gap - block_height - _SLACK_PT)
 
 	return {
 		"measure": False,
