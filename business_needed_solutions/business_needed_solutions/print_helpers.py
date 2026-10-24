@@ -32,7 +32,18 @@ def get_einvoice_qr_code(qr_text: str, size_px_per_module: int = 6) -> str:
 # under the items, the items page is filled to its foot and the block sits at the foot of
 # the next page.
 
-FILL_MARKERS = ("BNSMKS", "BNSMKT", "BNSMKH", "BNSMKA", "BNSMKB", "BNSMKC", "BNSMKZ")
+FILL_MARKERS = (
+	"BNSMKS",
+	"BNSMKT",
+	"BNSMKH",
+	"BNSMKA",
+	"BNSMKB",
+	"BNSMKC",
+	"BNSMKZ",
+	"BNSMKW",
+	"BNSMKD",
+	"BNSMKE",
+)
 # Measuring pass prints a column of BNSMKZ lines, each RULER_STEP_PT tall, after the
 # closing block. The last one on that page shows exactly where the page body ends.
 RULER_STEP_PT = 3.0
@@ -79,6 +90,47 @@ def get_tally_fill_plan(doc, print_format: str) -> dict:
 
 def _plan_from_pdf(pdf: bytes) -> dict | None:
 	marks = _marker_positions(pdf)
+	plan = _closing_block_plan(marks)
+	if plan is not None:
+		plan.update(_ewaybill_plan(marks))
+	return plan
+
+
+def _page_body(marks: dict) -> tuple[float, float] | None:
+	"""(body_top, body_bottom) in pt, the same on every page (same header/footer)."""
+	try:
+		body_top = marks["BNSMKS"][0][1]
+		page_c = marks["BNSMKC"][0][0]
+	except (KeyError, IndexError):
+		return None
+	ruler = [top for page, top in marks.get("BNSMKZ", []) if page == page_c]
+	return (body_top, max(ruler)) if ruler else None
+
+
+def _ewaybill_plan(marks: dict) -> dict:
+	"""Make the e-Waybill page fill exactly one page.
+
+	Short of a page: stretch its details table so the rows spread to the page foot.
+	Longer than a page: scale the whole page down (CSS zoom) so it fits on one.
+	"""
+	body = _page_body(marks)
+	try:
+		page_w, top = marks["BNSMKW"][-1]
+		page_d, details_top = marks["BNSMKD"][-1]
+		page_e, end = marks["BNSMKE"][0]
+	except (KeyError, IndexError):
+		return {}
+	if not body:
+		return {}
+	body_top, body_bottom = body
+	limit = body_bottom - _SLACK_PT
+	if page_e == page_w and page_d == page_w and end <= limit:
+		return {"ewb_details_pt": round(end - details_top + (limit - end), 1)}
+	natural = end - top if page_e == page_w else (body_bottom - top) + (end - body_top)
+	return {"ewb_zoom": round(max(0.5, (limit - body_top) / natural) * 0.98, 3)}
+
+
+def _closing_block_plan(marks: dict) -> dict | None:
 	# A marker that falls exactly on a page cut is drawn on both pages. What follows a
 	# start marker continues on the later page, so it belongs there; end markers close
 	# what came before, so they belong to the earlier page.
