@@ -136,6 +136,7 @@ jinja = {
     "methods": [
         "business_needed_solutions.bns_branch_accounting.gst_integration.get_ewaybill_data_for_print",
         "business_needed_solutions.business_needed_solutions.print_helpers.get_einvoice_qr_code",
+        "business_needed_solutions.business_needed_solutions.print_helpers.get_tally_fill_plan",
     ]
 }
 
