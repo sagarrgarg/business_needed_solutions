@@ -110,7 +110,8 @@ Located in `business_needed_solutions/patches.txt`. Pre-model-sync patches run b
 Jinja templates under `print_format/`: SI V2, PI V2, and V1 for SO, DN and PO. Configuration via BNS Settings Print Format child table. See `PRINT_FORMAT_GUIDE.md` for details.
 
 - **Bump `modified` in the JSON whenever you edit a print format file.** Migrate only imports a standard print format when the file's `modified` is newer than the site's copy; without the bump the edit never reaches sites.
-- `fixtures/print_format.json` is imported on every migrate and overwrites synced files. Keep only formats that have no `print_format/` folder in it (today: Delivery Note - V1, Quotation - V1, POS SI 3Inch - V1, QT Dynamic V1, and PO Dynamic V1, whose newer file is not shipped yet).
+- `fixtures/print_format.json` is imported on every migrate and overwrites synced files. Keep only formats that have no `print_format/` folder in it (today: Delivery Note - V1, Quotation - V1, POS SI 3Inch - V1, and QT Dynamic V1, which is site-made, so edit its fixture entry).
+- SI V2, PI V2, DN V1, SO V1, PO Dynamic V1 and QT Dynamic V1 share one layout: header via `#header-html` (no fixed margin-top), Tally-style fill and a closing block (`.final-tax-total-table`) pinned to the page foot by `print_helpers.get_tally_fill_plan`, which renders the document once with `BNSMK*` markers to measure the page. Keep those markers and the `bns-fill` row cells in step with the item table when editing a template.
 - Never set a fixed `.print-format { margin-top }` with a `#header-html` header: wkhtmltopdf cuts any header taller than that margin. Leave it unset so the margin follows the header.
 
 ### Reports

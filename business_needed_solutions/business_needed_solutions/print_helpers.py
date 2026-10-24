@@ -168,6 +168,11 @@ def _closing_block_plan(marks: dict) -> dict | None:
 	if block_height + head + gap + _SLACK_PT > body_bottom - body_top:
 		return no_fill  # the block alone is taller than a page: let it flow
 
+	# Items ended exactly on a page cut: the end marker sits at the top of the next page,
+	# where the fill row would open under a repeated item header, so count that header.
+	if page_a > 0 and items_end - body_top < 3:
+		items_end = body_top + head
+
 	rows = []
 	room_under_items = body_bottom - _SLACK_PT - (items_end + gap + block_height)
 	if page_b == page_a and page_c == page_a and room_under_items >= 0:
