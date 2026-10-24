@@ -750,19 +750,26 @@ Stock Entry, Sales Invoice, Sales Order, Delivery Note, Purchase Invoice, Purcha
 
 ## 16. Print Formats
 
+One format per document: SI and PI use V2, everything else V1. Older versions are removed by
+the `remove_old_print_format_versions` patch.
+
 | Name | DocType | Key Features |
 |------|---------|-------------|
-| BNS SI Dynamic V1 | Sales Invoice | Jinja template with GST, payment terms, barcodes, builty, e-invoice/e-waybill |
-| BNS SI -V2 (d1d2d3) | Sales Invoice | D1/D2/D3 tiered discount columns |
+| BNS SI Dynamic V2 | Sales Invoice | GST, D1/D2/D3 discounts, payment terms, builty; slim IRN strip with the signed QR in the party table; e-waybill page |
+| BNS PI Dynamic V2 | Purchase Invoice | Same layout as SI V2; supplier bill no./date in the header |
 | BNS SO Dynamic V1 | Sales Order | Dynamic sales order layout |
+| BNS DN Dynamic V1 | Delivery Note | Transport info, delivery terms |
 | BNS PO Dynamic V1 | Purchase Order | Dynamic PO layout |
 | BNS PO - V1 | Purchase Order | Full PO with bank details, signatory blocks |
-| BNS DN Dynamic V1 | Delivery Note | Transport info, delivery terms |
-| BNS Delivery Note - V1 | Delivery Note | Basic DN layout |
-| BNS PI Dynamic V1 | Purchase Invoice | Dynamic PI layout |
 | BNS QT Dynamic V1 | Quotation | Dynamic quotation layout |
+| BNS Delivery Note - V1 | Delivery Note | Basic DN layout |
 | BNS POS SI 3Inch - V1 | POS Invoice | 3-inch thermal receipt format |
 | BNS Quotation - V1 | Quotation | Standard quotation layout |
+
+Layout rules (SI/PI V2): no fixed `.print-format { margin-top }` — wkhtmltopdf sizes the top
+margin to `#header-html`, so extra header lines never cut the page top. The closing block splits
+between its parts (totals, HSN, payment, T&C) instead of moving to a new page as one piece.
+The e-invoice QR comes from `get_einvoice_qr_code` (error correction M), readable at 34 mm.
 
 ---
 

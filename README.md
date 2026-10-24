@@ -63,7 +63,7 @@ Business Needed Solutions is a comprehensive enterprise-grade application that e
 ### **Available Print Formats**
 
 #### **1. Sales Invoice Formats**
-- **BNS SI Dynamic V1**: Professional sales invoice with e-invoice support
+- **BNS SI Dynamic V2**: Professional sales invoice with e-invoice support
 - **Features**:
   - Company logo and branding
   - Bank account details

@@ -10,7 +10,7 @@ This guide provides detailed instructions for configuring all print formats in B
 
 ### **1. Sales Invoice Formats**
 
-#### **BNS SI Dynamic V1**
+#### **BNS SI Dynamic V2**
 **Document Type**: Sales Invoice
 **Features**:
 - ✅ Company logo and branding

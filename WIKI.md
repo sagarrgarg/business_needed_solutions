@@ -107,10 +107,11 @@
    - **Print Format**: Select the format to use
 
 2. **Common Mappings**:
-   - **Sales Invoice** → **BNS SI Dynamic V1**
+   - **Sales Invoice** → **BNS SI Dynamic V2**
    - **Delivery Note** → **BNS DN Dynamic V1**
    - **Purchase Order** → **BNS PO Dynamic V1**
    - **Sales Order** → **BNS SO Dynamic V1**
+   - **Purchase Invoice** → **BNS PI Dynamic V2**
 
 ---
 
@@ -164,7 +165,7 @@
 
 ### **Print Format Features**
 
-#### **Sales Invoice Format (BNS SI Dynamic V1)**
+#### **Sales Invoice Format (BNS SI Dynamic V2)**
 **Features Available**:
 - ✅ Company logo and branding
 - ✅ Bank account details
