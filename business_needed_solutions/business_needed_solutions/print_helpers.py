@@ -1,6 +1,6 @@
 """Jinja helpers for BNS print formats."""
 
-import importlib.util
+import re
 from io import BytesIO
 
 import frappe
@@ -66,8 +66,6 @@ def get_tally_fill_plan(doc, print_format: str) -> dict:
 		return {"measure": True, "rows": [], "keep_block": True}
 
 	plan = {"measure": False, "rows": [], "keep_block": False}
-	if not importlib.util.find_spec("pdfplumber"):  # shipped with ERPNext
-		return plan
 
 	frappe.flags.bns_fill_measuring = True
 	try:
@@ -191,16 +189,31 @@ def _closing_block_plan(marks: dict) -> dict | None:
 	}
 
 
+_MARKER = re.compile(r"BNSMK[A-Z]")
+# A glyph's top sits this fraction of the font size above its baseline (measured on
+# wkhtmltopdf's output; pdfplumber's word tops agree to 0.01pt).
+_ASCENT = 0.707
+
+
 def _marker_positions(pdf: bytes) -> dict[str, list[tuple[int, float]]]:
-	"""{marker: [(page_index, top_pt), ...]} in page order."""
-	import pdfplumber
+	"""{marker: [(page_index, top_pt), ...]} in page order.
+
+	Uses pypdf, which Frappe ships on v15 and v16 (pdfplumber only comes with ERPNext v16).
+	"""
+	from pypdf import PdfReader
 
 	found: dict[str, list[tuple[int, float]]] = {}
-	with pdfplumber.open(BytesIO(pdf)) as document:
-		for index, page in enumerate(document.pages):
-			for char_run in page.extract_words(keep_blank_chars=False, use_text_flow=True):
-				text = char_run["text"]
-				for marker in FILL_MARKERS:
-					if marker in text:
-						found.setdefault(marker, []).append((index, float(char_run["top"])))
+	for index, page in enumerate(PdfReader(BytesIO(pdf)).pages):
+		height = float(page.mediabox.height)
+
+		def visit(text, cm, tm, font_dict, font_size, index=index, height=height):
+			if "BNSMK" not in text:
+				return
+			baseline = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]  # text origin in page space
+			size = font_size * abs(tm[3] * cm[3] if tm[3] else cm[3])
+			top = height - baseline - _ASCENT * size
+			for marker in _MARKER.findall(text):
+				found.setdefault(marker, []).append((index, top))
+
+		page.extract_text(visitor_text=visit)
 	return found
