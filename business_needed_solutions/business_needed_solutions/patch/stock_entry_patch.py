@@ -2,7 +2,9 @@ import frappe
 from erpnext.stock.doctype.stock_entry.stock_entry import StockEntry
 
 # safe replacement of get_bom_raw_materials
-def patched_get_bom_raw_materials(self, qty):
+def patched_get_bom_raw_materials(self, qty, *args, **kwargs):
+    # ERPNext also passes split_alternative_items; extra arguments are accepted and ignored,
+    # as this replacement always resolves alternative items itself.
     from erpnext.manufacturing.doctype.bom.bom import get_bom_items_as_dict
     from erpnext.manufacturing.doctype.work_order.work_order import get_used_alternative_items
 

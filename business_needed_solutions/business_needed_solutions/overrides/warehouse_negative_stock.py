@@ -261,15 +261,15 @@ def apply_patches():
 		)
 	
 	# Patch validate_negative_qty_in_future_sle
-	def patched_validate(args, allow_negative_stock=False):
+	# Every wrapper below takes *args/**kwargs and passes them to ERPNext unchanged, so
+	# a parameter ERPNext adds or renames (v16.52 added make_entry's
+	# defer_future_dimension_check) cannot break stock posting.
+	def patched_validate(args, *pargs, **kwargs):
 		"""Patched wrapper for validate_negative_qty_in_future_sle"""
 		# First run original validation (this will return early if ERPNext doesn't allow negative stock)
-		# But we still need to check warehouse restriction even if ERPNext allows globally
-		try:
-			stock_ledger_module._original_validate_negative_qty_in_future_sle(args, allow_negative_stock)
-		except Exception:
-			# If original validation throws, re-raise it
-			raise
+		# But we still need to check warehouse restriction even if ERPNext allows globally.
+		# If the original validation throws, the error propagates as is.
+		stock_ledger_module._original_validate_negative_qty_in_future_sle(args, *pargs, **kwargs)
 		
 		# If we get here, ERPNext allows negative stock globally (or validation passed)
 		# Now check warehouse-level restriction regardless of allow_negative_stock parameter
@@ -290,7 +290,7 @@ def apply_patches():
 	if not hasattr(stock_ledger_module, '_original_make_entry'):
 		stock_ledger_module._original_make_entry = stock_ledger_module.make_entry
 	
-	def patched_make_entry(args, allow_negative_stock=False, via_landed_cost_voucher=False):
+	def patched_make_entry(args, *pargs, **kwargs):
 		"""Patched wrapper for make_entry that validates warehouse restriction before creating SLE"""
 		# Validate warehouse restriction BEFORE creating the SLE
 		# This catches negative stock at the source, not just in future SLEs
@@ -314,8 +314,8 @@ def apply_patches():
 				# Validate - this will throw if negative stock would occur
 				validate_warehouse_negative_stock(validation_args)
 		
-		# Call original make_entry
-		return stock_ledger_module._original_make_entry(args, allow_negative_stock, via_landed_cost_voucher)
+		# Call original make_entry with exactly what ERPNext passed
+		return stock_ledger_module._original_make_entry(args, *pargs, **kwargs)
 	
 	stock_ledger_module.make_entry = site_gated(stock_ledger_module._original_make_entry, patched_make_entry)
 	
@@ -325,7 +325,7 @@ def apply_patches():
 			stock_ledger_module.update_entries_after.validate_negative_stock
 		)
 	
-	def patched_method(self, sle):
+	def patched_method(self, sle, *pargs, **kwargs):
 		"""Patched wrapper for update_entries_after.validate_negative_stock"""
 		# Original validation logic
 		diff = self.wh_data.qty_after_transaction + flt(sle.actual_qty) - flt(self.reserved_stock)

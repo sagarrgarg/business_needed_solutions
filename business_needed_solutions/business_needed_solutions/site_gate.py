@@ -6,6 +6,7 @@ installed through site_gated(), so a site without BNS keeps running ERPNext's or
 """
 
 import functools
+import inspect
 
 import frappe
 
@@ -36,3 +37,20 @@ def site_gated(original, replacement):
 
 	gated._bns_original = original
 	return gated
+
+
+def call_arguments(func, *args, **kwargs) -> dict:
+	"""The arguments `func` would receive for this call, by parameter name, defaults included.
+
+	BNS wrappers take ``*args, **kwargs`` and hand them to ERPNext unchanged, so a parameter
+	ERPNext adds or renames in a later version can never break the call. When a wrapper also
+	needs one of the values itself, it reads it here, through ERPNext's own signature, rather
+	than from a hard-coded position. Returns {} if the call does not fit the signature (the
+	original call then raises ERPNext's own error).
+	"""
+	try:
+		bound = inspect.signature(func).bind(*args, **kwargs)
+	except (TypeError, ValueError):
+		return {}
+	bound.apply_defaults()
+	return dict(bound.arguments)

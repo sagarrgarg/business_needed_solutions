@@ -30,7 +30,7 @@ from business_needed_solutions.bns_branch_accounting.transfer_value_conservation
     rate_precision,
 )
 from business_needed_solutions.business_needed_solutions.compat import asset_purchase_amount_field
-from business_needed_solutions.business_needed_solutions.site_gate import site_gated
+from business_needed_solutions.business_needed_solutions.site_gate import call_arguments, site_gated
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -417,25 +417,26 @@ def _apply_bns_transfer_rate_stock_ledger_patch() -> None:
             _BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED = True
             return
 
-        def patched_get_incoming_outgoing_rate_from_transaction(self, sle):
-            rate = original_method(self, sle)
+        # Wrappers pass *args/**kwargs through so a parameter ERPNext adds cannot break them.
+        def patched_get_incoming_outgoing_rate_from_transaction(self, sle, *args, **kwargs):
+            rate = original_method(self, sle, *args, **kwargs)
             transfer_rate = _get_bns_transfer_rate_for_sle(sle)
             if transfer_rate is not None:
                 sle.incoming_rate = transfer_rate
                 return transfer_rate
             return rate
 
-        def patched_process_sle(self, sle):
+        def patched_process_sle(self, sle, *args, **kwargs):
             transfer_rate = _get_bns_transfer_rate_for_sle(sle)
             if transfer_rate is None or flt(sle.actual_qty) <= 0:
-                return original_process_sle(self, sle)
+                return original_process_sle(self, sle, *args, **kwargs)
 
             sle.incoming_rate = transfer_rate
             sle.recalculate_rate = 1
             # Captured before ERPNext prices the row, to tell whether it did and what it changed.
             svd_before = flt(sle.get("stock_value_difference"))
             doctype_before = sle.get("doctype")
-            result = original_process_sle(self, sle)
+            result = original_process_sle(self, sle, *args, **kwargs)
             # Conserve the sender's value (qty x transfer rate) inside the engine, so the row's
             # stock value moves with its value difference and every later row builds on it.
             from business_needed_solutions.bns_branch_accounting.transfer_value_conservation import (
@@ -3385,25 +3386,27 @@ def _apply_bns_internal_gl_rewrite_patch() -> None:
             _BNS_INTERNAL_GL_PATCHED = True
             return
 
-        def patched_stock_get_gl_entries(self, warehouse_account=None, default_expense_account=None, default_cost_center=None):
-            gl_entries = original_stock_get_gl_entries(self, warehouse_account, default_expense_account, default_cost_center)
+        # *args/**kwargs pass through untouched: v16 renamed warehouse_account to
+        # inventory_account_map, and any keyword call must reach ERPNext as made.
+        def patched_stock_get_gl_entries(self, *args, **kwargs):
+            gl_entries = original_stock_get_gl_entries(self, *args, **kwargs)
             if getattr(self, "doctype", None) == "Delivery Note":
                 gl_entries = _rewrite_bns_internal_dn_gl_entries(self, gl_entries)
                 return append_asset_transfer_gl_entries(self, gl_entries)
             return gl_entries
 
-        def patched_pr_get_gl_entries(self, warehouse_account=None, via_landed_cost_voucher=False):
-            gl_entries = original_pr_get_gl_entries(self, warehouse_account, via_landed_cost_voucher)
+        def patched_pr_get_gl_entries(self, *args, **kwargs):
+            gl_entries = original_pr_get_gl_entries(self, *args, **kwargs)
             gl_entries = _rewrite_bns_internal_pr_gl_entries(self, gl_entries)
             return append_asset_transfer_gl_entries(self, gl_entries)
 
-        def patched_pi_get_gl_entries(self, warehouse_account=None):
-            gl_entries = original_pi_get_gl_entries(self, warehouse_account)
+        def patched_pi_get_gl_entries(self, *args, **kwargs):
+            gl_entries = original_pi_get_gl_entries(self, *args, **kwargs)
             gl_entries = _rewrite_bns_internal_pi_gl_entries(self, gl_entries)
             return append_asset_transfer_gl_entries(self, gl_entries)
 
-        def patched_si_get_gl_entries(self, warehouse_account=None):
-            gl_entries = original_si_get_gl_entries(self, warehouse_account)
+        def patched_si_get_gl_entries(self, *args, **kwargs):
+            gl_entries = original_si_get_gl_entries(self, *args, **kwargs)
             gl_entries = _rewrite_bns_internal_si_gl_entries(self, gl_entries)
             return append_asset_transfer_gl_entries(self, gl_entries)
 
@@ -4273,12 +4276,13 @@ def _apply_bns_repost_gl_failsafe_patch() -> None:
             _BNS_REPOST_GL_FAILSAFE_PATCHED = True
             return
 
-        def patched_repost_gl_entries(doc):
+        # v16.52 calls repost_gl_entries(doc, vouchers); pass every argument through.
+        def patched_repost_gl_entries(doc, *args, **kwargs):
             doc_lock_scope = "repost_item_valuation"
             doc_lock_repost = doc.name if doc else ""
             doc_lock_voucher_type = "Repost Item Valuation"
             doc_lock_voucher_no = doc.name if doc else ""
-            original_repost_gl_entries(doc)
+            original_repost_gl_entries(doc, *args, **kwargs)
             try:
                 _run_bns_gl_repost_correction(doc)
             except Exception as e:
@@ -4334,9 +4338,10 @@ def _apply_bns_repost_accounting_ledger_patch() -> None:
                 _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = True
                 return
 
-            def patched_start_repost(account_repost_doc=None):
-                result = original_start_repost(account_repost_doc)
-                _bns_after_repost(account_repost_doc)
+            def patched_start_repost(*args, **kwargs):
+                result = original_start_repost(*args, **kwargs)
+                bound = call_arguments(original_start_repost, *args, **kwargs)
+                _bns_after_repost(bound.get("account_repost_doc", args[0] if args else None))
                 return result
 
             patched_start_repost._bns_repost_accounting_patched = True
@@ -4421,7 +4426,7 @@ def _suppress_repost_error_emails() -> None:
             _BNS_REPOST_EMAIL_SUPPRESSED = True
             return
 
-        def _noop(doc, traceback):
+        def _noop(*args, **kwargs):
             pass
 
         _noop._bns_suppressed = True
@@ -4463,21 +4468,21 @@ def _apply_bns_asset_internal_patches() -> None:
             _BNS_ASSET_INTERNAL_PATCHED = True
             return
 
-        def patched_process_fixed_asset(self):
+        def patched_process_fixed_asset(self, *args, **kwargs):
             try:
                 if is_bns_internal_transfer(self):
                     return
             except Exception:
                 logger.exception("BNS asset: process_fixed_asset guard failed for %s", getattr(self, "name", "?"))
-            return original_process_fixed_asset(self)
+            return original_process_fixed_asset(self, *args, **kwargs)
 
-        def patched_process_asset_depreciation(self):
+        def patched_process_asset_depreciation(self, *args, **kwargs):
             try:
                 if is_bns_internal_transfer(self):
                     return
             except Exception:
                 logger.exception("BNS asset: process_asset_depreciation guard failed for %s", getattr(self, "name", "?"))
-            return original_process_asset_depreciation(self)
+            return original_process_asset_depreciation(self, *args, **kwargs)
 
         patched_process_fixed_asset._bns_asset_internal_patched = True
         patched_process_asset_depreciation._bns_asset_internal_patched = True
@@ -4529,8 +4534,13 @@ def _wrap_bns_sticky_set_status(original_set_status):
     status. ERPNext's overdue scheduler only escalates 'Unpaid%'/'Partly Paid%'
     rows, so preventing the drift to Unpaid here keeps the status sticky."""
 
-    def patched_set_status(self, update=False, status=None, update_modified=True):
-        result = original_set_status(self, update=update, status=status, update_modified=update_modified)
+    def patched_set_status(self, *args, **kwargs):
+        result = original_set_status(self, *args, **kwargs)
+        # Read the call's values through ERPNext's own signature, whatever it is today.
+        bound = call_arguments(original_set_status, self, *args, **kwargs)
+        update = bound.get("update", False)
+        status = bound.get("status")
+        update_modified = bound.get("update_modified", True)
         try:
             # Only re-assert on a recompute (status not explicitly forced) so an
             # explicit set (e.g. Cancelled) is respected.
