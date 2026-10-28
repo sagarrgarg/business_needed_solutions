@@ -836,8 +836,13 @@ class BNSDashboard {
 								</div>
 								<div class="sub-section-content" id="subcontent-suppliers-tds-redo" style="display: none; padding-top: 10px;">
 									<p class="text-muted" style="font-size: 0.8rem;">
-										${__("A supplier's TDS Category was removed or changed after TDS had already gone onto this fiscal year's invoices. Redo takes TDS off every one of those invoices and, if the supplier still has a category, applies it again from the first invoice of the year.")}
+										${__("A supplier's TDS Category was removed or changed after TDS had already gone onto this fiscal year's invoices. Redo works out the year again under the supplier's category as it is now and shows every invoice whose TDS would change before anything is written. Only those invoices are touched.")}
 									</p>
+									<div id="tds-check-supplier" class="d-flex align-items-center mb-2" style="gap: 8px;">
+										<span class="text-muted small">${__("Check any supplier's TDS for this year")}</span>
+										<div class="tds-check-field" style="width: 260px;"></div>
+										<button class="btn btn-default btn-xs btn-tds-check-supplier">${__("Preview")}</button>
+									</div>
 									<div id="table-suppliers-tds-redo">
 										<p class="text-muted">${__("Loading...")}</p>
 									</div>
@@ -856,7 +861,7 @@ class BNSDashboard {
 								</div>
 								<div class="sub-section-content" id="subcontent-tds-account-remap" style="display: none; padding-top: 10px;">
 									<p class="text-muted" style="font-size: 0.8rem;">
-										${__("The account on a Tax Withholding Category was changed after these invoices were booked. Re-map moves each invoice's TDS to the category's current account. The amount, the supplier's balance and payments are not touched.")}
+										${__("The account on a Tax Withholding Category was changed after these invoices were booked. Re-map moves each invoice's TDS to the category's current account (previewed first). The amount, the supplier's balance and payments are not touched. Challans paid out of the old account have to be moved by hand.")}
 									</p>
 									<div class="mb-2">
 										<button class="btn btn-primary btn-xs" id="btn-remap-tds-accounts" disabled>
@@ -909,35 +914,17 @@ class BNSDashboard {
 	async load_tds_account_remap() {
 		const self = this;
 		const btn = this.wrapper.find("#btn-remap-tds-accounts");
-		if (!this._onTdsRemapComplete) {
-			this._onTdsRemapComplete = function (data) {
-				const d = data || {};
-				let msg = __("{0} of {1} invoice(s) moved to the mapped account ({2}).", [d.remapped || 0, d.invoices || 0, format_currency(d.amount || 0)]);
-				if (d.error_count) {
-					msg += "<br><br>" + __("{0} invoice(s) failed:", [d.error_count]) + "<br>" + (d.errors || []).slice(0, 10).map(function (e) {
-						return frappe.utils.escape_html(e.purchase_invoice + ": " + e.error);
-					}).join("<br>");
-				}
-				frappe.msgprint({ title: __("TDS account re-map finished"), message: msg, indicator: d.error_count ? "orange" : "green" });
-				self.load_tds_account_remap();
-			};
-			frappe.realtime.on("bns_tds_remap_complete", this._onTdsRemapComplete);
+		if (!this._remap_bound) {
+			this._remap_bound = true;
+			this._bind_tds_done("bns_tds_remap_complete", __("TDS account re-map finished"));
 			btn.on("click", function () {
-				frappe.confirm(
-					__("Move the TDS on every listed invoice to its category's current account? One transfer pair is posted per invoice, on the invoice's date. Runs in the background."),
-					async function () {
-						btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> ' + __("Queued"));
-						try {
-							await frappe.call({
-								method: "business_needed_solutions.business_needed_solutions.overrides.tds_backfill.remap_tds_accounts",
-								args: { company: self.get_company() },
-							});
-							frappe.show_alert({ message: __("Re-map queued. You will get a message when it finishes."), indicator: "blue" }, 6);
-						} catch (e) {
-							btn.prop("disabled", false).html('<i class="fa fa-exchange"></i> ' + __("Re-map all"));
-						}
-					}
-				);
+				bns_tds.open_preview({
+					title: __("Re-map TDS accounts: preview"),
+					preview_method: "business_needed_solutions.business_needed_solutions.overrides.tds_backfill.preview_tds_remap",
+					apply_method: "business_needed_solutions.business_needed_solutions.overrides.tds_backfill.remap_tds_accounts",
+					args: { company: self.get_company() },
+					on_done: function () { self.load_tds_account_remap(); },
+				});
 			});
 		}
 		const container = this.wrapper.find("#table-tds-account-remap");
@@ -958,6 +945,9 @@ class BNSDashboard {
 				html += "<tr><td>" + frappe.utils.escape_html(g.category || "") + '</td><td><span class="text-danger">' + frappe.utils.escape_html(g.old_account || "") + '</span></td><td><span class="text-success">' + frappe.utils.escape_html(g.new_account || "") + "</span></td><td>" + (g.invoices || 0) + "</td><td>" + format_currency(g.amount || 0) + "</td></tr>";
 			});
 			html += "</tbody></table>";
+			if (data.challans && data.challans.length) {
+				html += '<p class="text-danger mb-0">' + __("{0} challan(s) worth {1} were paid out of the old account(s) this year. Re-map moves invoices only; move these by hand (cancel and amend with the new account) or the old account keeps a debit balance.", [data.challans.length, format_currency(data.challan_amount || 0)]) + "</p>";
+			}
 			container.html(html);
 		} catch (e) {
 			console.error("Failed to load TDS account remap:", e);
@@ -967,24 +957,19 @@ class BNSDashboard {
 
 	async load_suppliers_tds_redo() {
 		const self = this;
-		if (!this._onTdsRedoComplete) {
-			this._onTdsRedoComplete = function (data) {
-				const d = data || {};
-				let msg = __("{0}: TDS removed from {1} invoice(s) ({2})", [frappe.utils.escape_html(d.supplier || ""), d.removed || 0, format_currency(d.removed_amount || 0)]);
-				if (d.category) {
-					msg += d.reapplied
-						? "<br>" + __("Applied again under {0} on {1} invoice(s) ({2})", [frappe.utils.escape_html(d.category), d.applied || 0, format_currency(d.applied_amount || 0)])
-						: "<br>" + __("NOT applied again, because some invoices could not be cleared.");
-				}
-				if (d.error_count) {
-					msg += "<br><br>" + __("{0} invoice(s) failed:", [d.error_count]) + "<br>" + (d.errors || []).slice(0, 10).map(function (e) {
-						return frappe.utils.escape_html(e.purchase_invoice + ": " + e.error);
-					}).join("<br>");
-				}
-				frappe.msgprint({ title: __("TDS Redo finished"), message: msg, indicator: d.error_count ? "orange" : "green" });
-				self.load_tds_fixables();
-			};
-			frappe.realtime.on("bns_tds_redo_complete", this._onTdsRedoComplete);
+		this._bind_tds_done("bns_tds_redo_complete", __("TDS Redo finished"));
+		const holder = this.wrapper.find("#tds-check-supplier");
+		if (holder.length && !this._tds_check_control) {
+			this._tds_check_control = frappe.ui.form.make_control({
+				parent: holder.find(".tds-check-field"),
+				df: { fieldtype: "Link", fieldname: "tds_check_supplier", options: "Supplier", placeholder: __("Any supplier") },
+				render_input: true,
+			});
+			holder.find(".btn-tds-check-supplier").on("click", function () {
+				const supplier = self._tds_check_control.get_value();
+				if (!supplier) { frappe.msgprint(__("Pick a supplier")); return; }
+				self.preview_supplier_tds(supplier, supplier);
+			});
 		}
 		try {
 			const result = await frappe.call({
@@ -1027,27 +1012,29 @@ class BNSDashboard {
 	}
 
 	redo_supplier_tds(btn) {
-		const supplier = btn.data("supplier");
-		const category = btn.data("category");
+		this.preview_supplier_tds(btn.data("supplier"), btn.data("name"));
+	}
+
+	preview_supplier_tds(supplier, label) {
 		const self = this;
-		const what = category
-			? __("TDS will be taken off this fiscal year's invoices of {0} and applied again under {1}, from the first invoice of the year. Payments on invoices that get TDS are unreconciled first.", [frappe.utils.escape_html(btn.data("name")), frappe.utils.escape_html(category)])
-			: __("{0} has no TDS Category now. TDS will be taken off {1} invoice(s) of this fiscal year and not applied again.", [frappe.utils.escape_html(btn.data("name")), btn.data("invoices")]);
-		frappe.confirm(
-			what + "<br><br>" + __("This changes posted ledgers, including months whose TDS may already be deposited or filed. Runs in the background."),
-			async function () {
-				btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> ' + __("Queued"));
-				try {
-					await frappe.call({
-						method: "business_needed_solutions.business_needed_solutions.overrides.tds_backfill.redo_supplier_tds",
-						args: { supplier: supplier, company: self.get_company() },
-					});
-					frappe.show_alert({ message: __("TDS redo queued. You will get a message when it finishes."), indicator: "blue" }, 6);
-				} catch (e) {
-					btn.prop("disabled", false).text(__("Redo all"));
-				}
-			}
-		);
+		bns_tds.open_preview({
+			title: __("TDS for {0} this fiscal year: preview", [label || supplier]),
+			preview_method: "business_needed_solutions.business_needed_solutions.overrides.tds_backfill.preview_supplier_tds",
+			apply_method: "business_needed_solutions.business_needed_solutions.overrides.tds_backfill.redo_supplier_tds",
+			args: { supplier: supplier, company: this.get_company() },
+			on_done: function () { self.load_tds_fixables(); },
+		});
+	}
+
+	_bind_tds_done(event, title) {
+		this._tds_done_bound = this._tds_done_bound || {};
+		if (this._tds_done_bound[event]) return;
+		this._tds_done_bound[event] = true;
+		const self = this;
+		frappe.realtime.on(event, function (s) {
+			bns_tds.show_summary(s, title);
+			self.load_tds_fixables();
+		});
 	}
 
 	async load_tax_withholding_categories() {
@@ -1238,115 +1225,24 @@ class BNSDashboard {
 		btn.html('<i class="fa fa-wrench"></i> ' + (checked > 0 ? __("Fix ({0})", [checked]) : __("Bulk Fix Selected")));
 	}
 
-	async bulk_fix_tds_selected() {
+	bulk_fix_tds_selected() {
 		const selected = [];
 		this.wrapper.find(".pi-tds-checkbox:checked").each(function () {
-			selected.push({ purchase_invoice: $(this).data("pi"), correct_category: $(this).data("correct-category") });
+			selected.push({ purchase_invoice: $(this).data("pi") });
 		});
 		if (selected.length === 0) {
 			frappe.msgprint(__("No invoices selected"));
 			return;
 		}
 		const self = this;
-		const multi = selected.length > 1;
-		frappe.confirm(
-			__("Apply TDS to {0} Purchase Invoice(s)? This sets the supplier's TDS category, adds the TDS row and posts the incremental GL (unreconciling any payments first). {1}", [
-				selected.length,
-				multi ? __("Runs in the background in batches of 10, in posting-date order.") : __("Runs now."),
-			]),
-			async function () {
-				const btn = self.wrapper.find("#btn-bulk-fix-tds");
-				btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> ' + (multi ? __("Queuing...") : __("Applying...")));
-				try {
-					const result = await frappe.call({
-						method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.fix_selected_pis_tds",
-						args: { items: selected },
-					});
-					const data = result.message || {};
-					if (data.status === "error") {
-						frappe.msgprint({ title: __("Nothing to fix"), message: __("No fixable invoices found."), indicator: "red" });
-						btn.prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix Selected"));
-						return;
-					}
-					if (data.status === "done") {
-						// Single invoice ran inline -> immediate feedback.
-						const r = data.result || {};
-						if (r.changed) {
-							frappe.show_alert({ message: __("TDS applied ({0})", [r.reason || __("done")]), indicator: "green" });
-						} else {
-							frappe.show_alert({ message: __("No change: {0}", [r.reason || ""]), indicator: "orange" }, 6);
-						}
-						btn.prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix Selected"));
-						self.load_tds_fixables();
-						return;
-					}
-					self.show_tds_fix_progress(data.total_invoices);
-				} catch (e) {
-					let msg = "";
-					try {
-						if (e && e._server_messages) {
-							const arr = JSON.parse(e._server_messages);
-							if (arr && arr.length) { const first = JSON.parse(arr[0]); msg = first.message || arr[0]; }
-						}
-					} catch (_) { /* fall through */ }
-					if (!msg) msg = (e && (e.message || e.statusText)) || "";
-					if (msg) frappe.show_alert({ message: __("Bulk fix failed: {0}", [frappe.utils.escape_html(String(msg))]), indicator: "red" }, 8);
-					btn.prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix Selected"));
-				}
-			}
-		);
-	}
-
-	show_tds_fix_progress(total) {
-		const btn = this.wrapper.find("#btn-bulk-fix-tds");
-		btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin"></i> ' + __("Processing..."));
-		this.wrapper.find("#btn-select-all-tds").prop("disabled", true);
-
-		const container = this.wrapper.find("#table-pi-wrong-tds");
-		container.before(`
-			<div id="tds-fix-progress" class="mb-3" style="padding: 10px; background: var(--control-bg); border-radius: 6px;">
-				<div class="d-flex justify-content-between align-items-center mb-1">
-					<span class="text-muted" style="font-size: 0.85rem;" id="tds-fix-status">
-						<i class="fa fa-spinner fa-spin"></i> ${__("Processing 0 / {0} invoices...", [total])}
-					</span>
-					<span class="text-muted" style="font-size: 0.8rem;" id="tds-fix-pct">0%</span>
-				</div>
-				<div class="progress" style="height: 8px;">
-					<div class="progress-bar bg-primary progress-bar-striped progress-bar-animated"
-						 id="tds-fix-bar" role="progressbar" style="width: 0%; transition: width 0.4s ease;"></div>
-				</div>
-			</div>
-		`);
-
-		const self = this;
-		this._onTdsFixProgress = function (data) {
-			const pct = Math.round((data.done / data.total) * 100);
-			self.wrapper.find("#tds-fix-bar").css("width", pct + "%");
-			self.wrapper.find("#tds-fix-pct").text(pct + "%");
-			self.wrapper.find("#tds-fix-status").html('<i class="fa fa-spinner fa-spin"></i> ' + __("Processing {0} / {1} invoices... ({2} fixed)", [data.done, data.total, data.success_count]));
-		};
-		this._onTdsFixComplete = function (data) {
-			self.hide_tds_fix_progress();
-			if (data.success_count > 0) {
-				frappe.show_alert({ message: __("Corrected TDS Category on {0} invoices", [data.success_count]), indicator: "green" });
-			}
-			if (data.error_count > 0) {
-				let errorMsg = "";
-				(data.errors || []).forEach(function (e) { errorMsg += (e.purchase_invoice || "?") + ": " + e.error + "<br>"; });
-				frappe.msgprint({ title: __("{0} invoices failed", [data.error_count]), message: errorMsg, indicator: "orange" });
-			}
-			self.load_tds_fixables();
-		};
-		frappe.realtime.on("bns_tds_fix_progress", this._onTdsFixProgress);
-		frappe.realtime.on("bns_tds_fix_complete", this._onTdsFixComplete);
-	}
-
-	hide_tds_fix_progress() {
-		this.wrapper.find("#tds-fix-progress").remove();
-		this.wrapper.find("#btn-bulk-fix-tds").prop("disabled", false).html('<i class="fa fa-wrench"></i> ' + __("Bulk Fix Selected"));
-		this.wrapper.find("#btn-select-all-tds").prop("disabled", false);
-		if (this._onTdsFixProgress) { frappe.realtime.off("bns_tds_fix_progress", this._onTdsFixProgress); this._onTdsFixProgress = null; }
-		if (this._onTdsFixComplete) { frappe.realtime.off("bns_tds_fix_complete", this._onTdsFixComplete); this._onTdsFixComplete = null; }
+		this._bind_tds_done("bns_tds_fix_complete", __("TDS fix finished"));
+		bns_tds.open_preview({
+			title: __("Apply TDS to {0} invoice(s): preview", [selected.length]),
+			preview_method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.preview_selected_pis_tds",
+			apply_method: "business_needed_solutions.business_needed_solutions.page.bns_dashboard.bns_dashboard.fix_selected_pis_tds",
+			args: { items: selected },
+			on_done: function () { self.load_tds_fixables(); },
+		});
 	}
 
 	get_styles() {
