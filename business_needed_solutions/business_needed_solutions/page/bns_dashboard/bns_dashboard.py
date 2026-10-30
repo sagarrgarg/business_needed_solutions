@@ -836,10 +836,9 @@ def fix_selected_pis_tds(items, token=None, allow_filed=0):
 	"""Apply the previewed plan for the selected invoices. Invoices that already carry
 	a TDS row but never had their header split saved are repaired first (no GL)."""
 	_require_tds_fixables()
-	from business_needed_solutions.bns_branch_accounting.utils import _bns_require_accounts_write
 	from business_needed_solutions.business_needed_solutions.overrides import tds_backfill as tds
 
-	_bns_require_accounts_write()
+	tds._require_tool(write=True)
 	specs, skipped, names = _selected_tds_specs(items)
 	if not specs:
 		return {"status": "error", "total_invoices": 0, "skipped": skipped}
@@ -847,9 +846,11 @@ def fix_selected_pis_tds(items, token=None, allow_filed=0):
 	if not token or tds._plan_token(plans) != token:
 		frappe.throw(_("The invoices changed since the preview. Preview again before applying."),
 			title=_("Preview is out of date"))
+	tds._require_write_on(plans)
 	for name in names:
+		frappe.has_permission("Purchase Invoice", "write", doc=name, throw=True)
 		tds.repair_tds_totals_on_pi(name)
-	result = tds._dispatch(specs, token, cint(allow_filed), "bns_tds_fix_complete", tds._change_count(plans))
+	result = tds._dispatch(specs, token, cint(allow_filed), "bns_tds_fix_complete", plans)
 	result["skipped"] = skipped
 	return result
 

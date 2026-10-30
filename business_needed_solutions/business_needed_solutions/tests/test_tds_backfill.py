@@ -441,3 +441,58 @@ class TestTDSBackfill(FrappeTestCase):
         self.assertEqual(rows[a].action, "none")
         self.assertEqual(rows[b].target_tds, 500)
 
+
+    def _set_tds_roles(self, *roles):
+        settings = frappe.get_single("BNS Settings")
+        settings.set("tds_backfill_roles", [{"role": r} for r in roles])
+        settings.flags.ignore_mandatory = True
+        settings.save(ignore_permissions=True)
+        frappe.flags.pop("_bns_tds_backfill_roles", None)
+
+    def test_tds_role_with_invoice_write_is_enough(self):
+        """An Accounts Manager listed under TDS roles may change TDS without any access to
+        BNS Branch Accounting Settings; unlisted, or without write on the invoice, they may not."""
+        supplier = self._supplier("_Test BNS Roles", "AAACY1234M")
+        a = self._pi(supplier, self._date(5, 11), 50000)
+        frappe.db.set_value("Supplier", supplier, "tax_withholding_category", CAT_194C)
+        email = "_test_bns_tds_am@example.com"
+        if not frappe.db.exists("User", email):
+            frappe.get_doc({"doctype": "User", "email": email, "first_name": "TDS AM",
+                            "send_welcome_email": 0, "roles": [{"role": "Accounts Manager"}]}).insert()
+        self.assertFalse(frappe.has_permission("BNS Branch Accounting Settings", "write", user=email))
+        self.addCleanup(frappe.set_user, "Administrator")
+
+        self._set_tds_roles()
+        frappe.set_user(email)
+        self.assertFalse(tds.get_tds_category_button(a)["show"])
+        with self.assertRaises(frappe.PermissionError):
+            tds.preview_tds_category_change(a, CAT_194C)
+
+        frappe.set_user("Administrator")
+        self._set_tds_roles("Accounts Manager")
+        frappe.set_user(email)
+        self.assertTrue(tds.get_tds_category_button(a)["show"])
+        preview = tds.preview_tds_category_change(a, CAT_194C)
+        self.assertEqual(preview["summary"]["changes"], 1)
+        self.assertFalse(preview["can_override_filed"])
+        self.assertEqual(tds.apply_tds_category_change(a, CAT_194C, token=preview["token"])["status"], "done")
+        self.assertEqual(self._tds(a), 500)
+        self.assertEqual(tds.preview_supplier_tds(supplier, COMPANY)["summary"]["changes"], 0)
+
+        # No write on this company's invoices: no button, and the change is refused.
+        b = None
+        frappe.set_user("Administrator")
+        b = self._pi(supplier, self._date(5, 12), 50000)
+        frappe.get_doc({"doctype": "User Permission", "user": email, "allow": "Company",
+                        "for_value": "_Test Company Other"}).insert(ignore_permissions=True, ignore_links=True)
+        frappe.clear_cache(user=email)
+        frappe.set_user(email)
+        self.assertFalse(tds.get_tds_category_button(b)["show"])
+        with self.assertRaises(frappe.PermissionError):
+            tds.apply_tds_category_change(b, CAT_194C, token="any")
+        frappe.set_user("Administrator")
+        plans = tds._plans_from_specs([{"supplier": supplier, "company": COMPANY, "date": str(self._date(5, 12)),
+                                        "mode": "keep", "overrides": {b: CAT_194C}}], False)
+        frappe.set_user(email)
+        with self.assertRaises(frappe.PermissionError):
+            tds._require_write_on(plans)

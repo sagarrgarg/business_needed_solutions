@@ -348,9 +348,9 @@
    "depends_on": "eval:doc.enable_tds_category_fixables",
    "fieldname": "tds_backfill_roles",
    "fieldtype": "Table MultiSelect",
-   "label": "Additional Backfill Roles",
+   "label": "TDS Tool Roles",
    "options": "Has Role",
-   "description": "Roles that may use the TDS tools (dashboard and Purchase Invoice button), in addition to System Manager."
+   "description": "Roles that may change TDS on submitted Purchase Invoices: the Change TDS Category button and the TDS tools on the BNS Dashboard. System Manager always may. A user also needs write permission on the Purchase Invoice; no access to BNS Branch Accounting Settings is needed. Every change is still previewed, and filed quarters and cash-paid invoices are still refused."
   },
   {
    "depends_on": "eval:doc.enable_tds_category_fixables",
@@ -726,7 +726,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-28 10:17:04.379396",
+ "modified": "2026-10-31 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Business Needed Solutions",
  "name": "BNS Settings",

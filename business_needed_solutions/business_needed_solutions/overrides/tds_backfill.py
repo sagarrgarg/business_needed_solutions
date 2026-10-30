@@ -23,8 +23,9 @@ GST and expense lines never move), in a frozen period, in a quarter marked filed
 Settings (a System Manager may override), or when it is foreign-currency, cash-paid,
 written off, or has TDS adjusted from an advance.
 
-Gated by BNS Settings `enable_tds_category_fixables` + `tds_backfill_roles` (System
-Manager always allowed). ERPNext v16 keeps TDS in Tax Withholding Entries instead; there
+Who may use it: BNS Settings `enable_tds_category_fixables` on, a role listed in
+`tds_backfill_roles` (System Manager always allowed), and write permission on each
+Purchase Invoice that changes. The same check draws the button and guards every endpoint. ERPNext v16 keeps TDS in Tax Withholding Entries instead; there
 the tools stay off (no button, no dashboard section, endpoints refuse).
 """
 
@@ -105,13 +106,31 @@ def can_backfill_tds(user: str = None) -> bool:
 
 
 def _require_tool(write=False):
-    if write:
-        _bns_require_write()
-    else:
-        _bns_require_read()
+    """The same check as the Change TDS Category button: the tools are on, the user holds
+    a TDS role from BNS Settings (or System Manager), and may read, or for a change write,
+    Purchase Invoices. Write paths also check every invoice they change (_require_write_on)."""
     if not can_backfill_tds():
         frappe.throw(
-            _("TDS tools are disabled, or you don't hold an allowed role."),
+            _("TDS tools are disabled, or your role is not listed under TDS roles in BNS Settings."),
+            frappe.PermissionError,
+        )
+    ptype = "write" if write else "read"
+    if not frappe.has_permission(PI, ptype):
+        frappe.throw(
+            _("You need {0} permission on Purchase Invoice to use the TDS tools.").format(_(ptype)),
+            frappe.PermissionError,
+        )
+
+
+def _require_write_on(plans):
+    """Every invoice the plan would change must be one the user may write."""
+    denied = sorted({d.name for p in plans for d in p.docs
+                     if d.action in ("ledger", "flags") and not d.blocked
+                     and not frappe.has_permission(PI, "write", doc=d.name)})
+    if denied:
+        shown = ", ".join(denied[:10]) + (_(" and {0} more").format(len(denied) - 10) if len(denied) > 10 else "")
+        frappe.throw(
+            _("You don't have write permission on these Purchase Invoices: {0}").format(shown),
             frappe.PermissionError,
         )
 
@@ -1000,6 +1019,7 @@ def _apply_specs(specs, token, allow_filed=False, event=None, user=None):
     if not token or _plan_token(plans) != token:
         frappe.throw(_("The invoices changed since the preview. Preview again before applying."),
                      title=_("Preview is out of date"))
+    _require_write_on(plans)  # again here: a queued run happens later, as the same user
     summary = run_plans(plans)
     summary["remaining"] = _remap_leftovers(specs) if any(s.get("scope") == "account" for s in specs) else None
     if event:
@@ -1007,7 +1027,9 @@ def _apply_specs(specs, token, allow_filed=False, event=None, user=None):
     return summary
 
 
-def _dispatch(specs, token, allow_filed, event, count):
+def _dispatch(specs, token, allow_filed, event, plans):
+    _require_write_on(plans)
+    count = _change_count(plans)
     if count > _INLINE_LIMIT and not frappe.flags.in_test:
         frappe.enqueue(
             _apply_specs, queue="long", timeout=3600,
@@ -1099,7 +1121,7 @@ def apply_tds_category_change(name, category=None, token=None, allow_filed=0):
     _require_tool(write=True)
     spec = _invoice_spec(name, category)
     plans = _plans_from_specs([spec], cint(allow_filed))
-    return _dispatch([spec], token, cint(allow_filed), "bns_tds_apply_complete", _change_count(plans))
+    return _dispatch([spec], token, cint(allow_filed), "bns_tds_apply_complete", plans)
 
 
 # Older entry points, kept for callers of the API: backfill = the supplier's category,
@@ -1130,7 +1152,7 @@ def reverse_tds_backfill(name, token=None):
 def get_suppliers_needing_tds_redo(company=None):
     """Suppliers whose TDS category was REMOVED or CHANGED after TDS had already gone
     onto their invoices this fiscal year. Each one is offered a redo."""
-    _bns_require_read()
+    _require_tool()
     if not can_backfill_tds():
         return {"count": 0, "suppliers": []}
     company = _default_company(company)
@@ -1199,7 +1221,7 @@ def redo_supplier_tds(supplier, company=None, token=None, allow_filed=0):
     _require_tool(write=True)
     spec = _redo_spec(supplier, company)
     plans = _plans_from_specs([spec], cint(allow_filed))
-    return _dispatch([spec], token, cint(allow_filed), "bns_tds_redo_complete", _change_count(plans))
+    return _dispatch([spec], token, cint(allow_filed), "bns_tds_redo_complete", plans)
 
 
 # --------------------------------------------------------------------------------------
@@ -1279,7 +1301,7 @@ def get_tds_account_remap_summary(company=None):
     """Current-fiscal-year invoices whose TDS sits on an account other than the one
     their category is mapped to now, grouped by category and account, plus the
     challans already paid out of those old accounts."""
-    _bns_require_read()
+    _require_tool()
     if not can_backfill_tds():
         return {"count": 0, "groups": []}
     company = _default_company(company)
@@ -1337,7 +1359,7 @@ def remap_tds_accounts(company=None, token=None, allow_filed=0):
     for s in specs:
         s["old_accounts"] = old
     plans = _plans_from_specs(specs, cint(allow_filed))
-    return _dispatch(specs, token, cint(allow_filed), "bns_tds_remap_complete", _change_count(plans))
+    return _dispatch(specs, token, cint(allow_filed), "bns_tds_remap_complete", plans)
 
 
 # --------------------------------------------------------------------------------------
@@ -1380,18 +1402,6 @@ def repair_tds_totals_on_pi(name):
     )
     _commit()
     return {"changed": True, "taxes_and_charges_deducted": deducted}
-
-
-def _bns_require_read():
-    from business_needed_solutions.bns_branch_accounting.utils import _bns_require_accounts_read
-
-    _bns_require_accounts_read()
-
-
-def _bns_require_write():
-    from business_needed_solutions.bns_branch_accounting.utils import _bns_require_accounts_write
-
-    _bns_require_accounts_write()
 
 
 @frappe.whitelist()
