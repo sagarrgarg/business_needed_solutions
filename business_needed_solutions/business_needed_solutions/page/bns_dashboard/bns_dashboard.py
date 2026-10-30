@@ -777,126 +777,81 @@ def get_pis_needing_tds_fix(company=None, include_prior_fy=0):
 	}
 
 
-def _fix_one_pi_tds(name):
-	"""Fully fix TDS on one submitted PI: align the category to the supplier, then
-	either repair the header split (a TDS row already exists) or run the full
-	backfill -- add the TDS row + incremental GL, or mark a nothing-due invoice as
-	applied. Current FY is open to all allowed roles; invoices outside it (prior
-	year) are System Manager only. Returns the backfill/repair result dict."""
-	from business_needed_solutions.business_needed_solutions.overrides.tds_backfill import (
-		backfill_tds_on_pi, repair_tds_totals_on_pi, _existing_tds_row,
-	)
+def _selected_tds_specs(items):
+	"""Group the selected invoices into one plan per supplier year. Each selected
+	invoice takes its supplier's category; the rest of the year keeps its own.
+	Current fiscal year is open to all allowed roles; older invoices are System
+	Manager only."""
+	from business_needed_solutions.business_needed_solutions.overrides.tds_backfill import _fiscal_year
 
-	pi = frappe.get_doc("Purchase Invoice", name)
-	if pi.docstatus != 1:
-		return {"changed": False, "reason": _("Not submitted")}
-
-	# Current fiscal year is open to all allowed roles; anything outside it
-	# (prior year in particular) is System Manager only.
-	fy_start, fy_end = _current_fiscal_year(pi.company)
-	if not (str(fy_start) <= str(pi.posting_date) <= str(fy_end)):
-		if "System Manager" not in frappe.get_roles():
-			return {"changed": False, "reason": _("Outside current fiscal year — System Manager only")}
-
-	supplier_cat = frappe.db.get_value("Supplier", pi.supplier, "tax_withholding_category")
-	if not supplier_cat:
-		return {"changed": False, "reason": _("Supplier has no TDS Category")}
-
-	# Align the PI category to the supplier's before computing/applying TDS.
-	if cstr(pi.tax_withholding_category or "") != cstr(supplier_cat):
-		frappe.db.set_value("Purchase Invoice", name, "tax_withholding_category", supplier_cat, update_modified=False)
-
-	if _existing_tds_row(pi):
-		# TDS row already present -> only repair the header split totals if needed.
-		return repair_tds_totals_on_pi(name)
-
-	# No TDS row -> full backfill (unreconcile + row + incremental GL + outstanding,
-	# or mark as applied when nothing is due).
-	return backfill_tds_on_pi(name)
-
-
-@frappe.whitelist()
-def fix_selected_pis_tds(items):
-	"""Apply TDS to the selected Purchase Invoices (category + apply_tds + TDS row
-	+ incremental GL, via the shared backfill core). A single selection runs
-	inline for immediate feedback; more than one is dispatched to a background job
-	that processes in posting-date order (so ERPNext's cumulative-threshold logic
-	sees earlier invoices already applied), in batches of 10. Requires the toggle +
-	(System Manager or an Additional Backfill Role); prior-fiscal-year invoices are
-	fixed only when the caller is a System Manager (enforced per invoice)."""
-	_require_tds_fixables()
 	import json
 	if isinstance(items, str):
 		items = json.loads(items)
-
 	names = []
-	for it in items:
+	for it in items or []:
 		n = it.get("purchase_invoice") if isinstance(it, dict) else it
 		if n:
 			names.append(n)
-	names = list(dict.fromkeys(names))  # de-dupe, preserve order
-
-	if not names:
-		return {"status": "error", "total_invoices": 0}
-
-	if len(names) == 1:
-		# Single invoice -> run inline and return the result immediately.
-		result = _fix_one_pi_tds(names[0])
-		return {"status": "done", "total_invoices": 1, "result": result}
-
-	# More than one -> background job, batch size 10, with realtime progress.
-	frappe.enqueue(
-		_process_pi_tds_fix,
-		queue="long",
-		timeout=3600,
-		pi_names=names,
-		user=frappe.session.user,
-	)
-	return {"status": "queued", "total_invoices": len(names)}
-
-
-def _process_pi_tds_fix(pi_names, user):
-	"""Background worker: apply TDS to each PI in (supplier, posting-date) order so
-	the cumulative-threshold logic sees earlier invoices already applied. Commits
-	and emits realtime progress every PI_FIX_BATCH_SIZE (10)."""
-	ordered = frappe.get_all(
+	names = list(dict.fromkeys(names))
+	rows = frappe.get_all(
 		"Purchase Invoice",
-		filters={"name": ["in", pi_names]},
-		fields=["name"],
+		filters={"name": ["in", names], "docstatus": 1},
+		fields=["name", "supplier", "company", "posting_date"],
 		order_by="supplier asc, posting_date asc, name asc",
-	)
-	names = [r.name for r in ordered] or list(pi_names)
+	) if names else []
+	is_sm = "System Manager" in frappe.get_roles()
+	specs, skipped = {}, []
+	for r in rows:
+		fy_start, _fy_end = _fiscal_year(r.company, r.posting_date)
+		cur_start, _cur_end = _current_fiscal_year(r.company)
+		if str(fy_start) != str(cur_start) and not is_sm:
+			skipped.append({"purchase_invoice": r.name, "reason": _("Outside current fiscal year — System Manager only")})
+			continue
+		category = frappe.db.get_value("Supplier", r.supplier, "tax_withholding_category")
+		if not category:
+			skipped.append({"purchase_invoice": r.name, "reason": _("Supplier has no TDS Category")})
+			continue
+		key = (r.supplier, r.company, str(fy_start))
+		spec = specs.setdefault(key, {
+			"supplier": r.supplier, "company": r.company, "date": str(r.posting_date),
+			"mode": "keep", "overrides": {},
+		})
+		spec["overrides"][r.name] = category
+	return list(specs.values()), skipped, [r.name for r in rows]
 
-	total = len(names)
-	done = 0
-	success_count = 0
-	errors = []
 
-	for idx, name in enumerate(names, 1):
-		try:
-			res = _fix_one_pi_tds(name)
-			if res.get("changed"):
-				success_count += 1
-		except Exception as e:
-			frappe.db.rollback()
-			errors.append({"purchase_invoice": name, "error": cstr(e)})
+@frappe.whitelist()
+def preview_selected_pis_tds(items, allow_filed=0):
+	"""Read-only: what applying TDS to the selected invoices would do, for each
+	supplier's whole year (later invoices of the year can change with them)."""
+	_require_tds_fixables()
+	from business_needed_solutions.business_needed_solutions.overrides import tds_backfill as tds
 
-		done += 1
-		if idx % PI_FIX_BATCH_SIZE == 0:
-			frappe.db.commit()
+	specs, skipped, _names = _selected_tds_specs(items)
+	return tds._view(tds._plans_from_specs(specs, cint(allow_filed)), {"skipped": skipped})
 
-		frappe.publish_realtime(
-			"bns_tds_fix_progress",
-			{"done": done, "total": total, "current_pi": name, "success_count": success_count, "error_count": len(errors)},
-			user=user,
-		)
 
-	frappe.db.commit()
-	frappe.publish_realtime(
-		"bns_tds_fix_complete",
-		{"success_count": success_count, "error_count": len(errors), "errors": errors[:50]},
-		user=user,
-	)
+@frappe.whitelist()
+def fix_selected_pis_tds(items, token=None, allow_filed=0):
+	"""Apply the previewed plan for the selected invoices. Invoices that already carry
+	a TDS row but never had their header split saved are repaired first (no GL)."""
+	_require_tds_fixables()
+	from business_needed_solutions.bns_branch_accounting.utils import _bns_require_accounts_write
+	from business_needed_solutions.business_needed_solutions.overrides import tds_backfill as tds
+
+	_bns_require_accounts_write()
+	specs, skipped, names = _selected_tds_specs(items)
+	if not specs:
+		return {"status": "error", "total_invoices": 0, "skipped": skipped}
+	plans = tds._plans_from_specs(specs, cint(allow_filed))
+	if not token or tds._plan_token(plans) != token:
+		frappe.throw(_("The invoices changed since the preview. Preview again before applying."),
+			title=_("Preview is out of date"))
+	for name in names:
+		tds.repair_tds_totals_on_pi(name)
+	result = tds._dispatch(specs, token, cint(allow_filed), "bns_tds_fix_complete", tds._change_count(plans))
+	result["skipped"] = skipped
+	return result
 
 
 @frappe.whitelist()

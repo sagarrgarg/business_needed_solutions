@@ -36,6 +36,7 @@ app_include_js = [
                   "/assets/business_needed_solutions/js/pan_gstin_mismatch_banner.js?v=1",
                   "/assets/business_needed_solutions/js/bulk_cancel.js?v=1",
                   "/assets/business_needed_solutions/js/posting_time_edit.js?v=1",
+                  "/assets/business_needed_solutions/js/tds_backfill.js?v=2",
                 ]
 
 # include js, css files in header of web template
