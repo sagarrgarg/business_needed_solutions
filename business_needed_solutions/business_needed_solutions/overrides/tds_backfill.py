@@ -23,9 +23,15 @@ GST and expense lines never move), in a frozen period, in a quarter marked filed
 Settings (a System Manager may override), or when it is foreign-currency, cash-paid,
 written off, or has TDS adjusted from an advance.
 
+A debit note's ledger is never changed: it lowers the TDS base of the invoices after it.
+Its category fields are set to those of the invoice it returns (header only), so ERPNext
+counts it the same way; changing a debit note's category changes that invoice's.
+
 Who may use it: BNS Settings `enable_tds_category_fixables` on, a role listed in
 `tds_backfill_roles` (System Manager always allowed), and write permission on each
-Purchase Invoice that changes. The same check draws the button and guards every endpoint. ERPNext v16 keeps TDS in Tax Withholding Entries instead; there
+Purchase Invoice that changes. The same check draws the button and guards every endpoint.
+
+ERPNext v16 keeps TDS in Tax Withholding Entries instead; there
 the tools stay off (no button, no dashboard section, endpoints refuse).
 """
 
@@ -342,7 +348,7 @@ def plan_supplier_year(supplier, company, date=None, mode="keep", overrides=None
             original = by_name.get(d.return_against)
             if original is not None:
                 d.category = original.category
-            elif not d.category:
+            elif d.name not in overrides and not d.category:
                 d.category = supplier_info[d.supplier].tax_withholding_category or None
 
     # 2) TDS per category, in posting order
@@ -514,8 +520,18 @@ def _group_problem(category, company, parties, supplier_pans, fy_start, fy_end):
 def _decide(d, scope, cache, company):
     """Set d.action: "ledger" (TDS amount or account changes), "flags" (only the
     invoice's category / apply_tds / TDS base change) or "none"."""
-    if d.internal or d.is_opening == "Yes" or cint(d.is_return) or d.get("keep_as_is"):
+    if d.internal or d.is_opening == "Yes" or d.get("keep_as_is"):
         d.target_tds = d.current_tds
+        return
+    if cint(d.is_return):
+        # A debit note only lowers the TDS base of the invoices after it; its own ledger
+        # is never changed here. Its category fields are set to the category it follows
+        # (the invoice it returns), because ERPNext counts a debit note in later invoices'
+        # TDS only when it carries apply_tds and that category. One with its own TDS row
+        # is left alone.
+        d.target_tds = d.current_tds
+        if not d.blocked and not d.current_tds and scope != "account" and _flags_change(d):
+            d.action = "flags"
         return
     if d.blocked:
         # The category's year could not be worked out; nothing is changed, and the
@@ -1087,10 +1103,28 @@ def _change_count(plans):
 # Change one invoice's TDS category (the button on the Purchase Invoice)
 # --------------------------------------------------------------------------------------
 
+def _return_original(pi, fy_start, fy_end):
+    """For a debit note: the invoice it returns, when that invoice is in the same fiscal
+    year (the debit note then takes its category). None otherwise."""
+    if not cint(pi.get("is_return")) or not pi.get("return_against"):
+        return None
+    original = frappe.db.get_value(
+        PI, pi.return_against,
+        ["name", "docstatus", "company", "posting_date", "apply_tds", "tax_withholding_category"],
+        as_dict=True,
+    )
+    if (original and original.docstatus == 1 and original.company == pi.company
+            and fy_start <= getdate(original.posting_date) <= fy_end):
+        return original
+    return None
+
+
 def _invoice_spec(name, category):
     if not frappe.db.exists(PI, name):
         frappe.throw(_("Purchase Invoice {0} not found.").format(name))
-    pi = frappe.db.get_value(PI, name, ["docstatus", "supplier", "company", "posting_date"], as_dict=True)
+    pi = frappe.db.get_value(
+        PI, name, ["docstatus", "supplier", "company", "posting_date", "is_return", "return_against"], as_dict=True
+    )
     if pi.docstatus != 1:
         frappe.throw(_("Purchase Invoice {0} is not submitted.").format(name))
     frappe.has_permission(PI, "write", doc=name, throw=True)
@@ -1100,8 +1134,11 @@ def _invoice_spec(name, category):
                      title=_("Not this year"))
     if category and not frappe.db.exists("Tax Withholding Category", category):
         frappe.throw(_("Tax Withholding Category {0} not found.").format(category))
+    # A debit note takes the category of the invoice it returns, so the change goes there.
+    original = _return_original(pi, fy_start, fy_end)
+    target = original.name if original else name
     return {"supplier": pi.supplier, "company": pi.company, "date": str(pi.posting_date),
-            "mode": "keep", "overrides": {name: category or ""}}
+            "mode": "keep", "overrides": {target: category or ""}}
 
 
 @frappe.whitelist()
@@ -1412,18 +1449,24 @@ def get_tds_category_button(name):
         return {"show": False}
     pi = frappe.db.get_value(
         PI, name,
-        ["docstatus", "company", "posting_date", "supplier", "apply_tds", "tax_withholding_category", "is_return"],
+        ["docstatus", "company", "posting_date", "supplier", "apply_tds", "tax_withholding_category",
+         "is_return", "return_against"],
         as_dict=True,
     )
-    if not pi or pi.docstatus != 1 or cint(pi.is_return):
+    if not pi or pi.docstatus != 1:
         return {"show": False}
     fy_start, fy_end = _current_fy(pi.company)
     if not (fy_start <= getdate(pi.posting_date) <= fy_end):
         return {"show": False}
     if not frappe.has_permission(PI, "write", doc=name):
         return {"show": False}
+    # A debit note follows the invoice it returns: the dialog offers that invoice's category.
+    original = _return_original(pi, fy_start, fy_end)
+    source = original or pi
     return {
         "show": True,
-        "current_category": pi.tax_withholding_category if cint(pi.apply_tds) else "",
+        "is_return": cint(pi.is_return),
+        "follows": original.name if original else "",
+        "current_category": source.tax_withholding_category if cint(source.apply_tds) else "",
         "supplier_category": frappe.db.get_value("Supplier", pi.supplier, "tax_withholding_category") or "",
     }

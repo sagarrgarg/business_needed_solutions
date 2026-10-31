@@ -781,8 +781,13 @@ def _selected_tds_specs(items):
 	"""Group the selected invoices into one plan per supplier year. Each selected
 	invoice takes its supplier's category; the rest of the year keeps its own.
 	Current fiscal year is open to all allowed roles; older invoices are System
-	Manager only."""
-	from business_needed_solutions.business_needed_solutions.overrides.tds_backfill import _fiscal_year
+	Manager only. A debit note takes the category of the invoice it returns, so when
+	that invoice is in the same year it gets the supplier's category too (the preview
+	shows it)."""
+	from business_needed_solutions.business_needed_solutions.overrides.tds_backfill import (
+		_fiscal_year,
+		_return_original,
+	)
 
 	import json
 	if isinstance(items, str):
@@ -796,13 +801,13 @@ def _selected_tds_specs(items):
 	rows = frappe.get_all(
 		"Purchase Invoice",
 		filters={"name": ["in", names], "docstatus": 1},
-		fields=["name", "supplier", "company", "posting_date"],
+		fields=["name", "supplier", "company", "posting_date", "is_return", "return_against"],
 		order_by="supplier asc, posting_date asc, name asc",
 	) if names else []
 	is_sm = "System Manager" in frappe.get_roles()
 	specs, skipped = {}, []
 	for r in rows:
-		fy_start, _fy_end = _fiscal_year(r.company, r.posting_date)
+		fy_start, fy_end = _fiscal_year(r.company, r.posting_date)
 		cur_start, _cur_end = _current_fiscal_year(r.company)
 		if str(fy_start) != str(cur_start) and not is_sm:
 			skipped.append({"purchase_invoice": r.name, "reason": _("Outside current fiscal year — System Manager only")})
@@ -817,6 +822,9 @@ def _selected_tds_specs(items):
 			"mode": "keep", "overrides": {},
 		})
 		spec["overrides"][r.name] = category
+		original = _return_original(r, fy_start, fy_end)
+		if original:
+			spec["overrides"].setdefault(original.name, category)
 	return list(specs.values()), skipped, [r.name for r in rows]
 
 

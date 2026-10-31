@@ -207,7 +207,7 @@ if (!bns_tds._realtime_bound) {
 }
 
 bns_tds.add_category_button = function (frm) {
-	if (frm.doc.docstatus !== 1 || frm.doc.is_return) return;
+	if (frm.doc.docstatus !== 1) return;
 	frappe.call({
 		method: BNS_TDS + "get_tds_category_button",
 		args: { name: frm.doc.name },
@@ -222,9 +222,12 @@ bns_tds.add_category_button = function (frm) {
 							fieldtype: "Link", fieldname: "category", options: "Tax Withholding Category",
 							label: __("TDS Category"),
 							default: state.current_category || state.supplier_category || "",
-							description: __("Leave empty to take TDS off this invoice. Now: {0}. Supplier: {1}.", [
-								state.current_category || __("none"), state.supplier_category || __("none"),
-							]),
+							description: (state.follows
+								? __("This debit note takes the TDS category of {0}, the invoice it returns, so the change is made on {0}; the preview shows both. Its own TDS amount is not changed.", [state.follows]) + " "
+								: state.is_return ? __("A debit note's own TDS amount is not changed; it lowers the TDS of later invoices.") + " " : "")
+								+ __("Leave empty to take TDS off. Now: {0}. Supplier: {1}.", [
+									state.current_category || __("none"), state.supplier_category || __("none"),
+								]),
 						},
 					],
 					primary_action_label: __("Preview"),

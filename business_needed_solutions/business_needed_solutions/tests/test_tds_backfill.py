@@ -496,3 +496,40 @@ class TestTDSBackfill(FrappeTestCase):
         frappe.set_user(email)
         with self.assertRaises(frappe.PermissionError):
             tds._require_write_on(plans)
+
+    def test_debit_note_follows_its_invoice(self):
+        """A debit note gets the category fields of the invoice it returns and never a
+        ledger change. Its button, and selecting it on the dashboard, change that invoice."""
+        from business_needed_solutions.business_needed_solutions.page.bns_dashboard import bns_dashboard
+
+        supplier = self._supplier("_Test BNS Debit Note", "AAACZ1234N")
+        a = self._pi(supplier, self._date(6, 1), 50000)
+        dn = self._pi(supplier, self._date(6, 2), -50000, return_against=a)
+        frappe.db.set_value("Supplier", supplier, "tax_withholding_category", CAT_194C)
+        gl_before = self._gl(dn)
+
+        state = tds.get_tds_category_button(dn)
+        self.assertTrue(state["show"])
+        self.assertEqual(state["follows"], a)
+        preview = tds.preview_tds_category_change(dn, CAT_194C)
+        rows = {r["name"]: r for r in preview["plans"][0]["rows"]}
+        self.assertEqual(rows[a]["action"], "ledger")
+        self.assertEqual(rows[dn]["action"], "flags")
+        tds.apply_tds_category_change(dn, CAT_194C, token=preview["token"])
+        self.assertEqual((self._tds(a), self._tds(dn)), (500, 0))
+        self.assertEqual(self._gl(dn), gl_before)
+        flags = frappe.db.get_value("Purchase Invoice", dn, ["apply_tds", "tax_withholding_category"], as_dict=True)
+        self.assertEqual((flags.apply_tds, flags.tax_withholding_category), (1, CAT_194C))
+        self.assertEqual(tds.preview_supplier_tds(supplier, COMPANY)["summary"]["changes"], 0)
+
+        # Dashboard: selecting only the debit note brings the invoice it returns along.
+        b = self._pi(supplier, self._date(6, 3), 50000)
+        dn2 = self._pi(supplier, self._date(6, 4), -50000, return_against=b)
+        items = frappe.as_json([{"purchase_invoice": dn2}])
+        preview = bns_dashboard.preview_selected_pis_tds(items)
+        rows = {r["name"]: r for r in preview["plans"][0]["rows"]}
+        self.assertEqual(rows[b]["target_tds"], 500)  # TDS already deducted this year: full rate
+        self.assertEqual(rows[dn2]["action"], "flags")
+        bns_dashboard.fix_selected_pis_tds(items, token=preview["token"])
+        self.assertEqual((self._tds(b), self._tds(dn2)), (500, 0))
+        self.assertEqual(frappe.db.get_value("Purchase Invoice", dn2, "apply_tds"), 1)
