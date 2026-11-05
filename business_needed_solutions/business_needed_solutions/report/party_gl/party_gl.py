@@ -8,7 +8,7 @@ from collections import OrderedDict
 import frappe
 from frappe import _, _dict
 from frappe.query_builder import Criterion
-from frappe.utils import cstr, flt, fmt_money, getdate
+from frappe.utils import cint, cstr, flt, fmt_money, getdate
 
 from erpnext import get_company_currency, get_default_company
 from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
@@ -163,6 +163,9 @@ def get_result(filters, account_details):
 	if filters.get("show_tds_breakup", 1):
 		data = inject_tds_breakup(data, filters)
 
+	# Last, once every amount is in (including the TDS split's column bump).
+	data = net_opening_and_closing(data)
+
 	# In account currency, pure company-currency lines (FX gain/loss: 0 FC, non-zero INR)
 	# carry nothing to show; drop them rather than print 0/0 rows.
 	if _use_account_currency(filters):
@@ -180,6 +183,38 @@ def get_result(filters, account_details):
 		result = inject_item_rows(result, filters)
 
 	return result
+
+
+def net_opening_and_closing(data):
+	"""Show each Opening and Closing row on one side only, as Tally does.
+
+	These rows are summed gross (every debit and credit since the books began),
+	which prints huge numbers on both sides. Keep only the net: Dr when it is
+	positive, Cr when negative, 0/0 when it rounds to nothing. Debit minus credit
+	does not change, so neither does any running balance. Total rows and
+	transaction rows are left alone.
+	"""
+	precision = cint(frappe.db.get_default("currency_precision")) or 2
+	pairs = (
+		("debit", "credit"),
+		("debit_in_account_currency", "credit_in_account_currency"),
+		("debit_in_transaction_currency", "credit_in_transaction_currency"),
+	)
+	for row in data:
+		if not row.get("is_opening_or_closing"):
+			continue
+		for dr_key, cr_key in pairs:
+			dr, cr = row.get(dr_key), row.get(cr_key)
+			if dr is None and cr is None:
+				continue
+			net = flt(dr) - flt(cr)
+			if not flt(net, precision):
+				row[dr_key], row[cr_key] = 0.0, 0.0
+			elif net > 0:
+				row[dr_key], row[cr_key] = net, 0.0
+			else:
+				row[dr_key], row[cr_key] = 0.0, -net
+	return data
 
 
 def _use_account_currency(filters):
@@ -799,7 +834,7 @@ def get_data_with_opening_closing(filters, account_details, accounting_dimension
 
 
 def get_totals_dict():
-	def _get_debit_credit_dict(label):
+	def _get_debit_credit_dict(label, is_opening_or_closing=0):
 		return _dict(
 			account=f"'{label}'",
 			debit=0.0,
@@ -808,12 +843,14 @@ def get_totals_dict():
 			credit_in_account_currency=0.0,
 			debit_in_transaction_currency=None,
 			credit_in_transaction_currency=None,
+			# net_opening_and_closing() shows these rows one-sided; Total stays gross.
+			is_opening_or_closing=is_opening_or_closing,
 		)
 
 	return _dict(
-		opening=_get_debit_credit_dict(_("Opening")),
+		opening=_get_debit_credit_dict(_("Opening"), 1),
 		total=_get_debit_credit_dict(_("Total")),
-		closing=_get_debit_credit_dict(_("Closing")),
+		closing=_get_debit_credit_dict(_("Closing"), 1),
 	)
 
 
