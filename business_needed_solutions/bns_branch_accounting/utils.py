@@ -3160,9 +3160,10 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     if not creditor_template:
         return gl_entries
 
-    # Payable leg: ERPNext's own supplier row (rounded total, due date, and for a
-    # debit note the original invoice as against_voucher) moved to the internal
-    # creditor; ERPNext's own rounding row balances it. See [[_erpnext_party_gl_row]].
+    # Payable leg: ERPNext's own supplier row (due date, and for a debit note the
+    # original invoice as against_voucher) moved to the internal creditor, at the
+    # unrounded grand total so it equals the sender's Internal Debtor. See
+    # [[_erpnext_party_gl_row]].
     party_row = _erpnext_party_gl_row(doc, creditor_account, against=transfer_account)
     rewritten = [
         party_row
@@ -3181,8 +3182,6 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             template=creditor_template,
         ),
     ]
-    if party_row:
-        rewritten.extend(_erpnext_round_off_gl_rows(doc))
 
     for tax_account, tax_amount in sorted(tax_by_account.items()):
         tax_template = next(
@@ -3209,6 +3208,10 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
                 template=tax_template,
             )
         )
+
+    # Ineligible ITC (India Compliance): the receiving branch cannot claim it,
+    # and the stock arrives at the sender's cost, so it is expensed here.
+    rewritten.extend(_ineligible_itc_rows(doc))
 
     has_pr_linked_rows = any((row.get("purchase_receipt") or "").strip() for row in (doc.get("items") or []))
 
@@ -3243,12 +3246,7 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
                     template=stock_template,
                 )
             )
-        if stock_legs:
-            # Valuation-type charges (freight etc.) are inside the received stock
-            # value but were never in the sender's transit debit. As ERPNext does,
-            # credit them to their tax account, and take them off the transit leg.
-            rewritten.extend(_pi_capitalized_valuation_rows(doc, settings["stock_in_transit_account"]))
-        else:
+        if not stock_legs:
             logger.warning(
                 "PI %s has update_stock but zero stock valuation; posting party legs only (reason=%s)",
                 doc.name,
@@ -3284,8 +3282,8 @@ def _resolve_pi_tax_account_amounts(doc) -> Dict[str, float]:
     - a "Deduct" row (TDS, the India Compliance reverse-charge liability) is a
       CREDIT although its amount is stored positive;
     - only "Total" and "Valuation and Total" rows post to the tax account; a
-      "Valuation"-only charge is not in the grand total and goes into stock value
-      (see [[_pi_capitalized_valuation_rows]]).
+      "Valuation"-only charge is not in the grand total (internal PIs refuse
+      valuation-type charges at submit, see [[_internal_invoice_rewrite_blockers]]).
     A return's amounts are already negative, so the sign keeps working there.
     """
     account_amounts: Dict[str, float] = defaultdict(float)
@@ -3303,49 +3301,42 @@ def _resolve_pi_tax_account_amounts(doc) -> Dict[str, float]:
     return dict(account_amounts)
 
 
-def _pi_capitalized_valuation_rows(doc, transit_account: str) -> List[Dict[str, Any]]:
-    """GL rows for valuation-type charges on an internal PI with update_stock.
+def _ineligible_itc_rows(doc) -> List[Dict[str, Any]]:
+    """India Compliance's own ineligible-ITC reversal for an internal PI:
+    Dr Default GST Expense / Cr each input GST account, per ineligible item.
 
-    ERPNext adds these charges to the received stock value and credits the
-    charge's own account by the capitalised amount (make_tax_gl_entries). The
-    BNS stock leg already carries the full SLE value, so: credit the charge
-    account, and debit the same amount back to transit so transit nets to what
-    the sender shipped.
+    India Compliance normally also moves that amount into the item's stock or
+    asset value. An internal transfer receives stock at the sender's cost (BNS
+    pins the receiver's incoming rate to the transfer rate), so the ineligible
+    GST cannot be capitalised and is expensed at the receiving branch instead.
+    Same classes and methods in India Compliance v15 and v16.
     """
     if (doc.get("is_opening") or "No") == "Yes":
         return []
-    capitalized = None
-    if hasattr(doc, "get_capitalized_valuation_tax"):  # ERPNext v16
-        try:
-            capitalized = doc.get_capitalized_valuation_tax()
-        except Exception:
-            logger.exception("BNS: get_capitalized_valuation_tax failed for %s", doc.name)
-            capitalized = None
-
-    rows: List[Dict[str, Any]] = []
-    for tax in (doc.get("taxes") or []):
-        if tax.get("category") not in ("Valuation", "Valuation and Total"):
-            continue
-        base_amount = _tax_base_amount(doc, tax)
-        if not base_amount:
-            continue
-        if capitalized is not None:
-            amount = flt(capitalized.get(tax.name, 0.0))
-        else:  # ERPNext v15: the whole signed amount is capitalised
-            amount = (1 if tax.get("add_deduct_tax") == "Add" else -1) * base_amount
-        if not amount:
-            continue
-        template = {"cost_center": tax.get("cost_center")}
-        # A positive capitalised charge raised the stock value: credit the charge
-        # and debit transit back. A negative one (return) is the mirror image.
-        charge_side, transit_back_side = ("credit", "debit") if amount > 0 else ("debit", "credit")
-        rows.append(
-            _make_bns_gl_entry(doc, tax.get("account_head"), **{charge_side: abs(amount)}, against=transit_account, template=template)
+    try:
+        from india_compliance.gst_india.overrides.ineligible_itc import (
+            DOCTYPE_MAPPING,
+            is_indian_registered_company,
         )
-        rows.append(
-            _make_bns_gl_entry(doc, transit_account, **{transit_back_side: abs(amount)}, against=tax.get("account_head"), template=template)
+    except ImportError:
+        return []
+    handler_class = DOCTYPE_MAPPING.get(doc.doctype)
+    if not handler_class or not is_indian_registered_company(doc):
+        return []
+    handler = handler_class(doc)
+    handler.gl_entries = []
+    handler.update_item_ineligibility()
+    if not doc.get("_has_ineligible_itc_items"):
+        return []
+    if not handler.company.default_gst_expense_account:
+        frappe.throw(
+            _("Please set Default GST Expense Account in Company {0}").format(doc.company),
+            title=_("GST Expense Account Missing"),
         )
-    return rows
+    for item in doc.get("items") or []:
+        if item.get("_ineligible_tax_amount"):
+            handler.reverse_input_taxes_entry(item)
+    return [_toggle_negative_gl_sides(row) for row in handler.gl_entries]
 
 
 def _resolve_si_tax_account_amounts(doc) -> Dict[str, float]:
@@ -3385,10 +3376,16 @@ def _erpnext_party_gl_row(doc, account: str, against: str):
     """ERPNext's own customer/supplier GL row for the invoice, moved to `account`.
 
     Built by the invoice's own make_customer_gl_entry / make_supplier_gl_entry
-    (same in v15 and v16), so it carries exactly what ERPNext posts: the rounded
-    total when rounding applies, due date, transaction-currency amounts, and for
-    a return the original invoice as against_voucher (so the credit / debit note
-    reduces that invoice's outstanding). Returns None if it cannot be used.
+    (same in v15 and v16), so it carries what ERPNext posts: due date, party,
+    currency fields, and for a return the original invoice as against_voucher (so
+    the credit / debit note reduces that invoice's outstanding).
+
+    The amount is the UNROUNDED grand total, not ERPNext's rounded total, and no
+    round-off row is posted -- as ERPNext itself does for its own internal
+    transfers. The sender SI and the receiver PI can have different rounding
+    settings (users tick Disable Rounded Total on a PI to match the bill), and
+    the Internal Debtor must equal the Internal Creditor for the branches to net
+    to zero. Returns None if the row cannot be used.
     """
     maker = getattr(doc, "make_customer_gl_entry" if doc.doctype == "Sales Invoice" else "make_supplier_gl_entry", None)
     if not maker:
@@ -3415,20 +3412,17 @@ def _erpnext_party_gl_row(doc, account: str, against: str):
         row["account_currency"] = account_currency
         row["debit_in_account_currency"] = row.get("debit")
         row["credit_in_account_currency"] = row.get("credit")
+    side = "debit" if doc.doctype == "Sales Invoice" else "credit"
+    base_grand_total = flt(doc.get("base_grand_total"), doc.precision("base_grand_total"))
+    grand_total = flt(doc.get("grand_total"))
+    row[side] = base_grand_total
+    row[f"{side}_in_account_currency"] = (
+        base_grand_total if row.get("account_currency") == frappe.get_cached_value("Company", doc.company, "default_currency") else grand_total
+    )
+    row[f"{side}_in_transaction_currency"] = grand_total
     row["account"] = account
     row["against"] = against
     return _toggle_negative_gl_sides(row)
-
-
-def _erpnext_round_off_gl_rows(doc) -> List[Dict[str, Any]]:
-    """ERPNext's own rounding-adjustment row, which balances the party row's
-    rounded total against the unrounded taxes and net total."""
-    maker = getattr(doc, "make_gle_for_rounding_adjustment", None)
-    if not maker:
-        return []
-    rows: List[Dict[str, Any]] = []
-    maker(rows)
-    return [_toggle_negative_gl_sides(row) for row in rows]
 
 
 def _set_transaction_currency(doc, gl_entries) -> None:
@@ -3486,9 +3480,9 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     if not debtor_template:
         return gl_entries
 
-    # Receivable leg: ERPNext's own customer row (rounded total, due date, and
-    # for a credit note the original invoice as against_voucher) moved to the
-    # internal debtor; ERPNext's own rounding row balances it.
+    # Receivable leg: ERPNext's own customer row (due date, and for a credit note
+    # the original invoice as against_voucher) moved to the internal debtor, at
+    # the unrounded grand total so it equals the receiver's Internal Creditor.
     party_row = _erpnext_party_gl_row(doc, debtor_account, against=transfer_account)
     rewritten = [
         party_row
@@ -3500,8 +3494,6 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             template=debtor_template,
         )
     ]
-    if party_row:
-        rewritten.extend(_erpnext_round_off_gl_rows(doc))
 
     for tax_account, tax_amount in sorted(tax_by_account.items()):
         tax_template = next(
@@ -3610,19 +3602,47 @@ def _will_rewrite_internal_invoice_gl(doc) -> bool:
     return False
 
 
-def _internal_invoice_rewrite_blockers(doc) -> List[str]:
-    """Features ERPNext posts GL for that the BNS internal rewrite cannot carry.
+def _tax_withholding_accounts(company) -> Set[str]:
+    return set(
+        frappe.get_all("Tax Withholding Account", filters={"company": company}, pluck="account")
+    )
 
-    The rewrite rebuilds the GL from the totals and the taxes table, so payment
-    taken on the invoice, write-offs, loyalty, deferred income/expense, India
-    Compliance ineligible-ITC reversals and some valuation charges would be
-    silently lost. Blocking them at submit keeps the books right; reposts of
+
+def _internal_invoice_rewrite_blockers(doc) -> List[str]:
+    """What an internal branch transfer invoice must not carry.
+
+    Either the BNS rewrite cannot post it (it rebuilds the GL from the totals and
+    the taxes table, so payment taken on the invoice, write-off, loyalty, advances
+    and deferred income/expense would be lost), or it is wrong between branches
+    of one company. Blocking at submit keeps the books right; reposts of
     already-submitted documents are not affected.
     """
     blockers: List[str] = []
     items = doc.get("items") or []
+    taxes = doc.get("taxes") or []
+
+    # Branches of one company share its PAN, so a transfer between them is not a
+    # payment to another person: TDS / TCS do not apply. Posting it would create
+    # a TDS/TCS liability against the company's own PAN and leave the Internal
+    # Creditor short of the Internal Debtor. Detected by the withholding flag
+    # (v16, and v15 purchase taxes) and by the category's accounts (v15 TCS).
+    withholding_accounts = _tax_withholding_accounts(doc.company) if doc.get("company") else set()
+    if any(
+        (cint(t.get("is_tax_withholding_account")) or t.get("account_head") in withholding_accounts)
+        and _tax_base_amount(doc, t)
+        for t in taxes
+    ):
+        blockers.append(_("TDS") if doc.doctype == "Purchase Invoice" else _("TCS"))
+    # Reverse charge does not apply to goods moved between one's own GSTINs.
+    if cint(doc.get("is_reverse_charge")):
+        blockers.append(_("reverse charge"))
     if flt(doc.get("write_off_amount")):
         blockers.append(_("a write-off amount"))
+    # The party account is switched to the internal debtor/creditor at submit;
+    # an advance allocated on Debtors/Creditors would be left on the old account.
+    if flt(doc.get("total_advance")) or any(flt(a.get("allocated_amount")) for a in (doc.get("advances") or [])):
+        blockers.append(_("allocated advances"))
+
     if doc.doctype == "Sales Invoice":
         if cint(doc.get("is_pos")):
             blockers.append(_("POS payments (Include Payment)"))
@@ -3634,8 +3654,7 @@ def _internal_invoice_rewrite_blockers(doc) -> List[str]:
             loose_assets = [
                 i.get("item_code")
                 for i in items
-                if not (i.get("delivery_note") or "").strip()
-                and (cint(i.get("is_fixed_asset")) or (i.get("item_code") and cint(frappe.db.get_value("Item", i.get("item_code"), "is_fixed_asset"))))
+                if not (i.get("delivery_note") or "").strip() and _is_fixed_asset_row(i)
             ]
             if loose_assets:
                 blockers.append(
@@ -3646,18 +3665,28 @@ def _internal_invoice_rewrite_blockers(doc) -> List[str]:
             blockers.append(_("payment on the invoice (Is Paid)"))
         if any(cint(i.get("enable_deferred_expense")) for i in items):
             blockers.append(_("deferred expense items"))
-        if any(cint(i.get("is_ineligible_for_itc")) for i in items) or (doc.get("ineligibility_reason") or "").strip():
-            blockers.append(_("ineligible ITC"))
-        has_pr_rows = any((i.get("purchase_receipt") or "").strip() for i in items)
-        has_valuation_charges = any(
+        # Ineligible ITC is expensed by the rewrite ([[_ineligible_itc_rows]]),
+        # except on fixed assets, whose value moves at net book value.
+        if any(cint(i.get("is_ineligible_for_itc")) and _is_fixed_asset_row(i) for i in items):
+            blockers.append(_("ineligible ITC on fixed-asset items"))
+        # Stock moves between branches at the sender's cost (the receiver's
+        # incoming rate is pinned to the transfer rate), so a valuation-type
+        # charge can never reach the stock value.
+        if any(
             t.get("category") in ("Valuation", "Valuation and Total") and _tax_base_amount(doc, t)
-            for t in (doc.get("taxes") or [])
-        )
-        if has_valuation_charges and (not cint(doc.get("update_stock")) or has_pr_rows):
+            for t in taxes
+        ):
             blockers.append(
-                _("valuation-type charges without Update Stock (add them on the Purchase Receipt or with a Landed Cost Voucher)")
+                _("valuation-type charges (internal transfers move stock at the sender's cost; book freight as a separate expense)")
             )
     return blockers
+
+
+def _is_fixed_asset_row(item) -> bool:
+    return bool(
+        cint(item.get("is_fixed_asset"))
+        or (item.get("item_code") and cint(frappe.db.get_value("Item", item.get("item_code"), "is_fixed_asset")))
+    )
 
 
 def prepare_internal_invoice_for_gl_rewrite(doc, method: Optional[str] = None) -> None:
@@ -5097,11 +5126,54 @@ _apply_bns_sticky_status_patch()
 _suppress_repost_error_emails()
 
 
+_BNS_COMMON_PARTY_PATCHED = False
+
+
+def _apply_bns_common_party_skip_patch() -> None:
+    """Skip ERPNext's common party accounting for internal invoices BNS rewrites.
+
+    With a Party Link between the internal customer and supplier, ERPNext's
+    on_submit auto-posts a Journal Entry settling the invoice on the party's
+    default Debtors / Creditors. A rewritten internal invoice has nothing there:
+    its receivable / payable is on the Internal Debtor / Creditor, which is meant
+    to stay open until the branches are reconciled. That JE only leaves a stray
+    Dr Creditors / Cr Debtors, and fails outright once the invoice names the
+    internal account. Ordinary invoices and pre-cutoff internal ones are unchanged.
+    """
+    global _BNS_COMMON_PARTY_PATCHED
+    if _BNS_COMMON_PARTY_PATCHED:
+        return
+    try:
+        from erpnext.controllers.accounts_controller import AccountsController
+
+        original = AccountsController.process_common_party_accounting
+        if getattr(original, "_bns_common_party_patched", False):
+            _BNS_COMMON_PARTY_PATCHED = True
+            return
+
+        def patched_process_common_party_accounting(self, *args, **kwargs):
+            try:
+                if _will_rewrite_internal_invoice_gl(self):
+                    return
+            except Exception:
+                logger.exception("BNS: common party guard failed for %s", getattr(self, "name", "?"))
+            return original(self, *args, **kwargs)
+
+        patched_process_common_party_accounting._bns_common_party_patched = True
+        AccountsController.process_common_party_accounting = site_gated(
+            original, patched_process_common_party_accounting
+        )
+        _BNS_COMMON_PARTY_PATCHED = True
+    except Exception as e:
+        logger.error("Failed to apply BNS common party accounting patch: %s", str(e))
+
+
 def apply_bns_runtime_patches() -> None:
     """
     Ensure BNS runtime monkey patches are applied in every process (web/worker).
     Hooked from after_app_init so repost workers don't miss patch load.
     """
+    _apply_bns_common_party_skip_patch()
     _apply_bns_transfer_rate_stock_ledger_patch()
     _apply_bns_internal_gl_rewrite_patch()
     _apply_bns_repost_gl_failsafe_patch()

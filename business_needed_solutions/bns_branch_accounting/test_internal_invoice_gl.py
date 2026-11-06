@@ -127,10 +127,9 @@ class TestInternalPurchaseInvoiceGL(_RewriteCase):
 		net = _net(self.rewrite(pi))
 		self.assertEqual(net["TDS Payable - _TC"], -100)
 		self.assertEqual(net["Input Tax CGST - _TC"], 900.04)
-		# The payable is ERPNext's rounded total, net of TDS, balanced by its round-off row.
-		self.assertEqual(net[CREDITOR], -flt(pi.base_rounded_total))
-		# ERPNext debits a purchase invoice's rounding adjustment (here -0.44 -> a 0.44 credit).
-		self.assertEqual(net["Round Off - _TC"], flt(pi.base_rounding_adjustment))
+		# The payable is the unrounded grand total (net of TDS), with no round-off row.
+		self.assertEqual(net[CREDITOR], -flt(pi.base_grand_total, 2))
+		self.assertNotIn("Round Off - _TC", net)
 		self.assertNotIn("Creditors - _TC", net)
 
 	def test_reverse_charge_rows_post_both_sides(self):
@@ -166,18 +165,43 @@ class TestInternalPurchaseInvoiceGL(_RewriteCase):
 		self.assertGreater(flt(party["debit"]), 0)
 		self.assertEqual(party["against_voucher"], "BNS-ORIGINAL-PI")
 
+	def test_ineligible_itc_is_expensed(self):
+		gst_expense = frappe.get_cached_value("Company", COMPANY, "default_gst_expense_account")
+		if not gst_expense:
+			self.skipTest("_Test Company has no Default GST Expense Account")
+		pi = _purchase_invoice(rate=10000, taxes=[_tax("Input Tax CGST - _TC", rate=9)])
+		pi.company_gstin = "24AAACB1234C1Z5"  # a GST-registered branch
+		pi.taxes[0].gst_tax_type = "cgst"
+		pi.items[0].is_ineligible_for_itc = 1
+		pi.items[0].cgst_amount = 900
+		net = _net(self.rewrite(pi))
+		# The input GST is reversed (nothing left to claim) and expensed.
+		self.assertNotIn("Input Tax CGST - _TC", net)
+		self.assertEqual(net[gst_expense], 900)
+		self.assertEqual(net[CREDITOR], -10900)
+
 	def test_rows_carry_transaction_currency(self):
 		rows = self.rewrite(_purchase_invoice(taxes=[_tax("Input Tax CGST - _TC", rate=9)]))
 		self.assertTrue(all(r.get("transaction_currency") == "INR" for r in rows))
 
 
 class TestInternalSalesInvoiceGL(_RewriteCase):
-	def test_debtor_is_rounded_total_with_round_off(self):
+	def test_debtor_equals_creditor_whatever_the_rounding(self):
+		# Users tick Disable Rounded Total on the receiving PI to match the bill;
+		# the Internal Debtor and Internal Creditor must still be equal.
+		si = _sales_invoice(taxes=[_tax("Output Tax CGST - _TC", rate=9)])
+		pi = _purchase_invoice(disable_rounded_total=1, taxes=[_tax("Input Tax CGST - _TC", rate=9)])
+		self.assertNotEqual(flt(si.base_rounded_total), flt(pi.base_grand_total))
+		debtor = _net(self.rewrite(si))[DEBTOR]
+		creditor = _net(self.rewrite(pi))[CREDITOR]
+		self.assertEqual(debtor, -creditor)
+		self.assertEqual(debtor, flt(si.base_grand_total, 2))
+
+	def test_debtor_row_carries_erpnext_fields(self):
 		si = _sales_invoice(taxes=[_tax("Output Tax CGST - _TC", rate=9)])
 		rows = self.rewrite(si)
 		net = _net(rows)
-		self.assertEqual(net[DEBTOR], flt(si.base_rounded_total))
-		self.assertEqual(net["Round Off - _TC"], -flt(si.base_rounding_adjustment))
+		self.assertNotIn("Round Off - _TC", net)
 		self.assertEqual(net["Output Tax CGST - _TC"], -900.04)
 		party = next(r for r in rows if r["account"] == DEBTOR)
 		self.assertEqual(party["against_voucher"], si.name)
@@ -231,12 +255,32 @@ class TestSubmitGuards(FrappeTestCase):
 			_purchase_invoice(rate=10000, taxes=[_tax("Freight and Forwarding Charges - _TC", category="Valuation", amount=50)]),
 			_sales_invoice(is_pos=1),
 		]
+		# Same company, same PAN: TDS does not apply between branches.
+		pi = _purchase_invoice(taxes=[_tax("TDS Payable - _TC", "Deduct", amount=100)])
+		pi.taxes[0].is_tax_withholding_account = 1
+		cases.append(pi)
+		cases.append(_purchase_invoice(is_reverse_charge=1))
 		pi = _purchase_invoice()
-		pi.items[0].is_ineligible_for_itc = 1
+		pi.total_advance = 500  # ERPNext recomputes it from the advances table
 		cases.append(pi)
 		for doc in cases:
 			with self.subTest(doc=doc.doctype), self.assertRaises(frappe.ValidationError):
 				self._prepare(doc)
+
+	def test_tds_found_by_category_account_without_the_flag(self):
+		# v15 Sales/Purchase tax rows may not carry is_tax_withholding_account.
+		account = frappe.db.get_value("Tax Withholding Account", {"company": COMPANY}, "account")
+		if not account:
+			self.skipTest("no Tax Withholding Category account for _Test Company")
+		pi = _purchase_invoice(taxes=[_tax(account, "Deduct", amount=100)])
+		pi.taxes[0].is_tax_withholding_account = 0
+		with self.assertRaises(frappe.ValidationError):
+			self._prepare(pi)
+
+	def test_ineligible_itc_on_goods_is_allowed(self):
+		pi = _purchase_invoice()
+		pi.items[0].is_ineligible_for_itc = 1
+		self._prepare(pi)  # no error: the rewrite expenses it
 
 	def test_party_account_follows_the_ledger(self):
 		pi, si = _purchase_invoice(), _sales_invoice()
@@ -279,6 +323,17 @@ class TestInternalGates(FrappeTestCase):
 		pi = frappe._dict(doctype="Purchase Invoice", docstatus=0, supplier="_Test Supplier", is_bns_internal_supplier=1)
 		bns.sync_internal_supplier_flag_on_draft(pi)
 		self.assertEqual(pi.is_bns_internal_supplier, 0)
+
+
+class TestCommonPartyAccounting(FrappeTestCase):
+	def test_skipped_for_rewritten_internal_invoice(self):
+		from erpnext.controllers.accounts_controller import AccountsController
+
+		bns._apply_bns_common_party_skip_patch()
+		doc = SimpleNamespace(doctype="Purchase Invoice", name="X")
+		with patch.object(bns, "_will_rewrite_internal_invoice_gl", return_value=True), \
+			 patch("frappe.get_single_value", side_effect=AssertionError("ERPNext path must not run")):
+			AccountsController.process_common_party_accounting(doc)
 
 
 class TestCancelLinks(FrappeTestCase):

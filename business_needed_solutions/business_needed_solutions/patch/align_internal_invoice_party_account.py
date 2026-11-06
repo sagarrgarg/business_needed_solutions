@@ -7,7 +7,9 @@ account, so they missed these invoices. New invoices are aligned at submit
 (prepare_internal_invoice_for_gl_rewrite); this aligns the ones already posted.
 
 Only the account field changes, and only where the invoice's own live party GL
-row already sits on the internal account. No GL or ledger row is touched.
+row already sits on the internal account. No GL or ledger row is touched. An
+invoice that another voucher (e.g. a common-party Journal Entry) still settles on
+the old account is left as it is, so that voucher is not orphaned.
 """
 
 import frappe
@@ -40,6 +42,12 @@ def execute():
 				SELECT 1 FROM `tabGL Entry` gle
 				WHERE gle.voucher_type = %(doctype)s AND gle.voucher_no = inv.name
 				  AND gle.is_cancelled = 0 AND gle.account = inv.`{field}`
+			  )
+			  AND NOT EXISTS (
+				SELECT 1 FROM `tabPayment Ledger Entry` ple
+				WHERE ple.against_voucher_type = %(doctype)s AND ple.against_voucher_no = inv.name
+				  AND ple.voucher_no != inv.name AND ple.delinked = 0
+				  AND ple.account = inv.`{field}`
 			  )
 			""",
 			{"account": account, "doctype": doctype, "party_type": party_type},
