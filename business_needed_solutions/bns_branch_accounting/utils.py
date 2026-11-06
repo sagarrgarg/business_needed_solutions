@@ -1035,7 +1035,13 @@ def _is_bns_internal_si_linked_purchase_receipt(doc) -> bool:
     ):
         return False
 
-    source_ref = (doc.get("bns_inter_company_reference") or doc.get("supplier_delivery_note") or "").strip()
+    # bns_inter_company_reference is set only by BNS's own SI->PR mapping. The
+    # supplier's delivery-note number is free text: trust it only for an
+    # internal supplier, so a regular supplier whose challan number happens to
+    # equal one of our Sales Invoice names is never rewritten as a transfer.
+    source_ref = (doc.get("bns_inter_company_reference") or "").strip()
+    if not source_ref and is_bns_internal_supplier(doc):
+        source_ref = (doc.get("supplier_delivery_note") or "").strip()
     return bool(source_ref and frappe.db.exists("Sales Invoice", source_ref))
 
 
@@ -1534,14 +1540,17 @@ def _is_internal_transfer_sales_invoice(si_name: str) -> bool:
     return bool(meta and meta.get("is_bns_internal_customer") and not cint(meta.get("is_return")))
 
 
-def _resolve_si_name_for_internal_pi(doc) -> Optional[str]:
+def _resolve_si_name_for_internal_pi(doc, use_bill_no: bool = True) -> Optional[str]:
     """Resolve the linked INTERNAL-TRANSFER Sales Invoice for a PI from its
     header ref, bill_no, or PR chain. Only an internal-transfer SI qualifies —
-    see [[_is_internal_transfer_sales_invoice]]."""
+    see [[_is_internal_transfer_sales_invoice]].
+
+    use_bill_no=False skips the supplier's bill number, which is free text that a
+    regular supplier can coincidentally share with one of our SI names."""
     ref = (doc.get("bns_inter_company_reference") or "").strip()
     if ref and _is_internal_transfer_sales_invoice(ref):
         return ref
-    bill = (doc.get("bill_no") or "").strip()
+    bill = (doc.get("bill_no") or "").strip() if use_bill_no else ""
     if bill and _is_internal_transfer_sales_invoice(bill):
         return bill
     pr_names = sorted(
@@ -2570,13 +2579,8 @@ def _voucher_sle_stock_value(voucher_type: str, voucher_no: str) -> float:
     return abs(flt(row[0][0])) if row else 0.0
 
 
-def _resolve_valuation_from_gl_entries(
-    gl_entries: List[Dict[str, Any]], side: str, company: Optional[str] = None
-) -> Tuple[float, Optional[str], str]:
-    """Resolve valuation amount and stock account from generated GL entries."""
-    if side not in ("debit", "credit"):
-        return 0.0, None, "invalid_side"
-
+def _stock_accounts_in_gl(gl_entries: List[Dict[str, Any]], company: Optional[str] = None) -> Set[str]:
+    """Stock (inventory) accounts that can appear in the voucher's GL."""
     stock_accounts = set()
     if company:
         try:
@@ -2608,27 +2612,122 @@ def _resolve_valuation_from_gl_entries(
                     stock_accounts.add(account)
             except Exception:
                 continue
+    return stock_accounts
 
+
+def _resolve_valuation_by_account_from_gl_entries(
+    gl_entries: List[Dict[str, Any]], side: str, company: Optional[str] = None
+) -> Tuple[Dict[str, float], str]:
+    """Stock value per stock account on `side` of ERPNext's own GL.
+
+    Returns ({account: amount}, reason); reason is empty when at least one
+    account carries a positive amount.
+    """
+    if side not in ("debit", "credit"):
+        return {}, "invalid_side"
+
+    stock_accounts = _stock_accounts_in_gl(gl_entries, company)
     if not stock_accounts:
-        return 0.0, None, "no_stock_accounts"
+        return {}, "no_stock_accounts"
 
-    stock_side_entries = [
-        row
-        for row in (gl_entries or [])
-        if row.get("account") in stock_accounts and flt(row.get(side) or 0) > 0
-    ]
-    if not stock_side_entries:
-        return 0.0, None, "no_stock_side_entries"
+    by_account: Dict[str, float] = defaultdict(float)
+    for row in gl_entries or []:
+        if row.get("account") in stock_accounts and flt(row.get(side) or 0) > 0:
+            by_account[row.get("account")] += flt(row.get(side) or 0)
+    if not by_account:
+        return {}, "no_stock_side_entries"
 
-    accounts = {row.get("account") for row in stock_side_entries if row.get("account")}
-    if len(accounts) != 1:
+    positive = {account: amount for account, amount in by_account.items() if amount > 0}
+    if not positive:
+        return {}, "non_positive_valuation_amount"
+    return positive, ""
+
+
+def _resolve_valuation_from_gl_entries(
+    gl_entries: List[Dict[str, Any]], side: str, company: Optional[str] = None
+) -> Tuple[float, Optional[str], str]:
+    """Resolve valuation amount and stock account from generated GL entries.
+
+    Single-account form of [[_resolve_valuation_by_account_from_gl_entries]]:
+    reports "multiple_stock_accounts" when the stock moved through more than one
+    stock account (callers that can, then post one leg pair per account via
+    [[_resolve_stock_legs]])."""
+    by_account, reason = _resolve_valuation_by_account_from_gl_entries(gl_entries, side, company)
+    if reason:
+        return 0.0, None, reason
+    if len(by_account) != 1:
         return 0.0, None, "multiple_stock_accounts"
+    account, amount = next(iter(by_account.items()))
+    return amount, account, ""
 
-    valuation_amount = sum(flt(row.get(side) or 0) for row in stock_side_entries)
-    if valuation_amount <= 0:
-        return 0.0, None, "non_positive_valuation_amount"
 
-    return valuation_amount, next(iter(accounts)), ""
+def _voucher_sle_stock_value_by_account(doc) -> Dict[str, float]:
+    """Absolute stock value the voucher's own SLE moved, per stock account.
+
+    Used when one document moves stock through warehouses with different stock
+    accounts. Returns {} when any warehouse has no stock account (do not guess).
+    """
+    rows = frappe.db.sql(
+        """SELECT warehouse, COALESCE(SUM(stock_value_difference), 0)
+           FROM `tabStock Ledger Entry`
+           WHERE voucher_type=%s AND voucher_no=%s AND is_cancelled=0
+           GROUP BY warehouse""",
+        (doc.doctype, doc.name),
+    )
+    if not rows or not doc.get("company"):
+        return {}
+    try:
+        from erpnext.stock import get_warehouse_account_map
+
+        wmap = get_warehouse_account_map(doc.company) or {}
+    except Exception:
+        return {}
+    by_account: Dict[str, float] = defaultdict(float)
+    for warehouse, value in rows:
+        account = (wmap.get(warehouse) or {}).get("account")
+        if not account:
+            return {}
+        by_account[account] += flt(value)
+    return {account: abs(value) for account, value in by_account.items() if abs(flt(value)) > 0.005}
+
+
+def _resolve_stock_legs(
+    doc, gl_entries: List[Dict[str, Any]], side: str, use_sle_value: bool
+) -> Tuple[List[Tuple[str, float]], str]:
+    """Stock accounts and amounts for the stock / transit leg pairs.
+
+    One stock account (the usual case) gives exactly what the rewrites posted
+    before. When the stock moved through several stock accounts, each account
+    gets its own pair instead of the legs being dropped.
+
+    use_sle_value: PR/PI post the SLE value actually moved (see
+    [[_voucher_sle_stock_value]]); DN/SI post ERPNext's own stock GL amount.
+    """
+    amount, account, reason = _resolve_valuation_from_gl_entries(gl_entries, side=side, company=doc.company)
+    if use_sle_value:
+        if not account:
+            account = _resolve_stock_account_from_warehouses(doc)
+        if account:
+            value = _voucher_sle_stock_value(doc.doctype, doc.name)
+            return ([(account, value)] if value > 0 else []), reason
+        by_account = _voucher_sle_stock_value_by_account(doc)
+        if len(by_account) > 1:
+            return sorted(by_account.items()), ""
+        return [], reason
+
+    if account and amount > 0:
+        return [(account, amount)], reason
+    if reason == "multiple_stock_accounts":
+        by_account, _reason = _resolve_valuation_by_account_from_gl_entries(gl_entries, side, doc.company)
+        return sorted(by_account.items()), ""
+    return [], reason
+
+
+def _stock_leg_template(gl_entries, account, side, fallback):
+    return next(
+        (row for row in (gl_entries or []) if row.get("account") == account and flt(row.get(side) or 0) > 0),
+        fallback,
+    )
 
 
 def _resolve_stock_account_from_warehouses(doc) -> Optional[str]:
@@ -2770,10 +2869,9 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     # side). Resolve valuation from the matching side; every leg reverses for
     # a return.
     val_side = "debit" if is_return else "credit"
-    valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
-        gl_entries, side=val_side, company=doc.company
-    )
-    has_valuation = valuation_amount > 0 and bool(stock_account)
+    # One (account, amount) pair per stock account the goods left from.
+    stock_legs, valuation_reason = _resolve_stock_legs(doc, gl_entries, val_side, use_sle_value=False)
+    has_valuation = bool(stock_legs)
 
     # Dimension template: prefer the stock GL row; fall back to any GL row,
     # else {} — a zero-valuation internal DN emits no stock GL, but the
@@ -2782,7 +2880,7 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     # document when no template row is available.
     template = None
     if has_valuation:
-        template = next((row for row in gl_entries if row.get("account") == stock_account and flt(row.get(val_side) or 0) > 0), None)
+        template = _stock_leg_template(gl_entries, stock_legs[0][0], val_side, None)
     if not template and gl_entries:
         template = gl_entries[0]
     template = template or {}
@@ -2809,9 +2907,10 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         if transfer_amount > 0:
             rewritten.append(_make_bns_gl_entry(doc, settings["internal_branch_debtor_account"], **{debtor_side: transfer_amount}, against=settings["internal_sales_non_gst_account"], template=template))
             rewritten.append(_make_bns_gl_entry(doc, settings["internal_sales_non_gst_account"], **{sales_side: transfer_amount}, against=settings["internal_branch_debtor_account"], template=template))
-        if has_valuation:
-            rewritten.append(_make_bns_gl_entry(doc, settings["stock_in_transit_account"], **{transit_side: valuation_amount}, against=stock_account, template=template))
-            rewritten.append(_make_bns_gl_entry(doc, stock_account, **{stock_side: valuation_amount}, against=settings["stock_in_transit_account"], template=template))
+        for stock_account, valuation_amount in stock_legs:
+            leg_template = _stock_leg_template(gl_entries, stock_account, val_side, template)
+            rewritten.append(_make_bns_gl_entry(doc, settings["stock_in_transit_account"], **{transit_side: valuation_amount}, against=stock_account, template=leg_template))
+            rewritten.append(_make_bns_gl_entry(doc, stock_account, **{stock_side: valuation_amount}, against=settings["stock_in_transit_account"], template=leg_template))
         if not rewritten:
             logger.warning("Skipping DN GL rewrite for %s: no transfer amount (reason=%s) and no valuation (reason=%s)", doc.name, transfer_reason or "ok", valuation_reason or "ok")
             return gl_entries
@@ -2827,10 +2926,11 @@ def _rewrite_bns_internal_dn_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             return gl_entries
         transit_side = "credit" if is_return else "debit"
         stock_side = "debit" if is_return else "credit"
-        rewritten = [
-            _make_bns_gl_entry(doc, settings["stock_in_transit_account"], **{transit_side: valuation_amount}, against=stock_account, template=template),
-            _make_bns_gl_entry(doc, stock_account, **{stock_side: valuation_amount}, against=settings["stock_in_transit_account"], template=template),
-        ]
+        rewritten = []
+        for stock_account, valuation_amount in stock_legs:
+            leg_template = _stock_leg_template(gl_entries, stock_account, val_side, template)
+            rewritten.append(_make_bns_gl_entry(doc, settings["stock_in_transit_account"], **{transit_side: valuation_amount}, against=stock_account, template=leg_template))
+            rewritten.append(_make_bns_gl_entry(doc, stock_account, **{stock_side: valuation_amount}, against=settings["stock_in_transit_account"], template=leg_template))
 
     debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
     credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
@@ -2866,25 +2966,17 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     # PR sends it back (stock on the CREDIT side). Resolve from the matching
     # side; every leg reverses for a return.
     val_side = "credit" if is_return else "debit"
-    valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
-        gl_entries, side=val_side, company=doc.company
-    )
-    # A purchase-return PR's stock leg can net out of ERPNext's source GL, so the
-    # side-scan finds no row and the stock pair would be dropped. Fall back to the
-    # warehouse's stock account (forward flows resolve a row above, so this only
-    # fires when the scan found nothing). See [[_rewrite_bns_internal_pi_gl_entries]].
-    if not stock_account:
-        stock_account = _resolve_stock_account_from_warehouses(doc)
-    # Use the ACTUAL stock value moved (SLE svd) for the transit leg, not
-    # ERPNext's valuation_rate-based GL number (which diverges when an item's
-    # svd is 0), so receiver-transit-Cr == sender-transit-Dr.
-    if stock_account:
-        valuation_amount = _voucher_sle_stock_value(doc.doctype, doc.name)
-    has_valuation = valuation_amount > 0 and bool(stock_account)
+    # Stock account(s) and the ACTUAL stock value moved (SLE svd), not ERPNext's
+    # valuation_rate-based GL number (which diverges when an item's svd is 0), so
+    # receiver-transit-Cr == sender-transit-Dr. A purchase-return PR's stock leg
+    # can net out of ERPNext's source GL; [[_resolve_stock_legs]] then falls back
+    # to the warehouse's stock account so the pair is not dropped.
+    stock_legs, valuation_reason = _resolve_stock_legs(doc, gl_entries, val_side, use_sle_value=True)
+    has_valuation = bool(stock_legs)
 
     template = None
     if has_valuation:
-        template = next((row for row in gl_entries if row.get("account") == stock_account and flt(row.get(val_side) or 0) > 0), None)
+        template = _stock_leg_template(gl_entries, stock_legs[0][0], val_side, None)
     if not template and gl_entries:
         template = gl_entries[0]
     template = template or {}
@@ -2903,9 +2995,10 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         if transfer_amount > 0:
             rewritten.append(_make_bns_gl_entry(doc, settings["internal_purchase_non_gst_account"], **{purchase_side: transfer_amount}, against=settings["internal_branch_creditor_account"], template=template))
             rewritten.append(_make_bns_gl_entry(doc, settings["internal_branch_creditor_account"], **{creditor_side: transfer_amount}, against=settings["internal_purchase_non_gst_account"], template=template))
-        if has_valuation:
-            rewritten.append(_make_bns_gl_entry(doc, stock_account, **{stock_side: valuation_amount}, against=settings["stock_in_transit_account"], template=template))
-            rewritten.append(_make_bns_gl_entry(doc, settings["stock_in_transit_account"], **{transit_side: valuation_amount}, against=stock_account, template=template))
+        for stock_account, valuation_amount in stock_legs:
+            leg_template = _stock_leg_template(gl_entries, stock_account, val_side, template)
+            rewritten.append(_make_bns_gl_entry(doc, stock_account, **{stock_side: valuation_amount}, against=settings["stock_in_transit_account"], template=leg_template))
+            rewritten.append(_make_bns_gl_entry(doc, settings["stock_in_transit_account"], **{transit_side: valuation_amount}, against=stock_account, template=leg_template))
         if not rewritten:
             logger.warning("Skipping PR GL rewrite for %s: no transfer amount (reason=%s) and no valuation (reason=%s)", doc.name, transfer_reason or "ok", valuation_reason or "ok")
             return gl_entries
@@ -2917,10 +3010,11 @@ def _rewrite_bns_internal_pr_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             return gl_entries
         stock_side = "credit" if is_return else "debit"
         transit_side = "debit" if is_return else "credit"
-        rewritten = [
-            _make_bns_gl_entry(doc, stock_account, **{stock_side: valuation_amount}, against=settings["stock_in_transit_account"], template=template),
-            _make_bns_gl_entry(doc, settings["stock_in_transit_account"], **{transit_side: valuation_amount}, against=stock_account, template=template),
-        ]
+        rewritten = []
+        for stock_account, valuation_amount in stock_legs:
+            leg_template = _stock_leg_template(gl_entries, stock_account, val_side, template)
+            rewritten.append(_make_bns_gl_entry(doc, stock_account, **{stock_side: valuation_amount}, against=settings["stock_in_transit_account"], template=leg_template))
+            rewritten.append(_make_bns_gl_entry(doc, settings["stock_in_transit_account"], **{transit_side: valuation_amount}, against=stock_account, template=leg_template))
 
     debit_total = sum(flt(row.get("debit") or 0) for row in rewritten)
     credit_total = sum(flt(row.get("credit") or 0) for row in rewritten)
@@ -3046,6 +3140,8 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         logger.warning("Skipping PI GL rewrite for %s due to invalid totals", doc.name)
         return gl_entries
 
+    creditor_account = settings["internal_branch_creditor_account"]
+    transfer_account = settings["internal_purchase_transfer_account"]
     creditor_side = "debit" if is_return else "credit"
     transfer_side = "credit" if is_return else "debit"
 
@@ -3053,7 +3149,7 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         (
             row
             for row in (gl_entries or [])
-            if row.get("account") == settings["internal_branch_creditor_account"] and flt(row.get(creditor_side) or 0) > 0
+            if row.get("account") == creditor_account and flt(row.get(creditor_side) or 0) > 0
         ),
         None,
     )
@@ -3064,22 +3160,29 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     if not creditor_template:
         return gl_entries
 
+    # Payable leg: ERPNext's own supplier row (rounded total, due date, and for a
+    # debit note the original invoice as against_voucher) moved to the internal
+    # creditor; ERPNext's own rounding row balances it. See [[_erpnext_party_gl_row]].
+    party_row = _erpnext_party_gl_row(doc, creditor_account, against=transfer_account)
     rewritten = [
-        _make_bns_gl_entry(
+        party_row
+        or _make_bns_gl_entry(
             doc,
-            settings["internal_branch_creditor_account"],
+            creditor_account,
             **{creditor_side: grand_total},
-            against=settings["internal_purchase_transfer_account"],
+            against=transfer_account,
             template=creditor_template,
         ),
         _make_bns_gl_entry(
             doc,
-            settings["internal_purchase_transfer_account"],
+            transfer_account,
             **{transfer_side: taxable_total},
-            against=settings["internal_branch_creditor_account"],
+            against=creditor_account,
             template=creditor_template,
         ),
     ]
+    if party_row:
+        rewritten.extend(_erpnext_round_off_gl_rows(doc))
 
     for tax_account, tax_amount in sorted(tax_by_account.items()):
         tax_template = next(
@@ -3092,20 +3195,17 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             creditor_template,
         )
         abs_tax = abs(tax_amount)
-        # Tax side follows the SIGNED tax amount, which already encodes return
-        # direction (ERPNext stores return-document taxes as negative). A PI
-        # input tax is normally a debit; a negative amount (return) flips it to
-        # a credit. Do NOT additionally invert on is_return -- that double-counts
-        # the sign, pushes the tax onto the same side as the Internal Creditor
-        # debit, and unbalances the party legs, tripping the balance-guard below
-        # into a standard-GL fallback (leaving a bogus COGS margin on returns).
+        # tax_amount is signed the way ERPNext posts it: positive = debit (input
+        # tax), negative = credit (a "Deduct" row such as TDS or the reverse-
+        # charge liability), and a return document's taxes are already negative.
+        # So the sign alone decides the side; do NOT also invert on is_return.
         tax_positive_side = "debit" if tax_amount > 0 else "credit"
         rewritten.append(
             _make_bns_gl_entry(
                 doc,
                 tax_account,
                 **{tax_positive_side: abs_tax},
-                against=settings["internal_branch_creditor_account"],
+                against=creditor_account,
                 template=tax_template,
             )
         )
@@ -3114,34 +3214,17 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
 
     if cint(doc.get("update_stock")) and not has_pr_linked_rows:
         stock_gl_side = "debit" if not is_return else "credit"
-        valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
-            gl_entries, side=stock_gl_side, company=doc.company
-        )
-        # A RETURN's stock leg can net out of ERPNext's source GL (e.g. when the
-        # item's expense_account IS the stock account), so the side-scan above
-        # finds no row and would silently DROP the stock pair. Fall back to the
-        # warehouse's stock account so the leg is still posted (from the SLE
-        # value). Forward flows resolve a stock row above, so this only fires when
-        # the scan genuinely found nothing.
-        if not stock_account:
-            stock_account = _resolve_stock_account_from_warehouses(doc)
-        # Use the ACTUAL stock value moved (SLE svd) for the transit leg, not
-        # ERPNext's valuation_rate-based GL number (which diverges when an item's
-        # svd is 0), so the receiver's Internal COGS credit == the sender's debit.
-        if stock_account:
-            valuation_amount = _voucher_sle_stock_value(doc.doctype, doc.name)
+        transit_side = "credit" if not is_return else "debit"
+        # Stock legs use the ACTUAL stock value moved (SLE svd), not ERPNext's
+        # valuation_rate-based GL number, so the receiver's Internal COGS credit
+        # == the sender's debit; one pair per stock account. A RETURN's stock leg
+        # can net out of ERPNext's source GL, so [[_resolve_stock_legs]] falls back
+        # to the warehouse's stock account rather than dropping the pair.
+        stock_legs, valuation_reason = _resolve_stock_legs(doc, gl_entries, stock_gl_side, use_sle_value=True)
         # Stock legs are optional: when the PI received stock at zero valuation,
         # skip them but KEEP the party legs (creditor / purchase-transfer / GST).
-        if valuation_amount > 0 and stock_account:
-            stock_template = next(
-                (
-                    row
-                    for row in (gl_entries or [])
-                    if row.get("account") == stock_account and flt(row.get(stock_gl_side) or 0) > 0
-                ),
-                creditor_template,
-            )
-            transit_side = "credit" if not is_return else "debit"
+        for stock_account, valuation_amount in stock_legs:
+            stock_template = _stock_leg_template(gl_entries, stock_account, stock_gl_side, creditor_template)
             rewritten.append(
                 _make_bns_gl_entry(
                     doc,
@@ -3160,6 +3243,11 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
                     template=stock_template,
                 )
             )
+        if stock_legs:
+            # Valuation-type charges (freight etc.) are inside the received stock
+            # value but were never in the sender's transit debit. As ERPNext does,
+            # credit them to their tax account, and take them off the transit leg.
+            rewritten.extend(_pi_capitalized_valuation_rows(doc, settings["stock_in_transit_account"]))
         else:
             logger.warning(
                 "PI %s has update_stock but zero stock valuation; posting party legs only (reason=%s)",
@@ -3172,43 +3260,183 @@ def _rewrite_bns_internal_pi_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     if abs(debit_total - credit_total) > 0.5:
         _throw_bns_internal_gl_imbalance(doc, debit_total, credit_total)
 
+    _set_transaction_currency(doc, rewritten)
     return rewritten
 
 
+def _tax_base_amount(doc, tax) -> float:
+    """The base-currency amount ERPNext posts for a tax row: after discount
+    (AccountsController.get_tax_amounts with discount accounting off)."""
+    if hasattr(doc, "get_tax_amounts"):
+        base_amount = doc.get_tax_amounts(tax, None)[1]
+    else:
+        base_amount = tax.get("base_tax_amount_after_discount_amount")
+    if base_amount is None:
+        base_amount = tax.get("base_tax_amount")
+    return flt(base_amount)
+
+
 def _resolve_pi_tax_account_amounts(doc) -> Dict[str, float]:
-    """Aggregate PI tax/charge amounts account-wise in base currency."""
+    """PI tax amounts per account in base currency, signed as ERPNext posts
+    them: positive = debit, negative = credit.
+
+    Mirrors PurchaseInvoice.make_tax_gl_entries (same in v15 and v16):
+    - a "Deduct" row (TDS, the India Compliance reverse-charge liability) is a
+      CREDIT although its amount is stored positive;
+    - only "Total" and "Valuation and Total" rows post to the tax account; a
+      "Valuation"-only charge is not in the grand total and goes into stock value
+      (see [[_pi_capitalized_valuation_rows]]).
+    A return's amounts are already negative, so the sign keeps working there.
+    """
     account_amounts: Dict[str, float] = defaultdict(float)
     for tax in (doc.get("taxes") or []):
         account = (tax.get("account_head") or "").strip()
         if not account:
             continue
-        base_amount = flt(
-            tax.get("base_tax_amount_after_discount_amount")
-            or tax.get("base_tax_amount")
-            or 0
-        )
+        if (tax.get("category") or "Total") not in ("Total", "Valuation and Total"):
+            continue
+        base_amount = _tax_base_amount(doc, tax)
         if abs(base_amount) <= 0.000001:
             continue
-        account_amounts[account] += base_amount
+        sign = -1 if tax.get("add_deduct_tax") == "Deduct" else 1
+        account_amounts[account] += sign * base_amount
     return dict(account_amounts)
+
+
+def _pi_capitalized_valuation_rows(doc, transit_account: str) -> List[Dict[str, Any]]:
+    """GL rows for valuation-type charges on an internal PI with update_stock.
+
+    ERPNext adds these charges to the received stock value and credits the
+    charge's own account by the capitalised amount (make_tax_gl_entries). The
+    BNS stock leg already carries the full SLE value, so: credit the charge
+    account, and debit the same amount back to transit so transit nets to what
+    the sender shipped.
+    """
+    if (doc.get("is_opening") or "No") == "Yes":
+        return []
+    capitalized = None
+    if hasattr(doc, "get_capitalized_valuation_tax"):  # ERPNext v16
+        try:
+            capitalized = doc.get_capitalized_valuation_tax()
+        except Exception:
+            logger.exception("BNS: get_capitalized_valuation_tax failed for %s", doc.name)
+            capitalized = None
+
+    rows: List[Dict[str, Any]] = []
+    for tax in (doc.get("taxes") or []):
+        if tax.get("category") not in ("Valuation", "Valuation and Total"):
+            continue
+        base_amount = _tax_base_amount(doc, tax)
+        if not base_amount:
+            continue
+        if capitalized is not None:
+            amount = flt(capitalized.get(tax.name, 0.0))
+        else:  # ERPNext v15: the whole signed amount is capitalised
+            amount = (1 if tax.get("add_deduct_tax") == "Add" else -1) * base_amount
+        if not amount:
+            continue
+        template = {"cost_center": tax.get("cost_center")}
+        # A positive capitalised charge raised the stock value: credit the charge
+        # and debit transit back. A negative one (return) is the mirror image.
+        charge_side, transit_back_side = ("credit", "debit") if amount > 0 else ("debit", "credit")
+        rows.append(
+            _make_bns_gl_entry(doc, tax.get("account_head"), **{charge_side: abs(amount)}, against=transit_account, template=template)
+        )
+        rows.append(
+            _make_bns_gl_entry(doc, transit_account, **{transit_back_side: abs(amount)}, against=tax.get("account_head"), template=template)
+        )
+    return rows
 
 
 def _resolve_si_tax_account_amounts(doc) -> Dict[str, float]:
-    """Aggregate SI tax/charge amounts account-wise in base currency."""
+    """SI tax/charge amounts per account in base currency (positive = credit).
+
+    Same after-discount amount ERPNext posts; a row ERPNext skips (zero after
+    discount) is skipped here too rather than falling back to the pre-discount
+    amount, which is not in the grand total."""
     account_amounts: Dict[str, float] = defaultdict(float)
     for tax in (doc.get("taxes") or []):
         account = (tax.get("account_head") or "").strip()
         if not account:
             continue
-        base_amount = flt(
-            tax.get("base_tax_amount_after_discount_amount")
-            or tax.get("base_tax_amount")
-            or 0
-        )
+        base_amount = _tax_base_amount(doc, tax)
         if abs(base_amount) <= 0.000001:
             continue
         account_amounts[account] += base_amount
     return dict(account_amounts)
+
+
+def _toggle_negative_gl_sides(row):
+    """Move negative debit/credit amounts to the other side, as ERPNext's
+    make_gl_entries does, so the rewrite never carries negative amounts."""
+    for dr, cr in (
+        ("debit", "credit"),
+        ("debit_in_account_currency", "credit_in_account_currency"),
+        ("debit_in_transaction_currency", "credit_in_transaction_currency"),
+    ):
+        debit, credit = flt(row.get(dr)), flt(row.get(cr))
+        if debit < 0 or credit < 0:
+            net = debit - credit
+            row[dr], row[cr] = (net, 0.0) if net > 0 else (0.0, -net)
+    return row
+
+
+def _erpnext_party_gl_row(doc, account: str, against: str):
+    """ERPNext's own customer/supplier GL row for the invoice, moved to `account`.
+
+    Built by the invoice's own make_customer_gl_entry / make_supplier_gl_entry
+    (same in v15 and v16), so it carries exactly what ERPNext posts: the rounded
+    total when rounding applies, due date, transaction-currency amounts, and for
+    a return the original invoice as against_voucher (so the credit / debit note
+    reduces that invoice's outstanding). Returns None if it cannot be used.
+    """
+    maker = getattr(doc, "make_customer_gl_entry" if doc.doctype == "Sales Invoice" else "make_supplier_gl_entry", None)
+    if not maker:
+        return None
+    try:
+        rows: List[Dict[str, Any]] = []
+        maker(rows)
+    except Exception:
+        logger.exception("BNS: could not build ERPNext party GL row for %s", doc.name)
+        return None
+    if len(rows) != 1:
+        return None
+    row = rows[0]
+    try:
+        from erpnext.accounts.utils import get_account_currency
+
+        account_currency = get_account_currency(account)
+    except Exception:
+        account_currency = row.get("account_currency")
+    if account_currency != row.get("account_currency"):
+        company_currency = frappe.get_cached_value("Company", doc.company, "default_currency")
+        if account_currency != company_currency:
+            return None
+        row["account_currency"] = account_currency
+        row["debit_in_account_currency"] = row.get("debit")
+        row["credit_in_account_currency"] = row.get("credit")
+    row["account"] = account
+    row["against"] = against
+    return _toggle_negative_gl_sides(row)
+
+
+def _erpnext_round_off_gl_rows(doc) -> List[Dict[str, Any]]:
+    """ERPNext's own rounding-adjustment row, which balances the party row's
+    rounded total against the unrounded taxes and net total."""
+    maker = getattr(doc, "make_gle_for_rounding_adjustment", None)
+    if not maker:
+        return []
+    rows: List[Dict[str, Any]] = []
+    maker(rows)
+    return [_toggle_negative_gl_sides(row) for row in rows]
+
+
+def _set_transaction_currency(doc, gl_entries) -> None:
+    """Stamp transaction currency/rate on rewritten rows. ERPNext does this inside
+    get_gl_entries, before the BNS rewrite replaces the rows."""
+    setter = getattr(doc, "set_transaction_currency_and_rate_in_gl_map", None)
+    if setter:
+        setter(gl_entries)
 
 
 def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -3258,8 +3486,13 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     if not debtor_template:
         return gl_entries
 
+    # Receivable leg: ERPNext's own customer row (rounded total, due date, and
+    # for a credit note the original invoice as against_voucher) moved to the
+    # internal debtor; ERPNext's own rounding row balances it.
+    party_row = _erpnext_party_gl_row(doc, debtor_account, against=transfer_account)
     rewritten = [
-        _make_bns_gl_entry(
+        party_row
+        or _make_bns_gl_entry(
             doc,
             debtor_account,
             **{debtor_side: grand_total},
@@ -3267,6 +3500,8 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
             template=debtor_template,
         )
     ]
+    if party_row:
+        rewritten.extend(_erpnext_round_off_gl_rows(doc))
 
     for tax_account, tax_amount in sorted(tax_by_account.items()):
         tax_template = next(
@@ -3309,21 +3544,13 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
 
     if cint(doc.get("update_stock")):
         stock_gl_side = "credit" if not is_return else "debit"
-        valuation_amount, stock_account, valuation_reason = _resolve_valuation_from_gl_entries(
-            gl_entries, side=stock_gl_side, company=doc.company
-        )
+        # One leg pair per stock account the goods left from.
+        stock_legs, valuation_reason = _resolve_stock_legs(doc, gl_entries, stock_gl_side, use_sle_value=False)
         # Stock legs are optional: when the SI moved stock at zero valuation,
         # skip them but KEEP the revenue legs (debtor / sales-transfer / GST),
         # which are recognised on the transaction amount regardless of cost.
-        if valuation_amount > 0 and stock_account:
-            stock_template = next(
-                (
-                    row
-                    for row in (gl_entries or [])
-                    if row.get("account") == stock_account and flt(row.get(stock_gl_side) or 0) > 0
-                ),
-                debtor_template,
-            )
+        for stock_account, valuation_amount in stock_legs:
+            stock_template = _stock_leg_template(gl_entries, stock_account, stock_gl_side, debtor_template)
             transit_side = "debit" if not is_return else "credit"
             rewritten.append(
                 _make_bns_gl_entry(
@@ -3343,7 +3570,7 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
                     template=stock_template,
                 )
             )
-        else:
+        if not stock_legs:
             logger.warning(
                 "SI %s has update_stock but zero stock valuation; posting revenue legs only (reason=%s)",
                 doc.name,
@@ -3355,6 +3582,7 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
     if abs(debit_total - credit_total) > 0.5:
         _throw_bns_internal_gl_imbalance(doc, debit_total, credit_total)
 
+    _set_transaction_currency(doc, rewritten)
     logger.info(
         "Applied BNS SI GL rewrite for %s (update_stock=%s, grand=%s, taxable=%s)",
         doc.name,
@@ -3363,6 +3591,135 @@ def _rewrite_bns_internal_si_gl_entries(doc, gl_entries: List[Dict[str, Any]]) -
         taxable_total,
     )
     return rewritten
+
+
+def _will_rewrite_internal_invoice_gl(doc) -> bool:
+    """True when this submitted SI/PI's GL will be replaced by the BNS internal
+    rewrite: the same gates [[_rewrite_bns_internal_si_gl_entries]] and
+    [[_rewrite_bns_internal_pi_gl_entries]] apply."""
+    if doc.doctype == "Sales Invoice":
+        return bool(
+            _is_bns_internal_different_gstin_sales_invoice(doc)
+            and is_after_accounting_rewrite_cutoff(doc.get("posting_date"))
+        )
+    if doc.doctype == "Purchase Invoice":
+        return bool(
+            _is_bns_internal_purchase_invoice_from_si(doc)
+            and is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(doc))
+        )
+    return False
+
+
+def _internal_invoice_rewrite_blockers(doc) -> List[str]:
+    """Features ERPNext posts GL for that the BNS internal rewrite cannot carry.
+
+    The rewrite rebuilds the GL from the totals and the taxes table, so payment
+    taken on the invoice, write-offs, loyalty, deferred income/expense, India
+    Compliance ineligible-ITC reversals and some valuation charges would be
+    silently lost. Blocking them at submit keeps the books right; reposts of
+    already-submitted documents are not affected.
+    """
+    blockers: List[str] = []
+    items = doc.get("items") or []
+    if flt(doc.get("write_off_amount")):
+        blockers.append(_("a write-off amount"))
+    if doc.doctype == "Sales Invoice":
+        if cint(doc.get("is_pos")):
+            blockers.append(_("POS payments (Include Payment)"))
+        if cint(doc.get("redeem_loyalty_points")) or flt(doc.get("loyalty_amount")):
+            blockers.append(_("loyalty point redemption"))
+        if any(cint(i.get("enable_deferred_revenue")) for i in items):
+            blockers.append(_("deferred revenue items"))
+        if not cint(doc.get("update_stock")):
+            loose_assets = [
+                i.get("item_code")
+                for i in items
+                if not (i.get("delivery_note") or "").strip()
+                and (cint(i.get("is_fixed_asset")) or (i.get("item_code") and cint(frappe.db.get_value("Item", i.get("item_code"), "is_fixed_asset"))))
+            ]
+            if loose_assets:
+                blockers.append(
+                    _("fixed-asset items ({0}) without Update Stock or a Delivery Note").format(", ".join(sorted(set(loose_assets))))
+                )
+    else:
+        if cint(doc.get("is_paid")):
+            blockers.append(_("payment on the invoice (Is Paid)"))
+        if any(cint(i.get("enable_deferred_expense")) for i in items):
+            blockers.append(_("deferred expense items"))
+        if any(cint(i.get("is_ineligible_for_itc")) for i in items) or (doc.get("ineligibility_reason") or "").strip():
+            blockers.append(_("ineligible ITC"))
+        has_pr_rows = any((i.get("purchase_receipt") or "").strip() for i in items)
+        has_valuation_charges = any(
+            t.get("category") in ("Valuation", "Valuation and Total") and _tax_base_amount(doc, t)
+            for t in (doc.get("taxes") or [])
+        )
+        if has_valuation_charges and (not cint(doc.get("update_stock")) or has_pr_rows):
+            blockers.append(
+                _("valuation-type charges without Update Stock (add them on the Purchase Receipt or with a Landed Cost Voucher)")
+            )
+    return blockers
+
+
+def prepare_internal_invoice_for_gl_rewrite(doc, method: Optional[str] = None) -> None:
+    """before_submit on SI/PI: for an internal invoice whose GL BNS will rewrite,
+
+    1. refuse what the rewrite cannot post (see [[_internal_invoice_rewrite_blockers]])
+       and incomplete settings, instead of silently posting ERPNext's own GL;
+    2. point debit_to / credit_to at the internal debtor / creditor the GL is
+       posted to, so ERPNext's outstanding, Payment Entry and reconciliation work
+       on the same account as the ledger.
+    """
+    if doc.doctype not in ("Sales Invoice", "Purchase Invoice"):
+        return
+    if not _will_rewrite_internal_invoice_gl(doc):
+        return
+
+    settings = _get_bns_branch_accounting_accounts()
+    transfer_key = "internal_sales_transfer_account" if doc.doctype == "Sales Invoice" else "internal_purchase_transfer_account"
+    if not settings or not settings.get(transfer_key):
+        frappe.throw(
+            _(
+                "{0} {1} is an internal branch transfer, but BNS Branch Accounting Settings are incomplete "
+                "(Stock in Transit, Internal Debtor, Internal Creditor and the internal sales/purchase accounts are required)."
+            ).format(_(doc.doctype), doc.name),
+            title=_("Internal Transfer Accounts Missing"),
+        )
+
+    blockers = _internal_invoice_rewrite_blockers(doc)
+    if blockers:
+        frappe.throw(
+            _("{0} {1} is an internal branch transfer and cannot use: {2}.").format(
+                _(doc.doctype), doc.name, "; ".join(blockers)
+            ),
+            title=_("Not Supported on Internal Transfers"),
+        )
+
+    if doc.doctype == "Sales Invoice":
+        field, account = "debit_to", settings.get("internal_branch_debtor_account")
+    else:
+        field, account = "credit_to", settings.get("internal_branch_creditor_account")
+    if not account or doc.get(field) == account:
+        return
+    try:
+        from erpnext.accounts.utils import get_account_currency
+
+        if get_account_currency(account) != (doc.get("party_account_currency") or get_account_currency(doc.get(field))):
+            return
+    except Exception:
+        return
+    doc.set(field, account)
+
+
+def sync_internal_supplier_flag_on_draft(doc, method: Optional[str] = None) -> None:
+    """validate on PI/PR drafts: clear the copied internal-supplier flag when the
+    supplier was changed to a regular one (the flag is set when the draft is made
+    from an internal SI/DN and is not refreshed by a supplier change)."""
+    if doc.doctype not in ("Purchase Invoice", "Purchase Receipt") or cint(doc.docstatus) != 0:
+        return
+    if not cint(doc.get("is_bns_internal_supplier")) or not doc.get("supplier"):
+        return
+    if not cint(frappe.db.get_value("Supplier", doc.supplier, "is_bns_internal_supplier")):
+        doc.is_bns_internal_supplier = 0
 
 
 def _apply_bns_internal_gl_rewrite_patch() -> None:
@@ -4441,6 +4798,16 @@ def _suppress_repost_error_emails() -> None:
 _BNS_ASSET_INTERNAL_PATCHED = False
 
 
+def _bns_asset_rewrite_applies(doc) -> bool:
+    """An internal transfer whose asset is moved by the BNS rewrite (past the
+    accounting-rewrite cutoff). Before the cutoff ERPNext's own GL books a sale
+    and a purchase, so ERPNext's own asset handling must run too."""
+    return bool(
+        is_bns_internal_transfer(doc)
+        and is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(doc))
+    )
+
+
 def _apply_bns_asset_internal_patches() -> None:
     """Skip ERPNext's asset auto-creation and disposal for BNS internal transfers.
 
@@ -4470,7 +4837,7 @@ def _apply_bns_asset_internal_patches() -> None:
 
         def patched_process_fixed_asset(self, *args, **kwargs):
             try:
-                if is_bns_internal_transfer(self):
+                if _bns_asset_rewrite_applies(self):
                     return
             except Exception:
                 logger.exception("BNS asset: process_fixed_asset guard failed for %s", getattr(self, "name", "?"))
@@ -4478,7 +4845,7 @@ def _apply_bns_asset_internal_patches() -> None:
 
         def patched_process_asset_depreciation(self, *args, **kwargs):
             try:
-                if is_bns_internal_transfer(self):
+                if _bns_asset_rewrite_applies(self):
                     return
             except Exception:
                 logger.exception("BNS asset: process_asset_depreciation guard failed for %s", getattr(self, "name", "?"))
@@ -4946,7 +5313,11 @@ def append_asset_transfer_gl_entries(doc, gl_entries):
         # append the leg a second time (the "SI followed by DN" double-post).
         if not _voucher_owns_sle(doc.doctype, doc):
             return gl_entries
-        if not is_after_accounting_rewrite_cutoff(doc.get("posting_date")):
+        if not is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(doc)):
+            return gl_entries
+        # The asset legs complete the BNS rewrite; without its settings the
+        # voucher keeps ERPNext's own GL, which already books the asset itself.
+        if not _get_bns_branch_accounting_accounts():
             return gl_entries
         asset_rows = _bns_asset_transfer_rows(doc)
         if not asset_rows:
@@ -4983,7 +5354,7 @@ def bns_apply_asset_transfer(doc, method: Optional[str] = None) -> None:
         # update_stock=0 PI defers to its linked PR (the SLE owner), so the
         # receipt is applied and the movement posted exactly once.
         return
-    if not is_after_accounting_rewrite_cutoff(doc.get("posting_date")):
+    if not is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(doc)):
         return
     if not frappe.get_meta("Asset").has_field("bns_pre_transfer_cost_center"):
         return
@@ -5056,7 +5427,7 @@ def _bns_asset_transfer_active(doc) -> bool:
     return bool(
         is_bns_internal_transfer(doc)
         and _voucher_owns_sle(doc.doctype, doc)
-        and is_after_accounting_rewrite_cutoff(doc.get("posting_date"))
+        and is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(doc))
     )
 
 
@@ -5317,7 +5688,7 @@ def bns_validate_asset_receive_parity(doc, method: Optional[str] = None) -> None
         return
     if not _voucher_owns_sle(doc.doctype, doc):
         return
-    active = bool(_bns_in_transit_location()) and is_after_accounting_rewrite_cutoff(doc.get("posting_date"))
+    active = bool(_bns_in_transit_location()) and is_after_accounting_rewrite_cutoff(_resolve_source_posting_date(doc))
     for item in (doc.get("items") or []):
         asset_name = (item.get("bns_transferred_asset") or "").strip()
         if not asset_name:
@@ -7749,7 +8120,9 @@ def _is_bns_internal_purchase_invoice_from_si(doc) -> bool:
     if is_bns_internal_supplier(doc):
         return True
 
-    return bool(_resolve_si_name_for_internal_pi(doc))
+    # Not an internal supplier: only BNS's own links (header ref / PR chain)
+    # count, never a coincidental bill number.
+    return bool(_resolve_si_name_for_internal_pi(doc, use_bill_no=False))
 
 
 def _reassert_sales_invoice_bns_internal_status(si_name: str) -> bool:
@@ -10044,6 +10417,22 @@ def _cancel_submitted_docs(
     return cancelled
 
 
+def _add_cancel_ignored_doctypes(doc, doctypes) -> None:
+    """Add doctypes to the links ERPNext ignores when cancelling `doc`.
+
+    Adds to whatever the controller already set (ERPNext's own list differs by
+    version: v16 also ignores Unreconcile Payment, Repost Payment Ledger and Tax
+    Withholding Entry), never replaces it. Replacing it blocked the cancel of
+    ordinary invoices that ERPNext itself allows.
+    """
+    existing = list(doc.get("ignore_linked_doctypes") or doc.flags.get("ignore_linked_doctypes") or [])
+    for dt in doctypes:
+        if dt not in existing:
+            existing.append(dt)
+    doc.ignore_linked_doctypes = existing
+    doc.flags.ignore_linked_doctypes = existing
+
+
 def ignore_parent_cancellation_links_for_bns_internal(doc, method: Optional[str] = None) -> None:
     """
     On PR/PI cancel, skip backlink-enforced parent cancellation.
@@ -10051,41 +10440,24 @@ def ignore_parent_cancellation_links_for_bns_internal(doc, method: Optional[str]
     Desired behavior:
     - Cancelling PR/PI should NOT force-cancel linked DN/SI.
     - Cancelling DN/SI should still be allowed to cancel linked PR/PI.
+
+    The BNS-only ignores (the source DN/SI, and the ledger rows BNS's GL rewrite
+    puts on the internal creditor) apply to internal documents only. Every
+    document keeps ERPNext's own ignore list; this only ever adds to it.
     """
-    if doc.doctype == "Purchase Receipt":
-        ignore_linked_doctypes = [
-            # Keep core PR cancel ignores
-            "GL Entry",
-            "Stock Ledger Entry",
-            "Repost Item Valuation",
-            "Serial and Batch Bundle",
-            # BNS parent-link policy
-            "Delivery Note",
-            "Sales Invoice",
-            # Payment-ledger link safety
-            "Payment Ledger Entry",
-            "Advance Payment Ledger Entry",
-            # Repost log must not block cancel (newer ERPNext ignores these too)
-            "Repost Accounting Ledger",
-            "Repost Accounting Ledger Items",
-        ]
-    elif doc.doctype == "Purchase Invoice":
-        ignore_linked_doctypes = [
-            "GL Entry",
-            "Stock Ledger Entry",
-            "Repost Item Valuation",
-            "Serial and Batch Bundle",
-            "Sales Invoice",
-            "Payment Ledger Entry",
-            "Advance Payment Ledger Entry",
-            "Repost Accounting Ledger",
-            "Repost Accounting Ledger Items",
-        ]
-    else:
+    if doc.doctype not in ("Purchase Receipt", "Purchase Invoice"):
         return
 
-    doc.ignore_linked_doctypes = ignore_linked_doctypes
-    doc.flags.ignore_linked_doctypes = ignore_linked_doctypes
+    extra = list(REPOST_LEDGER_LINK_DOCTYPES)
+    if is_bns_internal_supplier(doc) or (doc.get("bns_inter_company_reference") or "").strip():
+        extra += [
+            "Sales Invoice",
+            "Payment Ledger Entry",
+            "Advance Payment Ledger Entry",
+        ]
+        if doc.doctype == "Purchase Receipt":
+            extra.append("Delivery Note")
+    _add_cancel_ignored_doctypes(doc, extra)
 
 
 # Repost Accounting Ledger is just a repost log; a submitted RAL referencing a
@@ -10122,28 +10494,14 @@ def ignore_payment_ledger_cancellation_links_for_dn(doc, method: Optional[str] =
     Payment Ledger Entry rows. Those PLE rows then block DN cancel via
     the standard link check. The reverse GL produced on cancel creates
     offsetting PLE rows that net to zero, so skipping the check is safe.
-    Mirrors the PR/PI pattern in
-    `ignore_parent_cancellation_links_for_bns_internal`.
+    Adds to ERPNext's own ignore list (never replaces it).
     """
     if doc.doctype != "Delivery Note":
         return
-
-    ignore_linked_doctypes = [
-        # ERPNext's DN defaults (delivery_note.py:519-524).
-        "GL Entry",
-        "Stock Ledger Entry",
-        "Repost Item Valuation",
-        "Serial and Batch Bundle",
-        # BNS additions: PLE rows auto-created by GL rewrite to
-        # party-tracked accounts must not block DN cancel.
-        "Payment Ledger Entry",
-        "Advance Payment Ledger Entry",
-        # Repost log must not block cancel.
-        "Repost Accounting Ledger",
-        "Repost Accounting Ledger Items",
-    ]
-    doc.ignore_linked_doctypes = ignore_linked_doctypes
-    doc.flags.ignore_linked_doctypes = ignore_linked_doctypes
+    _add_cancel_ignored_doctypes(
+        doc,
+        ["Payment Ledger Entry", "Advance Payment Ledger Entry", *REPOST_LEDGER_LINK_DOCTYPES],
+    )
 
 
 def unlink_references_on_purchase_cancel(doc, method: Optional[str] = None) -> None:

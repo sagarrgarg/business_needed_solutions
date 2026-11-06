@@ -23,6 +23,7 @@ Internal-branch suppliers (``is_bns_internal_supplier``) are out of scope
 
 import frappe
 from frappe import _, bold
+from frappe.utils import cint, flt
 
 
 def auto_mark_paid(doc, method=None):
@@ -69,14 +70,35 @@ def auto_mark_paid(doc, method=None):
             title=_("Auto-Paid Supplier: Account Missing"),
         )
 
+    # A debit note against an invoice that was never paid on the invoice (e.g.
+    # booked before the supplier was flagged) reduces what we owe; booking it
+    # as a cash refund would record money that never came back.
+    if cint(doc.get("is_return")) and doc.get("return_against"):
+        if not cint(frappe.db.get_value("Purchase Invoice", doc.return_against, "is_paid")):
+            return
+
     # Supplier master is authoritative -- overwrite any manual entries.
     # paid_amount inherits sign from rounded_total, so returns refund
-    # correctly without special-casing here.
+    # correctly without special-casing here. Advances and write-off already
+    # settle part of the invoice, so only the rest is paid in cash (ERPNext's
+    # validate_cash rejects paying more than that).
     doc.is_paid = 1
     doc.mode_of_payment = mop
     doc.cash_bank_account = account
-    doc.paid_amount = doc.rounded_total or doc.grand_total
-    doc.base_paid_amount = doc.base_rounded_total or doc.base_grand_total
+    settled = flt(doc.get("total_advance")) + flt(doc.get("write_off_amount"))
+    rate = flt(doc.get("conversion_rate")) or 1
+    doc.paid_amount = flt(doc.rounded_total or doc.grand_total) - settled
+    doc.base_paid_amount = flt(doc.base_rounded_total or doc.base_grand_total) - settled * rate
+
+    # This hook runs after ERPNext has already worked out outstanding, status
+    # and the cash checks for this save; redo them with the paid block in place
+    # so a single-pass insert/submit is not left with a stale outstanding.
+    if hasattr(doc, "calculate_taxes_and_totals"):
+        doc.calculate_taxes_and_totals()
+    if hasattr(doc, "validate_cash"):
+        doc.validate_cash()
+    if hasattr(doc, "set_status"):
+        doc.set_status()
 
 
 def _resolve_mop_account(mop, company):
@@ -190,20 +212,9 @@ def backfill_auto_paid_supplier(
 
 def _run_backfill_inline(pis, dry_run):
     """Process a list of PI rows synchronously, with per-PI error capture."""
-    rows = []
-    for pi in pis:
-        try:
-            rows.append(_process_pi_for_backfill(pi, dry_run))
-        except Exception as exc:
-            frappe.log_error(
-                title="Auto-Paid Supplier Backfill",
-                message=f"PI {pi.name}: {exc}\n{frappe.get_traceback()}",
-            )
-            rows.append({"pi": pi.name, "status": "error", "reason": str(exc)})
-            if not dry_run:
-                # Don't poison subsequent PIs with a half-applied transaction.
-                frappe.db.rollback()
-    return rows
+    # Each PI runs in its own savepoint: a failure undoes that PI only, so the
+    # PIs already reported as "updated" stay updated.
+    return [_process_one_pi(pi, dry_run) for pi in pis]
 
 
 def _backfill_runner(pi_names, user):
@@ -227,15 +238,9 @@ def _backfill_runner(pi_names, user):
         if not pi:
             rows.append({"pi": name, "status": "error", "reason": "PI not found"})
             continue
-        try:
-            rows.append(_process_pi_for_backfill(pi, dry_run=0))
-        except Exception as exc:
-            frappe.log_error(
-                title="Auto-Paid Supplier Backfill (BG)",
-                message=f"PI {name}: {exc}\n{frappe.get_traceback()}",
-            )
-            rows.append({"pi": name, "status": "error", "reason": str(exc)})
-            frappe.db.rollback()
+        rows.append(_process_one_pi(pi, dry_run=0))
+        # Keep each finished PI, whatever happens to the ones after it.
+        frappe.db.commit()
 
     frappe.publish_realtime(
         event=_BACKFILL_REALTIME_EVENT,
@@ -330,6 +335,43 @@ def _linked_payment_entries(pi_name):
     return rows
 
 
+def _other_allocations(pi_name, payment_entries):
+    """Vouchers other than the given Payment Entries that settle part of the PI."""
+    rows = frappe.db.sql(
+        """SELECT DISTINCT voucher_type, voucher_no
+           FROM `tabPayment Ledger Entry`
+           WHERE against_voucher_type = 'Purchase Invoice' AND against_voucher_no = %s
+             AND voucher_no != %s AND delinked = 0""",
+        (pi_name, pi_name),
+        as_dict=True,
+    )
+    return [
+        f"{r.voucher_type} {r.voucher_no}"
+        for r in rows
+        if not (r.voucher_type == "Payment Entry" and r.voucher_no in payment_entries)
+    ]
+
+
+def _process_one_pi(pi, dry_run):
+    """Run one PI in its own savepoint, so a failure undoes only that PI."""
+    savepoint = f"bns_auto_paid_{frappe.generate_hash(length=8)}"
+    if not dry_run:
+        frappe.db.savepoint(savepoint)
+    try:
+        return _process_pi_for_backfill(pi, dry_run)
+    except Exception as exc:
+        frappe.log_error(
+            title="Auto-Paid Supplier Backfill",
+            message=f"PI {pi.name}: {exc}\n{frappe.get_traceback()}",
+        )
+        if not dry_run:
+            try:
+                frappe.db.rollback(save_point=savepoint)
+            except Exception:
+                frappe.db.rollback()
+        return {"pi": pi.name, "status": "error", "reason": str(exc)}
+
+
 def _repost_pi_gl(pi_name):
     """Reverse and re-make GL / payment ledger for a submitted PI.
 
@@ -406,6 +448,16 @@ def _process_pi_for_backfill(pi, dry_run):
             "pi": pi.name, "status": "needs-manual",
             "reason": "linked Payment Entry references multiple PIs",
             "pes": [p["name"] for p in multi_pi_pes],
+        }
+
+    # Journal entries, debit notes or advances allocated to the invoice would
+    # stay allocated after it is marked paid and pay it a second time.
+    other_allocations = _other_allocations(pi.name, {p["name"] for p in single_pi_pes})
+    if other_allocations:
+        return {
+            "pi": pi.name, "status": "needs-manual",
+            "reason": "journal entries, debit notes or advances are allocated to this invoice",
+            "vouchers": other_allocations,
         }
 
     if already_correct and not single_pi_pes:

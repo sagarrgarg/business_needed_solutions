@@ -327,12 +327,24 @@ def apply_patches():
 	
 	def patched_method(self, sle, *pargs, **kwargs):
 		"""Patched wrapper for update_entries_after.validate_negative_stock"""
-		# Original validation logic
-		diff = self.wh_data.qty_after_transaction + flt(sle.actual_qty) - flt(self.reserved_stock)
+		# Same check as ERPNext's own validate_negative_stock (v15 and v16): reserved
+		# stock comes from get_reserved_stock (self.reserved_stock is a per-item
+		# cache dict there, so flt() of it was always 0 and reservations were
+		# ignored), and the threshold follows the float precision.
+		get_reserved = getattr(self, "get_reserved_stock", None)
+		if get_reserved:
+			reserved = flt(get_reserved(sle.item_code, sle.warehouse))
+		else:
+			reserved = self.reserved_stock if not isinstance(self.reserved_stock, dict) else 0
+		diff = self.wh_data.qty_after_transaction + flt(sle.actual_qty) - flt(reserved)
 		diff = flt(diff, self.flt_precision)
-		
+
+		diff_threshold = 0.0001
+		if self.flt_precision > 4:
+			diff_threshold = 10 ** (-1 * self.flt_precision)
+
 		# Check if negative stock would occur
-		if diff < 0 and abs(diff) > 0.0001:
+		if diff < 0 and abs(diff) > diff_threshold:
 			# Check if ERPNext allows negative stock
 			if not self.allow_negative_stock:
 				# ERPNext doesn't allow - use original behavior (add exception)

@@ -412,6 +412,24 @@ def bulk_fix_pi_expense_accounts(items):
 	}
 
 
+def _assert_gl_can_be_reposted(doc):
+	"""Raise if ERPNext would refuse to repost this voucher's GL: accounts frozen
+	on its date, or its period closed for its doctype. Same checks the repost
+	job makes (erpnext.accounts.general_ledger), for v15 and v16 signatures."""
+	import inspect
+
+	from erpnext.accounts import general_ledger
+
+	check_freezing_date = general_ledger.check_freezing_date
+	if "company" in inspect.signature(check_freezing_date).parameters:  # v16
+		check_freezing_date(doc.posting_date, doc.company)
+	else:  # v15
+		check_freezing_date(doc.posting_date)
+	general_ledger.validate_accounting_period(
+		[frappe._dict(posting_date=doc.posting_date, company=doc.company, voucher_type=doc.doctype)]
+	)
+
+
 def _process_pi_expense_fix(pi_updates, user):
 	"""
 	Background worker: fix expense accounts on PI items and repost GL.
@@ -458,18 +476,32 @@ def _process_pi_expense_fix(pi_updates, user):
 				_publish_progress(done, total, pi_name, success_count, errors, user)
 				continue
 
-			items_updated = 0
-			for iu in item_updates:
-				for row in pi_doc.items:
-					if row.name == iu["pi_item_name"]:
-						row.expense_account = iu["correct_account"]
-						row.db_set("expense_account", iu["correct_account"], update_modified=False)
-						items_updated += 1
-						break
+			# The ledger repost runs later in a background job, where a frozen or
+			# closed period fails AFTER the new account is saved. Check those first,
+			# and keep the account change and the repost request in one savepoint so
+			# the item and its GL never disagree.
+			_assert_gl_can_be_reposted(pi_doc)
+			savepoint = f"bns_pi_fix_{frappe.generate_hash(length=8)}"
+			frappe.db.savepoint(savepoint)
+			try:
+				items_updated = 0
+				for iu in item_updates:
+					for row in pi_doc.items:
+						if row.name == iu["pi_item_name"]:
+							row.expense_account = iu["correct_account"]
+							row.db_set("expense_account", iu["correct_account"], update_modified=False)
+							items_updated += 1
+							break
 
-			if items_updated > 0:
-				pi_doc.repost_accounting_entries()
-				success_count += items_updated
+				if items_updated > 0:
+					pi_doc.repost_accounting_entries()
+					success_count += items_updated
+			except Exception:
+				try:
+					frappe.db.rollback(save_point=savepoint)
+				except Exception:
+					frappe.db.rollback()
+				raise
 
 		except Exception as e:
 			for iu in item_updates:

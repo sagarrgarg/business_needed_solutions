@@ -81,6 +81,8 @@ class _Stubs:
         self.mop_accounts = {
             ("Cash", "Acme"): "Cash - A",
         }
+        # Purchase Invoice name -> stored fields (as_dict lookups / is_paid)
+        self.pis = {}
 
     def get_cached_doc(self, doctype, name):
         if doctype == "Supplier":
@@ -91,6 +93,11 @@ class _Stubs:
         if doctype == "Mode of Payment Account" and fieldname == "default_account":
             key = (filters.get("parent"), filters.get("company"))
             return self.mop_accounts.get(key)
+        if doctype == "Purchase Invoice" and filters in self.pis:
+            row = self.pis[filters]
+            if isinstance(fieldname, (list, tuple)):
+                return frappe._dict({f: row.get(f) for f in fieldname})
+            return row.get(fieldname)
         return None
 
 
@@ -159,6 +166,29 @@ class AutoPaidSupplierTests(unittest.TestCase):
         aps.auto_mark_paid(pi)
         self.assertEqual(pi.paid_amount, 1000.0)
         self.assertEqual(pi.base_paid_amount, 1000.0)
+
+    def test_advance_and_write_off_reduce_cash_paid(self):
+        # An advance already settles part of the invoice; paying the full total
+        # in cash as well would pay the supplier twice.
+        pi = _make_pi(total_advance=300.0, write_off_amount=50.0)
+        aps.auto_mark_paid(pi)
+        self.assertEqual(pi.paid_amount, 650.0)
+        self.assertEqual(pi.base_paid_amount, 650.0)
+
+    def test_return_against_unpaid_invoice_is_not_a_cash_refund(self):
+        self.stubs.pis["PI-UNPAID"] = {"is_paid": 0}
+        pi = _make_pi(is_return=1, return_against="PI-UNPAID", grand_total=-100.0,
+                      base_grand_total=-100.0, rounded_total=-100.0, base_rounded_total=-100.0)
+        aps.auto_mark_paid(pi)
+        self.assertEqual(pi.is_paid, 0)
+
+    def test_return_against_paid_invoice_is_refunded(self):
+        self.stubs.pis["PI-PAID"] = {"is_paid": 1}
+        pi = _make_pi(is_return=1, return_against="PI-PAID", grand_total=-100.0,
+                      base_grand_total=-100.0, rounded_total=-100.0, base_rounded_total=-100.0)
+        aps.auto_mark_paid(pi)
+        self.assertEqual(pi.is_paid, 1)
+        self.assertEqual(pi.paid_amount, -100.0)
 
     # -- bypass paths -------------------------------------------------------
 
@@ -244,93 +274,78 @@ class BackfillHelpersTests(unittest.TestCase):
         self.assertIsNone(aps._resolve_mop_account(None, "Acme"))
         self.assertIsNone(aps._resolve_mop_account("Cash", None))
 
-    def test_process_pi_dry_run_no_linked_pes_needs_pay(self):
-        pi = _MockPI(name="PI-1", supplier="Cash Vendor", company="Acme",
-                     posting_date="2026-05-01", outstanding_amount=1000.0,
-                     grand_total=1000.0, is_return=0)
-        with patch.object(aps, "_linked_payment_entries", return_value=[]):
-            row = aps._process_pi_for_backfill(pi, dry_run=1)
-        self.assertEqual(row["status"], "would-pay")
-        self.assertEqual(row["amount"], 1000.0)
+    def _pi(self, name, supplier="Cash Vendor", **state):
+        stored = {
+            "is_paid": 0, "mode_of_payment": None, "cash_bank_account": None,
+            "paid_amount": 0.0, "rounded_total": 1000.0, "grand_total": 1000.0,
+            "base_rounded_total": 1000.0, "base_grand_total": 1000.0,
+        }
+        stored.update(state)
+        self.stubs.pis[name] = stored
+        return _MockPI(name=name, supplier=supplier, company="Acme",
+                       posting_date="2026-05-01", outstanding_amount=1000.0,
+                       grand_total=1000.0, is_return=0)
+
+    def _run(self, pi, linked=(), other=()):
+        with patch.object(aps, "_linked_payment_entries", return_value=list(linked)), \
+             patch.object(aps, "_other_allocations", return_value=list(other)):
+            return aps._process_pi_for_backfill(pi, dry_run=1)
+
+    @staticmethod
+    def _pe(name, account, pis):
+        return {
+            "name": name, "allocated_amount": 1000.0, "payment_type": "Pay",
+            "paid_from": account, "paid_to": "Creditors - A", "cash_bank_account": account,
+            "mode_of_payment": "Bank", "posting_date": "2026-05-01", "referenced_pis": pis,
+        }
+
+    def test_process_pi_dry_run_unpaid_would_update(self):
+        row = self._run(self._pi("PI-1"))
+        self.assertEqual(row["status"], "would-update")
+        self.assertEqual(row["paid_amount"], 1000.0)
         self.assertEqual(row["to_account"], "Cash - A")
         self.assertEqual(row["cancelled"], [])
 
-    def test_process_pi_dry_run_correct_account_pe_already_paid(self):
-        pi = _MockPI(name="PI-2", supplier="Cash Vendor", company="Acme",
-                     posting_date="2026-05-01", outstanding_amount=0.0,
-                     grand_total=1000.0, is_return=0)
-        linked = [{
-            "name": "PE-OK", "allocated_amount": 1000.0,
-            "payment_type": "Pay", "paid_from": "Cash - A",
-            "paid_to": "Creditors - A", "cash_bank_account": "Cash - A",
-            "mode_of_payment": "Cash", "posting_date": "2026-05-01",
-            "referenced_pis": ["PI-2"],
-        }]
-        with patch.object(aps, "_linked_payment_entries", return_value=linked):
-            row = aps._process_pi_for_backfill(pi, dry_run=1)
-        self.assertEqual(row["status"], "ok")
-        self.assertEqual(row["cancelled"], [])
-        self.assertEqual(row["residual"], 0)
+    def test_process_pi_dry_run_already_paid_is_ok(self):
+        pi = self._pi("PI-2", is_paid=1, mode_of_payment="Cash",
+                      cash_bank_account="Cash - A", paid_amount=1000.0)
+        self.assertEqual(self._run(pi)["status"], "ok")
 
-    def test_process_pi_dry_run_wrong_account_pe_plans_cancel_and_pay(self):
-        # Cancelling the wrong PE adds 1000 back to outstanding (which was 0),
-        # so the dry-run plan shows: cancel PE-WRONG, then pay 1000.
-        pi = _MockPI(name="PI-3", supplier="Cash Vendor", company="Acme",
-                     posting_date="2026-05-01", outstanding_amount=0.0,
-                     grand_total=1000.0, is_return=0)
-        linked = [{
-            "name": "PE-WRONG", "allocated_amount": 1000.0,
-            "payment_type": "Pay", "paid_from": "HDFC - A",
-            "paid_to": "Creditors - A", "cash_bank_account": "HDFC - A",
-            "mode_of_payment": "Bank", "posting_date": "2026-05-01",
-            "referenced_pis": ["PI-3"],
-        }]
-        with patch.object(aps, "_linked_payment_entries", return_value=linked):
-            row = aps._process_pi_for_backfill(pi, dry_run=1)
-        self.assertEqual(row["status"], "would-pay")
-        self.assertEqual(row["amount"], 1000.0)
-        self.assertEqual(row["to_account"], "Cash - A")
+    def test_process_pi_dry_run_single_pi_pe_plans_cancel(self):
+        row = self._run(self._pi("PI-3"), linked=[self._pe("PE-WRONG", "HDFC - A", ["PI-3"])])
+        self.assertEqual(row["status"], "would-update")
         self.assertEqual(len(row["cancelled"]), 1)
-        plan = row["cancelled"][0]
-        self.assertEqual(plan["old_pe"], "PE-WRONG")
-        self.assertEqual(plan["from_account"], "HDFC - A")
-        self.assertEqual(plan["to_account"], "Cash - A")
-        self.assertEqual(plan["action"], "would cancel")
+        self.assertEqual(row["cancelled"][0]["old_pe"], "PE-WRONG")
+        self.assertEqual(row["cancelled"][0]["action"], "would cancel")
 
     def test_process_pi_dry_run_multi_pi_pe_needs_manual(self):
-        pi = _MockPI(name="PI-4", supplier="Cash Vendor", company="Acme",
-                     posting_date="2026-05-01", outstanding_amount=0.0,
-                     grand_total=1000.0, is_return=0)
-        linked = [{
-            "name": "PE-MULTI", "allocated_amount": 1000.0,
-            "payment_type": "Pay", "paid_from": "HDFC - A",
-            "paid_to": "Creditors - A", "cash_bank_account": "HDFC - A",
-            "mode_of_payment": "Bank", "posting_date": "2026-05-01",
-            "referenced_pis": ["PI-4", "PI-OTHER"],
-        }]
-        with patch.object(aps, "_linked_payment_entries", return_value=linked):
-            row = aps._process_pi_for_backfill(pi, dry_run=1)
+        row = self._run(self._pi("PI-4"), linked=[self._pe("PE-MULTI", "HDFC - A", ["PI-4", "PI-OTHER"])])
         self.assertEqual(row["status"], "needs-manual")
         self.assertEqual(row["pes"], ["PE-MULTI"])
 
-    def test_process_pi_dry_run_supplier_misconfigured_skipped(self):
-        pi = _MockPI(name="PI-5", supplier="Misconfigured Vendor", company="Acme",
-                     posting_date="2026-05-01", outstanding_amount=500.0,
-                     grand_total=500.0, is_return=0)
-        with patch.object(aps, "_linked_payment_entries", return_value=[]):
-            row = aps._process_pi_for_backfill(pi, dry_run=1)
-        self.assertEqual(row["status"], "skipped")
+    def test_process_pi_dry_run_other_allocations_need_manual(self):
+        # A journal entry or debit note allocated to the PI would stay allocated
+        # after it is marked paid, paying it twice.
+        row = self._run(self._pi("PI-6"), other=["Journal Entry JV-1"])
+        self.assertEqual(row["status"], "needs-manual")
+        self.assertEqual(row["vouchers"], ["Journal Entry JV-1"])
 
-    def test_process_pi_dry_run_near_zero_residual_is_ok(self):
-        # Sub-paisa residual after wrong-PE cancellation should resolve as
-        # "ok" (no PE created), not trigger a tiny phantom payment.
-        pi = _MockPI(name="PI-6", supplier="Cash Vendor", company="Acme",
-                     posting_date="2026-05-01", outstanding_amount=-0.005,
-                     grand_total=1000.0, is_return=0)
-        with patch.object(aps, "_linked_payment_entries", return_value=[]):
-            row = aps._process_pi_for_backfill(pi, dry_run=1)
-        self.assertEqual(row["status"], "ok")
-        self.assertEqual(row["residual"], 0)
+    def test_process_pi_dry_run_supplier_misconfigured_skipped(self):
+        pi = self._pi("PI-5", supplier="Misconfigured Vendor")
+        self.assertEqual(self._run(pi)["status"], "skipped")
+
+    def test_failed_pi_is_rolled_back_alone(self):
+        # One PI failing must undo only that PI (its own savepoint), never the
+        # PIs processed before it.
+        pi = self._pi("PI-7")
+        with patch.object(aps, "_process_pi_for_backfill", side_effect=RuntimeError("boom")), \
+             patch("frappe.db.savepoint") as savepoint, \
+             patch("frappe.db.rollback") as rollback, \
+             patch("frappe.log_error"):
+            row = aps._process_one_pi(pi, dry_run=0)
+        self.assertEqual(row["status"], "error")
+        savepoint.assert_called_once()
+        self.assertIn("save_point", rollback.call_args.kwargs)
 
     def test_summarize_counts_by_status(self):
         rows = [

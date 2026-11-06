@@ -290,6 +290,7 @@ doc_events = {
     "Purchase Receipt": {
         "before_save": "business_needed_solutions.business_needed_solutions.overrides.batch_naming.set_custom_batch_nos",
         "validate": [
+            "business_needed_solutions.bns_branch_accounting.utils.sync_internal_supplier_flag_on_draft",
             "business_needed_solutions.bns_branch_accounting.utils.ensure_internal_batch_bundle_mapping",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_purchase_receipt_linkage"
         ],
@@ -325,8 +326,12 @@ doc_events = {
         "on_submit": "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission"
     },
     "Sales Invoice": {
-        "validate": [
+        # Before ERPNext's own validation, so a discount credit note is validated
+        # as the non-stock return it becomes (no stock, no serial/batch bundles).
+        "before_validate": [
             "business_needed_solutions.business_needed_solutions.overrides.invoice_discount_credit_note.normalize_invoice_discount_credit_note",
+        ],
+        "validate": [
             "business_needed_solutions.bns_branch_accounting.overrides.billing_location.set_customer_address_from_billing_location",
             "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference",
             "business_needed_solutions.bns_branch_accounting.utils.validate_bns_internal_customer_return",
@@ -340,6 +345,7 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_return_credit_note_parity",
             "business_needed_solutions.bns_branch_accounting.utils.validate_internal_address_parity",
             "business_needed_solutions.bns_branch_accounting.utils.bns_guard_asset_in_transit",
+            "business_needed_solutions.bns_branch_accounting.utils.prepare_internal_invoice_for_gl_rewrite",
             "business_needed_solutions.bns_counter_repack.sales_invoice.create_repacks",
         ],
         "on_submit": [
@@ -372,6 +378,7 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.utils.bns_validate_asset_receive_parity",
             "business_needed_solutions.bns_branch_accounting.serial_batch_parity_check.enforce_internal_batch_serial_parity",
             "business_needed_solutions.business_needed_solutions.overrides.ineligible_itc_submission_control.restrict_ineligible_itc_submission",
+            "business_needed_solutions.bns_branch_accounting.utils.prepare_internal_invoice_for_gl_rewrite",
         ],
         "on_submit": [
             "business_needed_solutions.business_needed_solutions.overrides.submission_restriction.validate_submission_permission",
@@ -380,6 +387,7 @@ doc_events = {
             "business_needed_solutions.bns_branch_accounting.utils.bns_apply_asset_transfer"
         ],
         "validate": [
+            "business_needed_solutions.bns_branch_accounting.utils.sync_internal_supplier_flag_on_draft",
             "business_needed_solutions.bns_branch_accounting.utils.ensure_internal_batch_bundle_mapping",
             "business_needed_solutions.business_needed_solutions.overrides.stock_update_validation.validate_stock_update_or_reference",
             "business_needed_solutions.business_needed_solutions.overrides.gst_compliance.validate_purchase_invoice_same_gstin",
