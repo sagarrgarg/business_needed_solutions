@@ -59,6 +59,7 @@ def _columns() -> List[Dict[str, Any]]:
         {"label": _("GL Imbalance"),  "fieldname": "gl_imbalance", "fieldtype": "Currency",     "width": 120},
         {"label": _("Expected SLE"),  "fieldname": "expected_sle", "fieldtype": "Check",        "width": 80},
         {"label": _("SLE Count"),     "fieldname": "sle_count",    "fieldtype": "Int",          "width": 80},
+        {"label": _("Stock GL Rows"), "fieldname": "stock_gl_count", "fieldtype": "Int",        "width": 90},
         {"label": _("Update Stock"),  "fieldname": "update_stock", "fieldtype": "Check",        "width": 80},
         {"label": _("Perpetual"),     "fieldname": "perpetual",    "fieldtype": "Check",        "width": 80},
         {"label": _("Stock Items"),   "fieldname": "stock_item_count", "fieldtype": "Int",      "width": 80},

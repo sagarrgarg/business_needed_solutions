@@ -158,6 +158,12 @@ STATUS_MISSING_SLE = "Missing SLE"
 STATUS_MISSING_BOTH = "Missing GL & SLE"
 STATUS_IMBALANCED_GL = "Imbalanced GL"
 
+# Invoice with update_stock=1 whose SLE exists but whose GL has no row on a
+# stock account (no COGS / Stock In Hand pair). The footprint of the old
+# "Missing SLE" repair, which wrote SLE with update_stock_ledger() and never
+# rebuilt GL. Only checked for SI/PI on perpetual-inventory companies.
+STATUS_GL_MISSING_STOCK = "GL missing stock lines"
+
 # Cancelled (docstatus=2) doc that STILL has active (is_cancelled=0) GL/SLE rows
 # -- the footprint of an interrupted cancel (e.g. a deadlocked repost left a
 # dependant SLE / GL un-cancelled). A fully cancelled voucher must have ZERO
@@ -235,6 +241,22 @@ def _posting_mismatch_bits(r: Dict[str, Any]) -> List[str]:
     return bits
 
 
+def _gl_missing_stock_lines(r: Dict[str, Any], perpetual: bool, has_update_stock: bool) -> bool:
+    """SI/PI with update_stock=1 and SLE, but no GL row on a stock account.
+
+    Not flagged when GL is missing altogether (that is "Missing GL"), or when
+    the SLE moved no value (zero valuation books no stock GL)."""
+    return bool(
+        has_update_stock
+        and perpetual
+        and cint(r.get("update_stock"))
+        and cint(r.get("sle_count"))
+        and cint(r.get("gl_count"))
+        and flt(r.get("sle_value_movement")) > 0.001
+        and not cint(r.get("stock_gl_count"))
+    )
+
+
 def _audit_one_doctype(
     doctype: str,
     cutoff_date: Optional[str],
@@ -305,6 +327,24 @@ def _audit_one_doctype(
             0 AS recon_change_signal,
         """
 
+    # GL rows on stock accounts per voucher (SI/PI only) -- for the
+    # "GL missing stock lines" check.
+    if has_update_stock:
+        stock_gl_join_sql = """
+        LEFT JOIN (
+            SELECT g.voucher_no, COUNT(*) AS stock_gl_count
+            FROM `tabGL Entry` g
+            JOIN `tabAccount` a ON a.name = g.account
+            WHERE g.voucher_type = %(doctype)s AND g.is_cancelled = 0
+              AND a.account_type = 'Stock'
+            GROUP BY g.voucher_no
+        ) sgl ON sgl.voucher_no = p.name
+        """
+        select_stock_gl = "COALESCE(sgl.stock_gl_count, 0)"
+    else:
+        stock_gl_join_sql = ""
+        select_stock_gl = "0"
+
     where_clauses = ["p.docstatus = 1"]
     params: Dict[str, Any] = {}
 
@@ -342,9 +382,11 @@ def _audit_one_doctype(
             COALESCE(sle.sle_count, 0)              AS sle_count,
             COALESCE(sle.sle_value_movement, 0)     AS sle_value_movement,
             COALESCE(sle.sle_value_net, 0)          AS sle_value_net,
-            sle.sle_min_pd, sle.sle_max_pd, sle.sle_min_pt, sle.sle_max_pt
+            sle.sle_min_pd, sle.sle_max_pd, sle.sle_min_pt, sle.sle_max_pt,
+            {select_stock_gl} AS stock_gl_count
         FROM `{parent_table}` p
         {stock_join_sql}
+        {stock_gl_join_sql}
         LEFT JOIN (
             SELECT voucher_no,
                    COUNT(*) AS gl_count,
@@ -399,6 +441,8 @@ def _audit_one_doctype(
 
         if expects_sle and not r["sle_count"]:
             statuses.append(STATUS_MISSING_SLE)
+        elif _gl_missing_stock_lines(r, perpetual, has_update_stock):
+            statuses.append(STATUS_GL_MISSING_STOCK)
 
         # Posting date/time divergence between GL/SLE and the voucher header.
         mismatch_bits = _posting_mismatch_bits(r)
@@ -428,6 +472,7 @@ def _audit_one_doctype(
             "gl_cr": flt(r["gl_cr"]),
             "gl_imbalance": flt(r["gl_dr"]) - flt(r["gl_cr"]),
             "sle_count": cint(r["sle_count"]),
+            "stock_gl_count": cint(r.get("stock_gl_count")),
             "stock_item_count": cint(r.get("stock_item_count")),
             "asset_item_count": cint(r.get("asset_item_count")),
             "total_item_count": cint(r.get("total_item_count")),
@@ -670,6 +715,7 @@ _VALID_STATUSES = frozenset({
     STATUS_MISSING_SLE,
     STATUS_MISSING_BOTH,
     STATUS_IMBALANCED_GL,
+    STATUS_GL_MISSING_STOCK,
     STATUS_CANCELLED_ACTIVE_GL,
     STATUS_CANCELLED_ACTIVE_SLE,
     STATUS_CANCELLED_ACTIVE_BOTH,
@@ -719,8 +765,10 @@ def repair_gl_sle(docs, cutoff_date=None, fix_missing=True, fix_imbalanced=False
             typically the selected rows from the audit report. Strings of JSON
             also accepted.
         cutoff_date: Records the cutoff that the operator applied (audit log).
-        fix_missing: Re-run make_gl_entries / update_stock_ledger for docs
-            where GL or SLE is missing. Safe.
+        fix_missing: Fix docs where GL or SLE is missing. Missing SLE (and
+            "GL missing stock lines") queue one Repost Item Valuation per doc,
+            which writes the SLE, reposts later entries and rebuilds GL;
+            missing GL alone is rebuilt with make_gl_entries.
         fix_imbalanced: Reverse existing GL and rebuild. Slower and riskier;
             off by default.
         dry_run: When True, only count what would be done. Default True so the
@@ -745,11 +793,12 @@ def repair_gl_sle(docs, cutoff_date=None, fix_missing=True, fix_imbalanced=False
     # (it doesn't write anything, finishes fast).
     if not dry_run and not force_sync and len(docs) >= REPAIR_INLINE_THRESHOLD:
         job_name = f"bns_gl_sle_repair_{frappe.utils.now_datetime().strftime('%Y%m%d%H%M%S')}_{frappe.generate_hash(length=6)}"
+        queue = _repair_queue(fix_cancelled_active)
         frappe.enqueue(
             method="business_needed_solutions.business_needed_solutions.gl_sle_audit._run_repair_in_background",
-            queue="long",
-            timeout=14400,  # 4 hours, ~17 docs/sec gives 240k docs
-            job_name=job_name,
+            queue=queue,
+            timeout=14400,
+            job_id=job_name,
             now=False,
             docs=docs,
             cutoff_date=cutoff_date,
@@ -765,6 +814,7 @@ def repair_gl_sle(docs, cutoff_date=None, fix_missing=True, fix_imbalanced=False
         return {
             "queued": True,
             "job_name": job_name,
+            "queue": queue,
             "attempted": len(docs),
             "dry_run": False,
             "fix_missing": bool(fix_missing),
@@ -782,6 +832,17 @@ def repair_gl_sle(docs, cutoff_date=None, fix_missing=True, fix_imbalanced=False
         dry_run=dry_run,
         publish_progress=False,
     )
+
+
+def _repair_queue(fix_cancelled_active: int) -> str:
+    """Queue for a background repair.
+
+    Missing / imbalanced repairs only write GL inline or create Repost Item
+    Valuations, which is fast, so they run on `default`. They must not wait
+    on `long`: that is where ERPNext's repost_entries runs, and when reposts
+    are busy or deadlocked a repair there never starts. The cancelled heal
+    reposts inline (repost_now), so it stays on `long`."""
+    return "long" if cint(fix_cancelled_active) else "default"
 
 
 def _run_repair_in_background(
@@ -894,7 +955,12 @@ def _run_repair_loop(
             _maybe_progress(publish_progress, idx, total, dt, name, "skipped", progress_job_name)
             continue
 
-        is_missing = STATUS_MISSING_GL in status or STATUS_MISSING_SLE in status or STATUS_MISSING_BOTH in status
+        is_missing = (
+            STATUS_MISSING_GL in status
+            or STATUS_MISSING_SLE in status
+            or STATUS_MISSING_BOTH in status
+            or STATUS_GL_MISSING_STOCK in status
+        )
         is_imbalanced = STATUS_IMBALANCED_GL in status
         is_cancelled_active = _is_cancelled_active_status(status)
 
@@ -1003,13 +1069,44 @@ def get_repair_status(job_name):
         return {"found": False}
     progress = frappe.cache().get_value(f"bns_gl_sle_repair_progress::{job_name}")
     result = frappe.cache().get_value(f"bns_gl_sle_repair_result::{job_name}")
+    job = _rq_job_state(job_name)
     return {
-        "found": bool(progress or result),
+        "found": bool(progress or result or job.get("job_status")),
         "job_name": job_name,
         "progress": progress,
         "result": result,
         "done": bool(result),
+        **job,
     }
+
+
+def _rq_job_state(job_name: str) -> Dict[str, Any]:
+    """RQ state of a background repair: job_status (queued / started /
+    finished / failed / ...), the queue, and exc_info when it failed.
+    Empty when the job is unknown (e.g. expired from Redis)."""
+    try:
+        from frappe.utils.background_jobs import get_job
+
+        job = get_job(job_name)
+        if not job:
+            return {}
+        status = job.get_status(refresh=True)
+        state: Dict[str, Any] = {
+            "job_status": str(getattr(status, "value", status) or ""),
+            "job_queue": (job.origin or "").rsplit(":", 1)[-1],
+        }
+        if state["job_status"] == "failed":
+            exc = job.exc_info or ""
+            if not exc:
+                try:
+                    latest = job.latest_result()
+                    exc = (latest and latest.exc_string) or ""
+                except Exception:
+                    exc = ""
+            state["exc_info"] = exc[-3000:]
+        return state
+    except Exception:
+        return {}
 
 
 def _normalize_doc_list(docs: Any) -> List[Dict[str, str]]:
@@ -1284,8 +1381,14 @@ def _plan_repair(doctype: str, status: str) -> List[str]:
         return ["heal_cancelled_active"]
     plan: List[str] = []
     spec = AUDIT_SPEC[doctype]
-    if STATUS_MISSING_SLE in status and spec["expect_sle"] != "never":
-        plan.append("update_stock_ledger")
+    missing_sle = STATUS_MISSING_SLE in status or STATUS_MISSING_BOTH in status
+    if missing_sle and spec["expect_sle"] != "never":
+        # One Transaction RIV with recreate_stock_ledgers: writes the SLE,
+        # reposts later entries and rebuilds this voucher's GL.
+        plan.append("repost_item_valuation")
+    elif STATUS_GL_MISSING_STOCK in status:
+        # SLE exists; a Transaction RIV reposts from it and rebuilds GL.
+        plan.append("repost_stock_gl")
     if STATUS_MISSING_GL in status or STATUS_MISSING_BOTH in status:
         plan.append("make_gl_entries")
     if STATUS_IMBALANCED_GL in status:
@@ -1409,6 +1512,74 @@ def _repair_lock_key(doctype: str, name: str) -> str:
     return "bns_repair_" + hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+def _open_transaction_riv(doctype: str, name: str) -> Optional[str]:
+    """A submitted Transaction Repost Item Valuation for this voucher that is
+    still Queued or In Progress, if any."""
+    return frappe.db.get_value(
+        "Repost Item Valuation",
+        {
+            "based_on": "Transaction",
+            "voucher_type": doctype,
+            "voucher_no": name,
+            "docstatus": 1,
+            "status": ("in", ("Queued", "In Progress")),
+        },
+        "name",
+    )
+
+
+def _stock_gl_count(doctype: str, name: str) -> int:
+    """Active GL rows of this voucher on stock accounts."""
+    return cint(frappe.db.sql(
+        """SELECT COUNT(*) FROM `tabGL Entry` g
+           JOIN `tabAccount` a ON a.name = g.account
+           WHERE g.voucher_type = %s AND g.voucher_no = %s
+             AND g.is_cancelled = 0 AND a.account_type = 'Stock'""",
+        (doctype, name),
+    )[0][0])
+
+
+def _has_serial_or_batch_items(doc) -> bool:
+    items = list({d.item_code for d in (doc.get("items") or []) if d.get("item_code")})
+    if not items:
+        return False
+    return bool(frappe.get_all(
+        "Item",
+        filters={"name": ("in", items)},
+        or_filters={"has_serial_no": 1, "has_batch_no": 1},
+        limit=1,
+    ))
+
+
+def _queue_transaction_riv(doc, recreate: bool):
+    """Create and submit a Transaction Repost Item Valuation for `doc`.
+
+    recreate=True also rewrites the voucher's SLE (recreate_stock_ledgers).
+    ERPNext refuses that for serial/batch items, so for those the SLE is
+    written inline first and the RIV only reposts from it. ERPNext's
+    repost_entries job processes the RIV: it reposts later SLEs of the same
+    item-warehouses and rebuilds this voucher's GL."""
+    if recreate and _has_serial_or_batch_items(doc):
+        doc.update_stock_ledger()
+        recreate = False
+
+    riv = frappe.get_doc({
+        "doctype": "Repost Item Valuation",
+        "based_on": "Transaction",
+        "voucher_type": doc.doctype,
+        "voucher_no": doc.name,
+        "posting_date": doc.posting_date,
+        "posting_time": doc.get("posting_time") or "00:00:00",
+        "company": doc.company,
+        "recreate_stock_ledgers": 1 if recreate else 0,
+        "allow_negative_stock": 1,
+    })
+    riv.flags.ignore_permissions = True
+    riv.insert()
+    riv.submit()
+    return riv
+
+
 def _execute_repair(doctype: str, name: str, plan: List[str]) -> Dict[str, Any]:
     """Run the planned repair steps for one doc — IDEMPOTENT + LOCKED.
 
@@ -1417,8 +1588,10 @@ def _execute_repair(doctype: str, name: str, plan: List[str]) -> Dict[str, Any]:
     gap has already been filled (by a parallel worker, prior repair, or a
     scheduled repost), the step is skipped to prevent double-writes.
 
-    For imbalanced cases, existing entries are reversed via
-    `make_reverse_gl_entries` before regeneration.
+    Missing SLE is not written inline: a Transaction Repost Item Valuation
+    (recreate_stock_ledgers=1) is queued instead, skipped when one is already
+    open for the voucher. For imbalanced cases, existing entries are reversed
+    via `make_reverse_gl_entries` before regeneration.
 
     Returns: {"actions_run": [...], "skipped": [...], "live_gl_before",
               "live_gl_after", "live_sle_before", "live_sle_after"}
@@ -1455,26 +1628,45 @@ def _execute_repair(doctype: str, name: str, plan: List[str]) -> Dict[str, Any]:
         actions_run: List[str] = []
         skipped: List[Dict[str, str]] = []
 
-        # SLE missing → write SLE (only when this doc expects SLE per its
-        # actual content; non-stock-only docs don't produce SLE).
-        if "update_stock_ledger" in plan and hasattr(doc, "update_stock_ledger"):
+        # The RIV rebuilds this voucher's GL itself (perpetual inventory
+        # only), so make_gl_entries below must not run ahead of it.
+        riv_rebuilds_gl = False
+
+        # SLE missing → queue a Transaction Repost Item Valuation with
+        # recreate_stock_ledgers. Calling update_stock_ledger() inline (the
+        # old repair) wrote SLE but left GL without COGS / Stock In Hand and
+        # left later SLEs with stale qty_after_transaction and valuation.
+        if "repost_item_valuation" in plan:
             if not live["expects_sle"]:
                 skipped.append({
-                    "step": "update_stock_ledger",
+                    "step": "repost_item_valuation",
                     "reason": (
                         f"doc not expected to produce SLE "
                         f"(stock_items=0, asset_items={live['asset_item_count']})"
                     ),
                 })
             elif sle_before > 0:
-                skipped.append({"step": "update_stock_ledger", "reason": f"SLE already present ({sle_before} rows)"})
+                skipped.append({"step": "repost_item_valuation", "reason": f"SLE already present ({sle_before} rows)"})
+            elif open_riv := _open_transaction_riv(doctype, name):
+                skipped.append({"step": "repost_item_valuation", "reason": f"Repost Item Valuation {open_riv} already open"})
+                riv_rebuilds_gl = live["perpetual"]
             else:
-                doc.update_stock_ledger()
-                actions_run.append("update_stock_ledger")
-                # Re-load the doc so item-level fields refreshed by
-                # update_stock_ledger (e.g. incoming_rate, valuation_rate)
-                # are visible to make_gl_entries below.
-                doc = frappe.get_doc(doctype, name)
+                riv = _queue_transaction_riv(doc, recreate=True)
+                actions_run.append(f"queued Repost Item Valuation {riv.name}")
+                riv_rebuilds_gl = live["perpetual"]
+
+        # SLE present but GL has no stock lines → Transaction RIV without
+        # recreate: reposts from this voucher's SLE and rebuilds its GL.
+        if "repost_stock_gl" in plan:
+            if open_riv := _open_transaction_riv(doctype, name):
+                skipped.append({"step": "repost_stock_gl", "reason": f"Repost Item Valuation {open_riv} already open"})
+            elif not sle_before:
+                skipped.append({"step": "repost_stock_gl", "reason": "no SLE to repost from"})
+            elif _stock_gl_count(doctype, name):
+                skipped.append({"step": "repost_stock_gl", "reason": "stock GL lines already present"})
+            else:
+                riv = _queue_transaction_riv(doc, recreate=False)
+                actions_run.append(f"queued Repost Item Valuation {riv.name}")
 
         # GL missing → write GL (only when zero rows exist; never additive).
         # Same expectation gate as SLE — protects against forged or stale
@@ -1493,6 +1685,8 @@ def _execute_repair(doctype: str, name: str, plan: List[str]) -> Dict[str, Any]:
                         f"sle_value_net={live['sle_value_net']:.2f})"
                     ),
                 })
+            elif riv_rebuilds_gl:
+                skipped.append({"step": "make_gl_entries", "reason": "Repost Item Valuation rebuilds GL"})
             else:
                 live_gl_now = frappe.db.count("GL Entry", {
                     "voucher_type": doctype, "voucher_no": name, "is_cancelled": 0,
@@ -1570,6 +1764,7 @@ def get_audit_spec():
             STATUS_MISSING_SLE,
             STATUS_MISSING_BOTH,
             STATUS_IMBALANCED_GL,
+            STATUS_GL_MISSING_STOCK,
         ],
         "tolerance": GL_TOLERANCE,
     }
@@ -1586,8 +1781,10 @@ def scheduled_auto_fix_missing_ledgers() -> None:
       1. Run audit_gl_sle for the lookback window, statuses Missing-only
          (imbalanced is NOT auto-fixed — that needs human review).
       2. Repair each via repair_gl_sle(fix_missing=1, fix_imbalanced=0).
-         Repair uses doc.make_gl_entries / doc.update_stock_ledger
-         directly — never cancel + resubmit.
+         Missing GL is rebuilt with doc.make_gl_entries; missing SLE and
+         "GL missing stock lines" queue one Transaction Repost Item
+         Valuation per doc (none when one is already open) — never
+         cancel + resubmit.
       3. Result summary written to Error Log titled
          'GL SLE Auto-Fix Weekly Run' for the admin to inspect.
 
@@ -1611,7 +1808,7 @@ def scheduled_auto_fix_missing_ledgers() -> None:
     try:
         rows = audit_gl_sle(
             cutoff_date=str(cutoff_date),
-            statuses=[STATUS_MISSING_GL, STATUS_MISSING_SLE, STATUS_MISSING_BOTH],
+            statuses=[STATUS_MISSING_GL, STATUS_MISSING_SLE, STATUS_MISSING_BOTH, STATUS_GL_MISSING_STOCK],
             limit=10000,
         )
         candidates = [

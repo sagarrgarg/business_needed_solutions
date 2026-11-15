@@ -25,6 +25,7 @@ frappe.query_reports["GL SLE Audit"] = {
                     { value: "Missing SLE", description: "" },
                     { value: "Missing GL & SLE", description: "" },
                     { value: "Imbalanced GL", description: "sum(dr) ≠ sum(cr)" },
+                    { value: "GL missing stock lines", description: "update stock on, SLE present, no COGS / Stock In Hand GL" },
                     { value: "Cancelled · active GL", description: "cancelled doc, GL still active" },
                     { value: "Cancelled · active SLE", description: "cancelled doc, SLE still active" },
                     { value: "Cancelled · active GL & SLE", description: "cancelled doc, GL+SLE still active" },
@@ -52,7 +53,7 @@ frappe.query_reports["GL SLE Audit"] = {
         const v = default_formatter(value, row, column, data);
         if (column.fieldname === "status" && data && data.status) {
             const s = data.status;
-            if (s.startsWith("Missing")) {
+            if (s.startsWith("Missing") || s.startsWith("GL missing")) {
                 return `<span style="color:#c0392b;font-weight:600">${v}</span>`;
             }
             if (s.startsWith("Imbalanced")) {
@@ -162,7 +163,7 @@ function bns_repair_action(report, dry_run, fixFlags) {
     const isHeal = fixFlags.fix_cancelled_active && !fixFlags.fix_missing && !fixFlags.fix_imbalanced;
     const applyDesc = isHeal
         ? __("This marks the stray active GL/SLE rows on each CANCELLED doc as is_cancelled=1, then reposts the affected item-warehouses.")
-        : __("This re-runs make_gl_entries / update_stock_ledger on each doc.");
+        : __("Missing SLE (and GL missing stock lines): queues one Repost Item Valuation per document, which writes the stock ledger, reposts later entries and rebuilds GL. Missing GL alone is rebuilt with make_gl_entries.");
     const msg = dry_run
         ? __("Preview repair plan for {0} row(s)? This does not change any data.", [data.length])
         : __("Repair {0} row(s) with cutoff {1}?<br><br>{2} The cutoff is logged with the action.", [data.length, cutoff, applyDesc]);
@@ -281,7 +282,7 @@ function bns_show_repair_progress_dialog(report, queueResp) {
     dlg.fields_dict.info.$wrapper.html(`
         <div style="margin-bottom:8px">
             <p><b>${__("Job queued")}:</b> ${frappe.utils.escape_html(jobName)}</p>
-            <p>${__("Repairing")} <b>${total}</b> ${__("documents on the long queue.")}
+            <p>${__("Repairing")} <b>${total}</b> ${__("documents on the {0} queue.", [frappe.utils.escape_html(queueResp.queue || "default")])}
                ${__("You can close this dialog — the job will keep running and you'll be notified when it finishes.")}</p>
         </div>
     `);
@@ -291,6 +292,8 @@ function bns_show_repair_progress_dialog(report, queueResp) {
                  role="progressbar" style="width:0%">0 / ${total}</div>
         </div>
         <p class="bns-progress-status" style="font-size:11px;color:#666;margin-top:6px">${__("Waiting for worker...")}</p>
+        <p class="bns-job-status" style="font-size:11px;margin-top:2px"></p>
+        <pre class="bns-job-error" style="display:none;margin-top:6px;max-height:200px;overflow:auto;font-size:11px;background:#fdecea;color:#7f1d1d;padding:8px;border-radius:4px"></pre>
     `);
     dlg.fields_dict.log.$wrapper.html(`
         <div class="bns-progress-tally" style="margin-top:10px">
@@ -361,6 +364,38 @@ function bns_show_repair_progress_dialog(report, queueResp) {
     // progress/result every 3s makes the dialog recover deterministically.
     let pollInterval = null;
     let lastPolledCurrent = -1;
+    let polls = 0;
+
+    // RQ state of the job, so a job that never starts (busy or stuck queue)
+    // or that crashed shows up instead of "Waiting for worker..." forever.
+    const JOB_STATUS_TEXT = {
+        queued: __("Queued — waiting for a free worker on the {0} queue", [queueResp.queue || "default"]),
+        deferred: __("Deferred"),
+        scheduled: __("Scheduled"),
+        started: __("Running"),
+        finished: __("Finished"),
+        failed: __("Failed"),
+        stopped: __("Stopped"),
+        canceled: __("Cancelled"),
+    };
+    const showJobStatus = (m) => {
+        polls += 1;
+        const st = m.job_status || "";
+        let text = st ? __("Job status") + ": " + (JOB_STATUS_TEXT[st] || st) : "";
+        if (!st && !m.done && polls > 3) {
+            text = __("Job not found in the queue (it may have expired). Check Background Jobs.");
+        }
+        const colour = st === "failed" ? "#c0392b" : (st === "started" || st === "finished" ? "#16a34a" : "#b7791f");
+        dlg.$wrapper.find(".bns-job-status").css("color", colour).text(text);
+        if (st === "failed") {
+            dlg.$wrapper.find(".bns-job-error").show().text(m.exc_info || __("No error details from the worker."));
+            dlg.$wrapper.find(".bns-progress-bar").removeClass("active progress-bar-striped").addClass("progress-bar-danger");
+            if (pollInterval) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+            }
+        }
+    };
     const poll = () => {
         frappe.call({
             method: "business_needed_solutions.business_needed_solutions.gl_sle_audit.get_repair_status",
@@ -369,6 +404,7 @@ function bns_show_repair_progress_dialog(report, queueResp) {
             no_spinner: true,
             callback: (r) => {
                 const m = r.message || {};
+                showJobStatus(m);
                 if (!m.found) return;
                 if (m.progress && m.progress.current !== lastPolledCurrent) {
                     lastPolledCurrent = m.progress.current;
