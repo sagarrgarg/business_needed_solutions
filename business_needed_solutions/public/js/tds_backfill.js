@@ -59,6 +59,9 @@ bns_tds.render_preview = function (p) {
 			else if (r.action === "flags") status = `<span class="text-muted">${__("Category fields only, no ledger change")}</span>`;
 			else if (r.action === "ledger") status = `<span class="text-success">${__("Change")}</span>`;
 			else status = "";
+			if (r.auto_paid && r.action === "ledger" && !r.blocked && r.new_paid_amount != null) {
+				status += `<br><small class="text-muted">${__("Auto-paid: paid amount → {0}, outstanding stays 0", [fmt(r.new_paid_amount)])}</small>`;
+			}
 			(r.caps || []).forEach(function (c) {
 				status += `<br><small class="text-warning">${__("{0} {1}: allocation {2} → {3}", [esc(c.voucher_type), esc(c.voucher_no), fmt(c.allocated), fmt(c.new_allocated)])}</small>`;
 			});

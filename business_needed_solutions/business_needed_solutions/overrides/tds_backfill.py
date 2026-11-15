@@ -23,6 +23,12 @@ GST and expense lines never move), in a frozen period, in a quarter marked filed
 Settings (a System Manager may override), or when it is foreign-currency, cash-paid,
 written off, or has TDS adjusted from an advance.
 
+Cash-paid (Is Paid) invoices of a supplier flagged auto-paid are the exception: their
+paid amount follows the invoice total (auto_paid_supplier.set_paid_amounts), so after
+the TDS change the paid amount is set to the new total less advances and write-off,
+outstanding stays 0, and the cash/bank line moves with it in the same rebuild. Any other
+cash-paid invoice is refused: real cash was paid and that amount must not move.
+
 A debit note's ledger is never changed: it lowers the TDS base of the invoices after it.
 Its category fields are set to those of the invoice it returns (header only), so ERPNext
 counts it the same way; changing a debit note's category changes that invoice's.
@@ -43,6 +49,7 @@ from frappe import _
 from frappe.utils import cint, cstr, flt, get_first_day, get_last_day, getdate, add_months, today
 
 from business_needed_solutions.business_needed_solutions.compat import get_frozen_accounts_settings
+from business_needed_solutions.business_needed_solutions.overrides import auto_paid_supplier
 
 PI = "Purchase Invoice"
 TAX_ROW = "Purchase Taxes and Charges"
@@ -480,8 +487,18 @@ def _load_year(parties, company, fy_start, fy_end):
             {"n": names},
         ))
 
+    auto_paid = set()
+    if frappe.get_meta("Supplier").has_field("bns_auto_paid_supplier"):
+        auto_paid = set(frappe.get_all(
+            "Supplier", filters={"name": ["in", parties], "bns_auto_paid_supplier": 1}, pluck="name",
+        ))
+
     item_level = frappe.get_meta("Purchase Invoice Item").has_field("apply_tds")
     for d in docs:
+        # Cash-paid invoice whose paid amount follows its total (auto-paid supplier).
+        d.auto_paid = bool(
+            cint(d.is_paid) and d.supplier in auto_paid and not cint(d.get("is_bns_internal_supplier"))
+        )
         d.posting_date = getdate(d.posting_date)
         d.taxable = flt(taxable.get(d.name, 0.0) if item_level else d.base_net_total, 2)
         d.tds_rows = tds_rows.get(d.name, [])
@@ -581,7 +598,9 @@ def _ledger_block(d, company, filed_upto, frozen_upto, allow_filed):
         )
     if d.has_advance_tax:
         return _("TDS on this invoice is adjusted from an advance; fix by hand.")
-    if cint(d.is_paid):
+    if cint(d.is_paid) and not d.get("auto_paid"):
+        # Real cash was paid; the paid amount must not move. Auto-paid suppliers'
+        # invoices are rebuilt with the paid amount following the new total.
         return _("Cash-paid invoice (Is Paid); fix by hand.")
     if flt(d.write_off_amount):
         return _("Invoice has a write-off; fix by hand.")
@@ -654,6 +673,10 @@ def _build(d):
     pi.tax_withholding_category = d.category or None
     pi.set("tax_withheld_vouchers", d.withheld)
     pi.calculate_taxes_and_totals()
+    if d.get("auto_paid"):
+        # Paid amount follows the new total; recalculate so outstanding is 0.
+        auto_paid_supplier.set_paid_amounts(pi)
+        pi.calculate_taxes_and_totals()
 
     problem = _compare_snapshot(snap, pi)
     if problem:
@@ -661,6 +684,8 @@ def _build(d):
 
     allowed = {pi.credit_to, d.target_account, *d.current_accounts,
                frappe.get_cached_value("Company", pi.company, "round_off_account")} - {None}
+    if d.get("auto_paid") and pi.cash_bank_account:
+        allowed.add(pi.cash_bank_account)  # the cash paid moves with the total
     before = _live_gl_net(pi.name)
     after = _gl_net(pi.get_gl_entries())
     moved = []
@@ -675,6 +700,8 @@ def _build(d):
             ", ".join(m["account"] for m in bad)
         ), moved
     d._new_gl = after
+    if d.get("auto_paid"):
+        d.new_paid_amount = flt(pi.paid_amount, 2)
     return pi, None, moved
 
 
@@ -795,7 +822,8 @@ def _apply_doc(d):
 
     before = frappe.db.get_value(
         PI, d.name,
-        ["apply_tds", "tax_withholding_category", "grand_total", "rounded_total", "outstanding_amount"],
+        ["apply_tds", "tax_withholding_category", "grand_total", "rounded_total", "outstanding_amount",
+         "paid_amount"],
         as_dict=True,
     )
     if d.action == "flags":
@@ -826,14 +854,22 @@ def _apply_doc(d):
 
     update_voucher_outstanding(PI, pi.name, pi.credit_to, "Supplier", pi.supplier)
     _verify(d)
-    after = frappe.db.get_value(PI, d.name, ["grand_total", "rounded_total", "outstanding_amount"], as_dict=True)
+    # An auto-paid cash invoice must end fully paid; throws (and the caller rolls
+    # back) if anything left it with an outstanding.
+    auto_paid_supplier.assert_auto_paid_settled(d.name)
+    after = frappe.db.get_value(
+        PI, d.name, ["grand_total", "rounded_total", "outstanding_amount", "paid_amount"], as_dict=True
+    )
     _comment(d, before, after, caps)
-    return {
+    out = {
         "purchase_invoice": d.name, "action": "ledger",
         "tds_before": flt(d.current_tds), "tds_after": flt(d.target_tds),
         "account": d.target_account, "payments_cut": caps,
         "outstanding_after": flt(after.outstanding_amount),
     }
+    if d.get("auto_paid"):
+        out.update(paid_before=flt(before.paid_amount), paid_after=flt(after.paid_amount))
+    return out
 
 
 def _persist(pi, d):
@@ -864,6 +900,10 @@ def _persist(pi, d):
     updates = {f: pi.get(f) for f in _HEADER_TOTAL_FIELDS if meta.has_field(f)}
     updates["tax_withholding_category"] = d.category or None
     updates["apply_tds"] = 1 if d.category else 0
+    if d.get("auto_paid"):
+        # Saved before the GL rebuild, which books the cash line from paid_amount.
+        updates.update(paid_amount=pi.paid_amount, base_paid_amount=pi.base_paid_amount,
+                       outstanding_amount=0)
     frappe.db.set_value(PI, pi.name, updates, update_modified=True)
 
 
@@ -972,6 +1012,9 @@ def _comment(d, before, after, caps=None):
             fmt(before.rounded_total or before.grand_total), fmt(after.rounded_total or after.grand_total),
             fmt(before.outstanding_amount), fmt(after.outstanding_amount),
         ))
+    if after and d.get("auto_paid"):
+        lines.append(_("Paid amount (auto-paid supplier): {0} → {1}").format(
+            fmt(before.paid_amount), fmt(after.paid_amount)))
     for c in caps or []:
         lines.append(_("{0} {1}: allocation {2} → {3}").format(
             c["voucher_type"], c["voucher_no"], fmt(c["allocated"]), fmt(c["new_allocated"])))
@@ -1070,7 +1113,7 @@ def _view(plans, extra=None):
                 "name", "supplier", "posting_date", "is_return", "taxable", "current_category",
                 "category", "current_tds", "target_tds", "current_accounts", "target_account",
                 "action", "blocked", "quarter", "filed", "months_late", "late_interest", "challans",
-                "caps", "moved", "old_grand_total", "new_grand_total",
+                "caps", "moved", "old_grand_total", "new_grand_total", "auto_paid", "new_paid_amount",
             )}
             row["posting_date"] = str(d.posting_date)
             rows.append(row)

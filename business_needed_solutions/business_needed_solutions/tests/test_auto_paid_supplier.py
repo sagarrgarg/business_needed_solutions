@@ -415,3 +415,79 @@ class BackfillHelpersTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ===========================================================================
+# Paid-amount rule and guard for tax changes on submitted invoices
+# ===========================================================================
+
+
+class AutoPaidTaxChangeTests(unittest.TestCase):
+    """set_paid_amounts / assert_auto_paid_settled, and the TDS tool's refusal of
+    cash-paid invoices that are not auto-paid (tds_backfill._ledger_block)."""
+
+    def setUp(self):
+        self.stubs = _Stubs()
+        self._patches = [
+            patch("frappe.get_cached_doc", side_effect=self.stubs.get_cached_doc),
+            patch("frappe.db.get_value", side_effect=self._get_value),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+
+    def _get_value(self, doctype, filters, fieldname=None, **kwargs):
+        if doctype == "Supplier" and fieldname == "bns_auto_paid_supplier":
+            return self.stubs.suppliers[filters].bns_auto_paid_supplier
+        return self.stubs.get_value(doctype, filters, fieldname, **kwargs)
+
+    def _submitted(self, supplier="Cash Vendor", **state):
+        row = {"name": "PI-1", "supplier": supplier, "is_paid": 1, "docstatus": 1,
+               "outstanding_amount": 0.0, "is_bns_internal_supplier": 0}
+        row.update(state)
+        self.stubs.pis["PI-1"] = row
+
+    def test_paid_amount_follows_new_total(self):
+        # TDS of 500 raised on a 50,000 invoice: rounded total 49,500.
+        doc = _make_pi(is_paid=1, grand_total=49500.0, base_grand_total=49500.0,
+                       rounded_total=49500.0, base_rounded_total=49500.0, paid_amount=50000.0)
+        aps.set_paid_amounts(doc)
+        self.assertEqual((doc.paid_amount, doc.base_paid_amount), (49500.0, 49500.0))
+
+    def test_paid_amount_uses_rounded_total_less_advance_and_write_off(self):
+        doc = _make_pi(grand_total=49499.6, rounded_total=49500.0, base_grand_total=49499.6,
+                       base_rounded_total=49500.0, total_advance=1000.0, write_off_amount=0.0)
+        aps.set_paid_amounts(doc)
+        self.assertEqual(doc.paid_amount, 48500.0)
+
+    def test_guard_passes_when_settled(self):
+        self._submitted(outstanding_amount=0.004)
+        aps.assert_auto_paid_settled("PI-1")
+
+    def test_guard_throws_on_outstanding(self):
+        self._submitted(outstanding_amount=500.0)
+        with self.assertRaises(frappe.ValidationError):
+            aps.assert_auto_paid_settled("PI-1")
+
+    def test_guard_ignores_other_invoices(self):
+        for state in (
+            {"supplier": "Bank Vendor"},          # supplier not flagged
+            {"is_paid": 0},                       # on credit
+            {"docstatus": 0},                     # draft
+            {"is_bns_internal_supplier": 1},      # internal branch
+        ):
+            self._submitted(outstanding_amount=500.0, **state)
+            aps.assert_auto_paid_settled("PI-1")
+
+    def test_tds_tool_refuses_cash_paid_unless_auto_paid(self):
+        from business_needed_solutions.business_needed_solutions.overrides import tds_backfill as tds
+
+        d = frappe._dict(posting_date="2026-05-01", has_advance_tax=False, is_paid=1, write_off_amount=0,
+                         party_account_currency="INR", conversion_rate=1, tds_rows=[], auto_paid=False)
+        with patch("frappe.get_cached_value", return_value="INR"):
+            self.assertIn("Cash-paid", tds._ledger_block(d, "Acme", None, None, False))
+            d.auto_paid = True
+            self.assertIsNone(tds._ledger_block(d, "Acme", None, None, False))

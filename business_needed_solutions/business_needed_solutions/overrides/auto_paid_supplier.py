@@ -85,10 +85,7 @@ def auto_mark_paid(doc, method=None):
     doc.is_paid = 1
     doc.mode_of_payment = mop
     doc.cash_bank_account = account
-    settled = flt(doc.get("total_advance")) + flt(doc.get("write_off_amount"))
-    rate = flt(doc.get("conversion_rate")) or 1
-    doc.paid_amount = flt(doc.rounded_total or doc.grand_total) - settled
-    doc.base_paid_amount = flt(doc.base_rounded_total or doc.base_grand_total) - settled * rate
+    set_paid_amounts(doc)
 
     # This hook runs after ERPNext has already worked out outstanding, status
     # and the cash checks for this save; redo them with the paid block in place
@@ -99,6 +96,48 @@ def auto_mark_paid(doc, method=None):
         doc.validate_cash()
     if hasattr(doc, "set_status"):
         doc.set_status()
+
+
+def set_paid_amounts(doc):
+    """The auto-paid paid-amount rule: pay in cash whatever the invoice total
+    (rounded total when rounding is on) leaves after advances and write-off,
+    so outstanding is 0. Totals must already be calculated on `doc`.
+
+    Used at validate and by every path that changes taxes on a submitted
+    auto-paid invoice (tds_backfill), which must call it after recalculating
+    totals and before rebuilding GL."""
+    settled = flt(doc.get("total_advance")) + flt(doc.get("write_off_amount"))
+    rate = flt(doc.get("conversion_rate")) or 1
+    doc.paid_amount = flt(doc.rounded_total or doc.grand_total) - settled
+    doc.base_paid_amount = flt(doc.base_rounded_total or doc.base_grand_total) - settled * rate
+
+
+def is_auto_paid_invoice(doc) -> bool:
+    """A cash-paid (is_paid) invoice of a supplier flagged auto-paid: its paid
+    amount follows the invoice total. Internal-branch invoices never are."""
+    if not cint(doc.get("is_paid")) or doc.get("is_bns_internal_supplier") or not doc.get("supplier"):
+        return False
+    return bool(cint(frappe.db.get_value("Supplier", doc.get("supplier"), "bns_auto_paid_supplier")))
+
+
+def assert_auto_paid_settled(pi_name):
+    """Guard for paths that change a submitted invoice's taxes: an auto-paid
+    invoice must end with outstanding 0. Throws otherwise, so the caller's
+    savepoint undoes the change."""
+    fields = ["name", "supplier", "is_paid", "docstatus", "outstanding_amount"]
+    if frappe.get_meta("Purchase Invoice").has_field("is_bns_internal_supplier"):
+        fields.append("is_bns_internal_supplier")
+    pi = frappe.db.get_value("Purchase Invoice", pi_name, fields, as_dict=True)
+    if not pi or cint(pi.docstatus) != 1 or not is_auto_paid_invoice(pi):
+        return
+    if abs(flt(pi.outstanding_amount)) >= 0.01:
+        frappe.throw(
+            _(
+                "{0} is a cash-paid invoice of auto-paid supplier {1} but would be left "
+                "with outstanding {2}. Its paid amount must follow the invoice total."
+            ).format(bold(pi.name), bold(pi.supplier), flt(pi.outstanding_amount, 2)),
+            title=_("Auto-Paid Supplier: Outstanding Not Zero"),
+        )
 
 
 def _resolve_mop_account(mop, company):

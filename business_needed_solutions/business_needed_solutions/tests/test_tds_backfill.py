@@ -18,6 +18,7 @@ ABBR = "_TBT"
 CAT_194Q = "_Test BNS 194Q"
 CAT_194C = "_Test BNS 194C"
 CAT_NO_ROUND = "_Test BNS No Round"
+CAT_LOW = "_Test BNS Low Rate"
 ITEM = "_Test BNS TDS Item"
 
 # Tropical Industries, FY26-27: (invoice, month, day, net). The debit note is negative.
@@ -100,6 +101,7 @@ class TestTDSBackfill(FrappeTestCase):
             (CAT_194Q, 0.1, 0, 5000000, 1, 1),
             (CAT_194C, 1, 30000, 100000, 0, 1),
             (CAT_NO_ROUND, 1, 0, 1000, 0, 0),
+            (CAT_LOW, 0.5, 30000, 100000, 0, 1),
         ):
             if frappe.db.exists("Tax Withholding Category", name):
                 frappe.delete_doc("Tax Withholding Category", name, force=True)
@@ -533,3 +535,97 @@ class TestTDSBackfill(FrappeTestCase):
         bns_dashboard.fix_selected_pis_tds(items, token=preview["token"])
         self.assertEqual((self._tds(b), self._tds(dn2)), (500, 0))
         self.assertEqual(frappe.db.get_value("Purchase Invoice", dn2, "apply_tds"), 1)
+
+    # ------------------------------------------------------------------ cash-paid invoices
+
+    def _auto_paid_supplier(self, name, pan):
+        supplier = self._supplier(name, pan)
+        mop = "_Test BNS Auto Cash"
+        if not frappe.db.exists("Mode of Payment", mop):
+            frappe.get_doc({"doctype": "Mode of Payment", "mode_of_payment": mop, "type": "Cash"}).insert()
+        mop_doc = frappe.get_doc("Mode of Payment", mop)
+        if not any(a.company == COMPANY for a in mop_doc.accounts):
+            mop_doc.append("accounts", {"company": COMPANY, "default_account": _acc("Cash")})
+            mop_doc.save()
+        frappe.db.set_value("Supplier", supplier, {
+            "bns_auto_paid_supplier": 1, "bns_auto_paid_mode_of_payment": mop,
+        })
+        frappe.clear_document_cache("Supplier", supplier)
+        return supplier
+
+    def _cash_net(self, name):
+        return flt(sum(flt(g.debit) - flt(g.credit) for g in self._gl(name) if g.account == _acc("Cash")), 2)
+
+    def test_auto_paid_invoice_follows_tds(self):
+        """Auto-paid cash invoice: TDS raised, lowered, removed. Paid amount follows the
+        new total, outstanding stays 0 and the cash account is credited net of TDS."""
+        supplier = self._auto_paid_supplier("_Test BNS Cash Vendor", "AAACV1234D")
+        pi = self._pi(supplier, self._date(5, 1), 50000)
+        self.assertEqual(frappe.db.get_value("Purchase Invoice", pi, "is_paid"), 1)
+        self.assertEqual(self._cash_net(pi), -50000)
+
+        for category, tds_amount in ((CAT_194C, 500), (CAT_LOW, 250), (None, 0), (CAT_194C, 500)):
+            preview = tds.preview_tds_category_change(pi, category)
+            row = next(r for r in preview["plans"][0]["rows"] if r["name"] == pi)
+            self.assertFalse(row["blocked"], row["blocked"])
+            self.assertEqual(row["new_paid_amount"], 50000 - tds_amount)
+            summary = self._change(pi, category)
+            self.assertFalse(summary["errors"], summary["errors"])
+            state = frappe.db.get_value(
+                "Purchase Invoice", pi, ["paid_amount", "base_paid_amount", "outstanding_amount", "status"],
+                as_dict=True,
+            )
+            self.assertEqual(self._tds(pi), tds_amount, category)
+            self.assertAlmostEqual(flt(state.paid_amount), 50000 - tds_amount, 2)
+            self.assertAlmostEqual(flt(state.base_paid_amount), 50000 - tds_amount, 2)
+            self.assertAlmostEqual(flt(state.outstanding_amount), 0, 2)
+            self.assertEqual(state.status, "Paid")
+            self.assertEqual(self._cash_net(pi), -(50000 - tds_amount))
+            supplier_net = sum(flt(g.debit) - flt(g.credit) for g in self._gl(pi) if g.party == supplier)
+            self.assertAlmostEqual(supplier_net, 0, 2)
+            self._assert_ledger_clean(pi)
+
+    def test_auto_paid_guard_rolls_back(self):
+        """If the paid amount came out short of the new total, the invoice would keep an
+        outstanding: the guard throws and the change is undone."""
+        supplier = self._auto_paid_supplier("_Test BNS Cash Vendor 2", "AAACV1234E")
+        pi = self._pi(supplier, self._date(5, 2), 50000)
+        gl_before = self._gl(pi)
+        real = tds.auto_paid_supplier.set_paid_amounts
+
+        def short_by_100(doc):
+            real(doc)
+            doc.paid_amount -= 100
+            doc.base_paid_amount -= 100
+
+        with patch.object(tds.auto_paid_supplier, "set_paid_amounts", side_effect=short_by_100):
+            summary = self._change(pi, CAT_194C)
+        self.assertTrue(summary["errors"])
+        self.assertIn("outstanding", summary["errors"][0]["error"])
+        self.assertEqual(self._tds(pi), 0)
+        self.assertEqual(self._gl(pi), gl_before)
+
+    def test_cash_paid_invoice_of_other_supplier_is_refused(self):
+        supplier = self._supplier("_Test BNS Cash Paid Manual", "AAACM1234F")
+        date = self._date(5, 3)
+        pi = frappe.new_doc("Purchase Invoice")
+        pi.update({
+            "company": COMPANY, "supplier": supplier, "posting_date": date, "set_posting_time": 1,
+            "due_date": date, "bill_date": date, "bill_no": frappe.generate_hash(length=8),
+            "credit_to": _acc("Creditors"), "currency": "INR", "conversion_rate": 1,
+            "is_paid": 1, "mode_of_payment": "Cash", "cash_bank_account": _acc("Cash"), "paid_amount": 50000,
+        })
+        pi.append("items", {"item_code": ITEM, "qty": 1, "rate": 50000,
+                            "expense_account": _acc("Cost of Goods Sold"), "cost_center": _acc("Main")})
+        pi.insert()
+        pi.submit()
+        gl_before = self._gl(pi.name)
+
+        preview = tds.preview_tds_category_change(pi.name, CAT_194C)
+        row = next(r for r in preview["plans"][0]["rows"] if r["name"] == pi.name)
+        self.assertIn("Cash-paid invoice", row["blocked"])
+        summary = self._change(pi.name, CAT_194C)
+        self.assertEqual(summary["changed"], 0)
+        self.assertEqual(self._tds(pi.name), 0)
+        self.assertEqual(flt(frappe.db.get_value("Purchase Invoice", pi.name, "paid_amount")), 50000)
+        self.assertEqual(self._gl(pi.name), gl_before)
