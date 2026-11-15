@@ -1,6 +1,6 @@
 import frappe
 from frappe import _
-from frappe.utils import cint
+from frappe.utils import cint, flt
 
 
 def execute(filters=None):
@@ -14,11 +14,10 @@ def execute(filters=None):
 	When the 'Segregate Serial / Batch Bundle' filter is enabled, episodes
 	are detected at batch level (item + warehouse + batch_no).
 
-	Cross-fiscal-year note: if batch tracking was enabled on items mid-way,
-	running this report with batch segregation across the transition boundary
-	will split timelines — old SLEs group under batch_no="" and new SLEs
-	under actual batch numbers.  Filter by from_date >= new FY start to
-	avoid misleading split-timeline episodes.
+	Batch rows come from both legacy SLE.batch_no and Serial and Batch Bundle
+	entries; with segregation on, each row's balance is the batch balance.
+	If batch tracking was enabled on an item mid-way, its older SLEs have no
+	batch and group under batch_no="".
 	"""
 	stock_ledger_data = get_stock_ledger_data(filters)
 
@@ -80,13 +79,110 @@ def get_stock_ledger_data(filters):
 			sle.batch_no,
 			sle.serial_no,
 			sle.project,
-			sle.company
+			sle.company,
+			sle.name as sle_name,
+			sle.serial_and_batch_bundle
 		FROM `tabStock Ledger Entry` sle
 		WHERE {conditions}
 		ORDER BY sle.item_code, sle.warehouse, sle.posting_date, sle.posting_time, sle.voucher_no
 	""".format(conditions=conditions)
 
-	return frappe.db.sql(query, filters, as_dict=1)
+	data = frappe.db.sql(query, filters, as_dict=1)
+	if filters and cint(filters.get("segregate_serial_batch_bundle")):
+		data = split_rows_by_batch(data, filters)
+	return data
+
+
+def split_rows_by_batch(data, filters):
+	"""One row per batch moved, with the batch's own running balance.
+
+	Bundle rows (v15+) carry their batches in Serial and Batch Entry, not in
+	SLE.batch_no, so they are split by bundle entry here. balance_qty becomes the
+	batch balance in the warehouse, counted over the whole batch ledger (not only
+	the rows the filters keep). Rows without a batch keep the item balance.
+	"""
+	bundles = list({d.serial_and_batch_bundle for d in data if d.serial_and_batch_bundle})
+	bundle_batches = {}
+	for i in range(0, len(bundles), 500):
+		for e in frappe.get_all(
+			"Serial and Batch Entry",
+			filters={"parent": ("in", bundles[i : i + 500]), "batch_no": ("is", "set")},
+			fields=["parent", "batch_no", "qty"],
+			order_by="idx",
+		):
+			batches = bundle_batches.setdefault(e.parent, {})
+			batches[e.batch_no] = batches.get(e.batch_no, 0) + flt(e.qty)
+
+	only_batch = filters.get("batch_no")
+	rows = []
+	for d in data:
+		if d.serial_and_batch_bundle:
+			for batch_no, qty in bundle_batches.get(d.serial_and_batch_bundle, {}).items():
+				if only_batch and batch_no != only_batch:
+					continue
+				row = frappe._dict(d)
+				row.batch_no = batch_no
+				row.in_qty = qty
+				row.out_qty = abs(qty) if qty < 0 else 0
+				row.in_qty_positive = qty if qty > 0 else 0
+				rows.append(row)
+		else:
+			rows.append(d)
+
+	balances = get_batch_balances(rows, filters.get("to_date"))
+	for row in rows:
+		if row.batch_no:
+			row.balance_qty = balances.get((row.sle_name, row.batch_no), row.balance_qty)
+	return rows
+
+
+def get_batch_balances(rows, to_date=None):
+	"""{(sle name, batch_no): batch balance after that row} for the batches in rows."""
+	keys = {(r.item_code, r.warehouse, r.batch_no) for r in rows if r.batch_no}
+	if not keys:
+		return {}
+
+	values = {
+		"items": tuple({k[0] for k in keys}),
+		"warehouses": tuple({k[1] for k in keys}),
+		"batches": tuple({k[2] for k in keys}),
+		"to_date": to_date or "9999-12-31",
+	}
+	ledger = frappe.db.sql(
+		"""
+		select sle.name, sle.item_code, sle.warehouse, sbe.batch_no, sbe.qty,
+			sle.posting_date, sle.posting_time, sle.creation
+		from `tabSerial and Batch Entry` sbe
+		inner join `tabStock Ledger Entry` sle on sle.serial_and_batch_bundle = sbe.parent
+		where sle.is_cancelled = 0 and sle.posting_date <= %(to_date)s
+			and sle.item_code in %(items)s and sle.warehouse in %(warehouses)s
+			and sbe.batch_no in %(batches)s
+
+		union all
+
+		select sle.name, sle.item_code, sle.warehouse, sle.batch_no, sle.actual_qty as qty,
+			sle.posting_date, sle.posting_time, sle.creation
+		from `tabStock Ledger Entry` sle
+		where sle.is_cancelled = 0 and sle.posting_date <= %(to_date)s
+			and sle.item_code in %(items)s and sle.warehouse in %(warehouses)s
+			and sle.batch_no in %(batches)s
+			and ifnull(sle.serial_and_batch_bundle, '') = ''
+
+		order by posting_date, posting_time, creation
+		""",
+		values,
+		as_dict=True,
+	)
+
+	running = {}
+	out = {}
+	for r in ledger:
+		key = (r.item_code, r.warehouse, r.batch_no)
+		if key not in keys:
+			continue
+		running[key] = running.get(key, 0) + flt(r.qty)
+		out[(r.name, r.batch_no)] = running[key]
+	return out
 
 
 def get_conditions(filters):
@@ -125,7 +221,11 @@ def get_conditions(filters):
 		conditions.append("sle.item_code IN (SELECT name FROM `tabItem` WHERE item_group = %(item_group)s)")
 
 	if filters.get("batch_no"):
-		conditions.append("sle.batch_no = %(batch_no)s")
+		# Bundle rows (v15+) keep the batch in Serial and Batch Entry, not SLE.batch_no.
+		conditions.append(
+			"(sle.batch_no = %(batch_no)s OR sle.serial_and_batch_bundle IN "
+			"(SELECT parent FROM `tabSerial and Batch Entry` WHERE batch_no = %(batch_no)s))"
+		)
 
 	if filters.get("brand"):
 		conditions.append("sle.item_code IN (SELECT name FROM `tabItem` WHERE brand = %(brand)s)")

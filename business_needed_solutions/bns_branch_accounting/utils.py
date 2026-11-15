@@ -127,6 +127,7 @@ def _bns_debug_log(hypothesis_id: str, location: str, message: str, data: Option
 _BNS_INTERNAL_GL_PATCHED = False
 _BNS_REPOST_GL_FAILSAFE_PATCHED = False
 _BNS_TRANSFER_RATE_STOCK_LEDGER_PATCHED = False
+_BNS_TRANSFER_RATE_BUNDLE_PATCHED = False
 _BNS_REPOST_ACCOUNTING_LEDGER_PATCHED = False
 _BNS_REPOST_TRACKING_DTYPE = "BNS Repost Tracking"
 _BNS_REPOST_STATUS_IN_PROGRESS = "In Progress"
@@ -457,6 +458,189 @@ def _apply_bns_transfer_rate_stock_ledger_patch() -> None:
         logger.info("Applied BNS stock-ledger patch: PR/PI repost valuation uses bns_transfer_rate")
     except Exception as e:
         logger.error(f"Failed to apply BNS transfer-rate stock-ledger patch: {str(e)}")
+
+
+def _get_bns_transfer_rate_for_bundle(bundle):
+    """Transfer rate for an inward Serial and Batch Bundle of a BNS internal receipt
+    (PR/PI row), or None to leave ERPNext's own rate. Same rules as the SLE lookup:
+    it is asked with the bundle's voucher row as a forward (incoming) movement."""
+    if not bundle or bundle.get("type_of_transaction") != "Inward":
+        return None
+    if cint(bundle.get("is_rejected")):
+        return None  # rejected-warehouse lot: ERPNext's own rejected-material rule applies
+    if not bundle.get("voucher_detail_no") or cint(bundle.get("is_cancelled")):
+        return None
+    qty = abs(flt(bundle.get("total_qty"))) or 1
+    return _get_bns_transfer_rate_for_sle(frappe._dict(
+        voucher_type=bundle.get("voucher_type"),
+        voucher_no=bundle.get("voucher_no"),
+        voucher_detail_no=bundle.get("voucher_detail_no"),
+        item_code=bundle.get("item_code"),
+        warehouse=bundle.get("warehouse"),
+        actual_qty=qty,
+    ))
+
+
+def _source_bundle_for_receipt_row(voucher_type: str, voucher_detail_no: str) -> Optional[str]:
+    """The sender's Serial and Batch Bundle behind a BNS receipt row: PI row -> SI row
+    (-> its DN row when the SI moved no stock); PR row -> DN row (or SI row)."""
+    if not voucher_detail_no:
+        return None
+    links = []
+    if voucher_type == "Purchase Invoice":
+        links.append(("Purchase Invoice Item", "sales_invoice_item", "Sales Invoice Item"))
+    elif voucher_type == "Purchase Receipt":
+        links.append(("Purchase Receipt Item", "delivery_note_item", "Delivery Note Item"))
+        links.append(("Purchase Receipt Item", "sales_invoice_item", "Sales Invoice Item"))
+    for child, field, source_child in links:
+        if not frappe.get_meta(child).has_field(field):
+            continue
+        source_row = frappe.db.get_value(child, voucher_detail_no, field)
+        if not source_row:
+            continue
+        bundle = frappe.db.get_value(source_child, source_row, "serial_and_batch_bundle")
+        if bundle:
+            return bundle
+        if source_child == "Sales Invoice Item":
+            dn_detail = frappe.db.get_value("Sales Invoice Item", source_row, "dn_detail")
+            if dn_detail:
+                bundle = frappe.db.get_value("Delivery Note Item", dn_detail, "serial_and_batch_bundle")
+                if bundle:
+                    return bundle
+    return None
+
+
+def _per_entry_transfer_rates(receiver_entries, source_entries, transfer_rate: float):
+    """Rate per receiver entry (serial_no, batch_no): what the sender took that serial /
+    batch out at, scaled so the total stays qty x transfer_rate. None when a receiver
+    entry has no matching sender entry or the sender's values cannot carry the total;
+    the caller then uses the flat transfer rate.
+
+    Per-batch rates keep returns symmetric: the receiver's debit note takes a batch out at
+    the rate it came in at, which is the rate the sender's credit note restores it at."""
+    def key(e):
+        return (e.get("serial_no") or "", e.get("batch_no") or "")
+
+    value, qty, fallback = {}, {}, {}
+    for e in source_entries or []:
+        k = key(e)
+        value[k] = value.get(k, 0.0) + abs(flt(e.get("stock_value_difference")))
+        qty[k] = qty.get(k, 0.0) + abs(flt(e.get("qty")))
+        if flt(e.get("incoming_rate")):
+            fallback[k] = abs(flt(e.get("incoming_rate")))
+    rates, total_qty, total_value = {}, 0.0, 0.0
+    for e in receiver_entries or []:
+        k = key(e)
+        if k not in qty:
+            return None
+        rate = value[k] / qty[k] if qty[k] and value[k] else fallback.get(k, 0.0)
+        rates[(e.get("serial_no"), e.get("batch_no"))] = rate
+        total_qty += abs(flt(e.get("qty")))
+        total_value += abs(flt(e.get("qty"))) * rate
+    if len({r for r in rates.values()}) <= 1:
+        return None  # one rate: the flat transfer rate says the same
+    target = total_qty * flt(transfer_rate)
+    if total_value <= 0:
+        return None
+    if abs(total_value - target) > 0.005:
+        factor = target / total_value
+        rates = {k: r * factor for k, r in rates.items()}
+    return rates
+
+
+def _source_entry_rates_for_bundle(bundle, transfer_rate: float):
+    """Per-entry transfer rates for a receipt bundle, from the sender's bundle; or None."""
+    try:
+        source = _source_bundle_for_receipt_row(bundle.get("voucher_type"), bundle.get("voucher_detail_no"))
+        if not source:
+            return None
+        source_entries = frappe.get_all(
+            "Serial and Batch Entry",
+            filters={"parent": source},
+            fields=["serial_no", "batch_no", "qty", "stock_value_difference", "incoming_rate"],
+        )
+        return _per_entry_transfer_rates(bundle.get("entries") or [], source_entries, transfer_rate)
+    except Exception:
+        logger.exception("BNS per-batch transfer rates failed for %s", bundle.get("name"))
+        return None
+
+
+def _apply_bns_transfer_rate_bundle_patch() -> None:
+    """Price serial/batch receipts of BNS internal transfers at the transfer rate.
+
+    For a row with a Serial and Batch Bundle, ERPNext (v15 and v16) takes the stock value
+    from the bundle: SerialandBatchBundle.set_incoming_rate_for_inward_transaction prices
+    every entry from the PR/PI Item valuation_rate (the invoice rate), not from the SLE's
+    incoming_rate, so the SLE patch above alone books batched receipts at the invoice rate.
+
+    That loop takes a per-entry rate from get_transfer_rates() first (ERPNext uses it for
+    Stock Entry transfers). When ERPNext has none, return the BNS transfer rate for every
+    entry: the bundle, the SLE value difference and every later row then carry
+    qty x transfer rate, at submit and on every repost. Older v15 builds without
+    get_transfer_rates get the rate through the `row` argument instead.
+    """
+    global _BNS_TRANSFER_RATE_BUNDLE_PATCHED
+    if _BNS_TRANSFER_RATE_BUNDLE_PATCHED:
+        return
+    try:
+        from erpnext.stock.doctype.serial_and_batch_bundle.serial_and_batch_bundle import (
+            SerialandBatchBundle,
+        )
+
+        original_rates = getattr(SerialandBatchBundle, "get_transfer_rates", None)
+        if original_rates is not None:
+            if getattr(original_rates, "_bns_transfer_rate_patched", False):
+                _BNS_TRANSFER_RATE_BUNDLE_PATCHED = True
+                return
+
+            def patched_get_transfer_rates(self, *args, **kwargs):
+                rates = original_rates(self, *args, **kwargs)
+                if rates:
+                    return rates
+                transfer_rate = _get_bns_transfer_rate_for_bundle(self)
+                if transfer_rate is None:
+                    return rates
+                per_entry = _source_entry_rates_for_bundle(self, transfer_rate)
+                if per_entry:
+                    return per_entry
+                return {(d.serial_no, d.batch_no): flt(transfer_rate) for d in self.entries}
+
+            patched_get_transfer_rates._bns_transfer_rate_patched = True
+            SerialandBatchBundle.get_transfer_rates = site_gated(original_rates, patched_get_transfer_rates)
+        else:
+            original_inward = SerialandBatchBundle.set_incoming_rate_for_inward_transaction
+            if getattr(original_inward, "_bns_transfer_rate_patched", False):
+                _BNS_TRANSFER_RATE_BUNDLE_PATCHED = True
+                return
+
+            def patched_inward(self, *args, **kwargs):
+                transfer_rate = _get_bns_transfer_rate_for_bundle(self)
+                if transfer_rate is None:
+                    return original_inward(self, *args, **kwargs)
+                arguments = call_arguments(original_inward, self, *args, **kwargs)
+                if not arguments:
+                    return original_inward(self, *args, **kwargs)
+                arguments.pop("self", None)
+                if flt(transfer_rate) > 0:
+                    arguments["row"] = frappe._dict(valuation_rate=flt(transfer_rate), rate=flt(transfer_rate))
+                result = original_inward(self, **arguments)
+                if not flt(transfer_rate):
+                    # A zero rate falls back to the item row's rate inside ERPNext; force 0.
+                    for d in self.entries:
+                        d.incoming_rate = 0.0
+                        d.stock_value_difference = 0.0
+                        if arguments.get("save"):
+                            d.db_set({"incoming_rate": 0.0, "stock_value_difference": 0.0})
+                return result
+
+            patched_inward._bns_transfer_rate_patched = True
+            SerialandBatchBundle.set_incoming_rate_for_inward_transaction = site_gated(
+                original_inward, patched_inward
+            )
+        _BNS_TRANSFER_RATE_BUNDLE_PATCHED = True
+        logger.info("Applied BNS bundle patch: serial/batch internal receipts use bns_transfer_rate")
+    except Exception as e:
+        logger.error(f"Failed to apply BNS transfer-rate bundle patch: {str(e)}")
 
 
 def _get_bns_branch_accounting_accounts() -> Dict[str, Any]:
@@ -1565,38 +1749,53 @@ def _resolve_si_name_for_internal_pi(doc, use_bill_no: bool = True) -> Optional[
     return None
 
 
-def _get_rate_from_dn_stock_ledger(
-    dn_name: str, item_code: str, warehouse: Optional[str] = None
+def _outgoing_rate_from_voucher_sle(
+    voucher_type: str, voucher_no: str, item_code: str,
+    warehouse: Optional[str] = None, voucher_detail_no: Optional[str] = None,
 ) -> float:
-    """Read valuation from Delivery Note Stock Ledger Entry for this item."""
-    if not dn_name or not item_code:
+    """Cost per unit the sender's voucher took out: |stock value difference| / |qty|.
+
+    Scoped to the voucher row when its detail name is known (a row split per batch has
+    several SLE rows); otherwise to the item, as a qty-weighted average over its rows.
+    The warehouse's running stock_value is never used: it is the balance after the
+    entry, not the row's value.
+    """
+    if not voucher_no or not item_code:
         return 0.0
     filters: Dict[str, Any] = {
-        "voucher_type": "Delivery Note",
-        "voucher_no": dn_name,
+        "voucher_type": voucher_type,
+        "voucher_no": voucher_no,
         "item_code": item_code,
         "is_cancelled": 0,
     }
+    if voucher_detail_no:
+        filters["voucher_detail_no"] = voucher_detail_no
     if warehouse:
         filters["warehouse"] = warehouse
     rows = frappe.get_all(
         "Stock Ledger Entry",
         filters=filters,
-        fields=["incoming_rate", "stock_value", "actual_qty"],
-        order_by="posting_date desc, posting_time desc, creation desc",
-        limit=20,
+        fields=["incoming_rate", "stock_value_difference", "actual_qty"],
     )
+    qty = sum(abs(flt(r.actual_qty)) for r in rows if flt(r.actual_qty) < 0)
+    value = sum(abs(flt(r.stock_value_difference)) for r in rows if flt(r.actual_qty) < 0)
+    if qty and value:
+        return value / qty
     for row in rows:
-        ir = flt(row.incoming_rate or 0)
-        if ir > 0:
-            return ir
-        aq = flt(row.actual_qty or 0)
-        sv = flt(row.stock_value or 0)
-        if aq != 0 and sv != 0:
-            return abs(sv) / abs(aq)
+        if flt(row.incoming_rate) > 0:
+            return flt(row.incoming_rate)
+    if voucher_detail_no:
+        return _outgoing_rate_from_voucher_sle(voucher_type, voucher_no, item_code, warehouse, None)
     if warehouse:
-        return _get_rate_from_dn_stock_ledger(dn_name, item_code, None)
+        return _outgoing_rate_from_voucher_sle(voucher_type, voucher_no, item_code, None, None)
     return 0.0
+
+
+def _get_rate_from_dn_stock_ledger(
+    dn_name: str, item_code: str, warehouse: Optional[str] = None, dn_detail: Optional[str] = None
+) -> float:
+    """Cost per unit from the Delivery Note's Stock Ledger Entries for this item / row."""
+    return _outgoing_rate_from_voucher_sle("Delivery Note", dn_name, item_code, warehouse, dn_detail)
 
 
 def _build_si_rate_maps_for_pi(si_name: str) -> Tuple[Dict[str, float], List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
@@ -1658,7 +1857,7 @@ def _resolve_rate_from_dn_chain(si_item: Dict[str, Any]) -> float:
             return dn_ir
 
     if item_code:
-        return _get_rate_from_dn_stock_ledger(dn_name, item_code)
+        return _get_rate_from_dn_stock_ledger(dn_name, item_code, dn_detail=dn_detail or None)
 
     return 0.0
 
@@ -1698,37 +1897,10 @@ def _consume_si_bucket_for_pi_line(
 
 
 def _get_outgoing_rate_from_si_stock_ledger(
-    si_name: str, item_code: str, warehouse: Optional[str] = None
+    si_name: str, item_code: str, warehouse: Optional[str] = None, si_detail: Optional[str] = None
 ) -> float:
-    """Read valuation from latest non-cancelled Sales Invoice Stock Ledger row for this item."""
-    if not si_name or not item_code:
-        return 0.0
-    filters: Dict[str, Any] = {
-        "voucher_type": "Sales Invoice",
-        "voucher_no": si_name,
-        "item_code": item_code,
-        "is_cancelled": 0,
-    }
-    if warehouse:
-        filters["warehouse"] = warehouse
-    rows = frappe.get_all(
-        "Stock Ledger Entry",
-        filters=filters,
-        fields=["incoming_rate", "stock_value", "actual_qty"],
-        order_by="posting_date desc, posting_time desc, creation desc",
-        limit=20,
-    )
-    for row in rows:
-        ir = flt(row.incoming_rate or 0)
-        if ir > 0:
-            return ir
-        aq = flt(row.actual_qty or 0)
-        sv = flt(row.stock_value or 0)
-        if aq != 0 and sv != 0:
-            return abs(sv) / abs(aq)
-    if warehouse:
-        return _get_outgoing_rate_from_si_stock_ledger(si_name, item_code, None)
-    return 0.0
+    """Cost per unit from the Sales Invoice's Stock Ledger Entries for this item / row."""
+    return _outgoing_rate_from_voucher_sle("Sales Invoice", si_name, item_code, warehouse, si_detail)
 
 
 def _resolve_pi_item_transfer_rate_extras(
@@ -1786,8 +1958,9 @@ def _resolve_pi_item_transfer_rate_extras(
                 return source_rate, si_item_for_link
 
     if item_code:
+        # The PI row's warehouse is the receiver's, so it is not a filter on the SI's rows.
         sle_rate = _get_outgoing_rate_from_si_stock_ledger(
-            si_name, item_code, item.get("warehouse")
+            si_name, item_code, si_detail=si_item_for_link or sii or None
         )
         if sle_rate > 0:
             return sle_rate, si_item_for_link
@@ -5118,6 +5291,7 @@ def bns_repost_drain_oldest():
 
 # Best-effort eager patching on module import.
 _apply_bns_transfer_rate_stock_ledger_patch()
+_apply_bns_transfer_rate_bundle_patch()
 _apply_bns_internal_gl_rewrite_patch()
 _apply_bns_repost_gl_failsafe_patch()
 _apply_bns_repost_accounting_ledger_patch()
@@ -5175,6 +5349,7 @@ def apply_bns_runtime_patches() -> None:
     """
     _apply_bns_common_party_skip_patch()
     _apply_bns_transfer_rate_stock_ledger_patch()
+    _apply_bns_transfer_rate_bundle_patch()
     _apply_bns_internal_gl_rewrite_patch()
     _apply_bns_repost_gl_failsafe_patch()
     _apply_bns_repost_accounting_ledger_patch()
@@ -7311,12 +7486,16 @@ def _count_sle_rows_at_stale_transfer_rate(
     re-price, so after a repost these match and no further repost is queued (no loop). A row
     whose value difference differs from qty x rate while its rate matches is a legitimately
     partial conservation (see transfer_value_conservation), which a repost cannot change.
+
+    A serial/batch row takes its value from its bundle, not from the SLE rate, so its bundle
+    entries are compared too: an entry still at another rate (the invoice rate, booked before
+    the bundle patch) makes the row stale even when the SLE shows the transfer rate.
     """
     precision = rate_precision()
     sle_rows = frappe.get_all(
         "Stock Ledger Entry",
         filters={"voucher_type": voucher_type, "voucher_no": voucher_no, "is_cancelled": 0},
-        fields=["voucher_detail_no", "actual_qty", "incoming_rate"],
+        fields=["voucher_detail_no", "actual_qty", "incoming_rate", "serial_and_batch_bundle"],
     )
     stale = 0
     for sle in sle_rows:
@@ -7327,7 +7506,25 @@ def _count_sle_rows_at_stale_transfer_rate(
             continue
         if flt(sle.get("incoming_rate") or 0, precision) != flt(transfer_rate, precision):
             stale += 1
+        elif sle.get("serial_and_batch_bundle") and _bundle_entries_off_rate(
+            sle.get("serial_and_batch_bundle"), transfer_rate, precision
+        ):
+            stale += 1
     return stale
+
+
+def _bundle_entries_off_rate(bundle: str, rate: float, precision: int = 2) -> bool:
+    """True when a receipt bundle does not carry qty x `rate` in total.
+
+    Entries may hold per-batch rates (the sender's), so their total value is compared, not
+    each rate. Tolerance: one paisa, or one paisa per hundred units, whichever is larger,
+    so rounding of per-entry rates never looks stale (that would re-queue reposts)."""
+    entries = frappe.get_all(
+        "Serial and Batch Entry", filters={"parent": bundle}, fields=["qty", "incoming_rate"]
+    )
+    qty = sum(abs(flt(e.qty)) for e in entries)
+    value = sum(abs(flt(e.qty)) * flt(e.incoming_rate) for e in entries)
+    return abs(value - qty * flt(rate)) > max(0.01, qty * 0.0001)
 
 
 def _mirror_pi_item_valuation_from_transfer_rate(pi_name: str) -> int:
@@ -10918,22 +11115,7 @@ def make_bns_internal_return_credit_note(debit_note: str, debit_note_type: str =
 
     credit = make_return_doc(credit_dt, original_sale)
 
-    # Match the credit note 1:1 to the debit note (also supports partial returns):
-    # keep only items present on the debit note and set each qty (already negative
-    # on both sides) to the debit note's returned qty for that item.
-    dn_qty_by_code: Dict[str, float] = {}
-    for it in dn.get("items") or []:
-        code = it.get("item_code")
-        if code:
-            dn_qty_by_code[code] = dn_qty_by_code.get(code, 0.0) + flt(it.get("qty") or 0)
-
-    kept = []
-    for it in credit.get("items") or []:
-        code = it.get("item_code")
-        if code in dn_qty_by_code:
-            it.qty = dn_qty_by_code[code]
-            kept.append(it)
-    credit.set("items", kept)
+    credit.set("items", _match_credit_items_to_debit_note(credit, dn, debit_note_type, credit_dt))
     if not credit.get("items"):
         frappe.throw(
             _("No matching items between debit note {0} and original {1}.").format(debit_note, original_sale)
@@ -10944,6 +11126,144 @@ def make_bns_internal_return_credit_note(debit_note: str, debit_note_type: str =
     credit.run_method("set_missing_values")
     credit.run_method("calculate_taxes_and_totals")
     return credit
+
+
+def _debit_note_lots(row) -> List[Dict[str, Any]]:
+    """What a debit-note row sent back, per batch: [{batch_no, serial_nos, qty>0}].
+    Read from its Serial and Batch Bundle, else its legacy batch/serial fields."""
+    bundle = row.get("serial_and_batch_bundle")
+    if bundle:
+        lots: Dict[str, Dict[str, Any]] = {}
+        for e in frappe.get_all(
+            "Serial and Batch Entry", filters={"parent": bundle},
+            fields=["batch_no", "serial_no", "qty"], order_by="idx",
+        ):
+            lot = lots.setdefault(e.batch_no or "", {"batch_no": e.batch_no, "serial_nos": [], "qty": 0.0})
+            lot["qty"] += abs(flt(e.qty))
+            if e.serial_no:
+                lot["serial_nos"].append(e.serial_no)
+        if lots:
+            return list(lots.values())
+    serial_nos = [x.strip() for x in (row.get("serial_no") or "").split("\n") if x.strip()]
+    return [{"batch_no": row.get("batch_no") or None, "serial_nos": serial_nos, "qty": abs(flt(row.get("qty")))}]
+
+
+def _sale_row_lots(child_doctype: str, row_name: str) -> Dict[str, set]:
+    """Batches and serials an original sale row moved: {"batches": set, "serials": set}."""
+    row = frappe.db.get_value(
+        child_doctype, row_name, ["serial_and_batch_bundle", "batch_no", "serial_no"], as_dict=True
+    ) or {}
+    batches = {row.get("batch_no")} - {None, ""}
+    serials = {x.strip() for x in (row.get("serial_no") or "").split("\n") if x.strip()}
+    if row.get("serial_and_batch_bundle"):
+        for e in frappe.get_all(
+            "Serial and Batch Entry", filters={"parent": row.serial_and_batch_bundle},
+            fields=["batch_no", "serial_no"],
+        ):
+            if e.batch_no:
+                batches.add(e.batch_no)
+            if e.serial_no:
+                serials.add(e.serial_no)
+    return {"batches": batches, "serials": serials}
+
+
+def _match_credit_items_to_debit_note(credit, dn, debit_note_type: str, credit_dt: str) -> list:
+    """Credit-note rows that return exactly what the debit note sent back.
+
+    Each debit-note row is traced to the original sale row (debit row -> original receipt
+    row -> sale row), so a sale split into several rows of one item is matched row by
+    row, never given the item's whole quantity twice. Each row carries the debit note's
+    own batches / serials (one credit row per batch), so the sender gets back the lots
+    that actually came back, not ERPNext's first-in pick from the original sale.
+    """
+    receipt_child = f"{debit_note_type} Item"
+    receipt_link = "purchase_invoice_item" if debit_note_type == "Purchase Invoice" else "purchase_receipt_item"
+    sale_link = "sales_invoice_item" if debit_note_type == "Purchase Invoice" else "delivery_note_item"
+    credit_link = "sales_invoice_item" if credit_dt == "Sales Invoice" else "dn_detail"
+    receipt_meta = frappe.get_meta(receipt_child)
+
+    # Debit-note lots, keyed by the original sale row when it can be traced.
+    by_sale_row: Dict[str, List[Dict[str, Any]]] = {}
+    by_item: Dict[str, List[Dict[str, Any]]] = {}
+    for row in dn.get("items") or []:
+        if not row.get("item_code"):
+            continue
+        sale_row = None
+        original_receipt_row = row.get(receipt_link)
+        if original_receipt_row and receipt_meta.has_field(sale_link):
+            sale_row = frappe.db.get_value(receipt_child, original_receipt_row, sale_link)
+        for lot in _debit_note_lots(row):
+            lot["item_code"] = row.item_code
+            if sale_row:
+                by_sale_row.setdefault(sale_row, []).append(lot)
+            else:
+                by_item.setdefault(row.item_code, []).append(lot)
+
+    def credit_row(template, lot, qty):
+        # Unsaved copy keeping the links to the sale row (several are no_copy fields).
+        new = frappe.copy_doc(template, ignore_no_copy=True)
+        new.qty = -abs(qty)
+        new.stock_qty = new.qty * flt(new.get("conversion_factor") or 1)
+        new.serial_and_batch_bundle = None
+        if lot.get("batch_no") or lot.get("serial_nos"):
+            new.use_serial_batch_fields = 1
+            new.batch_no = lot.get("batch_no")
+            new.serial_no = "\n".join(lot.get("serial_nos") or []) or None
+        return new
+
+    kept = []
+    leftover = []  # (template, room) for rows the traced lots did not fill
+    for it in credit.get("items") or []:
+        lots = by_sale_row.pop(it.get(credit_link) or "", None)
+        if lots:
+            for lot in lots:
+                kept.append(credit_row(it, lot, lot["qty"]))
+        elif it.get("item_code") in by_item:
+            leftover.append([it, abs(flt(it.qty))])
+
+    # Lots that could not be traced: fill same-item sale rows, each up to what it can still
+    # take back, so a quantity is never given to two rows. A batch / serial goes only to a
+    # sale row that sold it (ERPNext refuses a return row whose batch its sale row lacked).
+    sold = {}
+
+    def sold_on(template):
+        sale_row = template.get(credit_link)
+        if sale_row not in sold:
+            sold[sale_row] = _sale_row_lots(f"{credit_dt} Item", sale_row) if sale_row else None
+        return sold[sale_row]
+
+    for code, lots in by_item.items():
+        candidates = [c for c in leftover if c[0].item_code == code]
+        for lot in lots:
+            for candidate in candidates:
+                if lot["qty"] <= 0.0001:
+                    break
+                template, room = candidate
+                lot_sold = sold_on(template)
+                if lot_sold is not None and (lot.get("batch_no") or lot.get("serial_nos")):
+                    if lot.get("batch_no") and lot["batch_no"] not in lot_sold["batches"]:
+                        continue
+                    if lot.get("serial_nos") and not set(lot["serial_nos"]) <= lot_sold["serials"]:
+                        continue
+                take = min(room, lot["qty"])
+                if take <= 0:
+                    continue
+                kept.append(credit_row(template, lot, take))
+                lot["qty"] -= take
+                candidate[1] -= take
+
+    unmatched = [lot for lots in by_sale_row.values() for lot in lots]
+    unmatched += [lot for lots in by_item.values() for lot in lots if flt(lot["qty"]) > 0.0001]
+    if unmatched:
+        frappe.throw(
+            _("Debit note {0}: {1} could not be matched to a row of the original transfer.").format(
+                dn.name, ", ".join(sorted({u["item_code"] for u in unmatched}))
+            ),
+            title=_("Return Does Not Match the Transfer"),
+        )
+    for idx, row in enumerate(kept, start=1):
+        row.idx = idx
+    return kept
 
 
 def validate_internal_purchase_return_linkage(doc, method: Optional[str] = None) -> None:

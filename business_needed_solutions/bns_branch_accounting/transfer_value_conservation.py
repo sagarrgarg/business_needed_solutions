@@ -29,8 +29,9 @@ negative bin that ends positive), the representable part is applied and the rest
 where ERPNext put it. Those rows are logged and listed by
 ledger_chain_repair.find_unconserved_transfer_receipts.
 
-Serial/batch rows are left alone: their valuation paths add qty x incoming_rate
-incrementally, so the receipt's step already equals the transfer value.
+Serial/batch rows are left alone: ERPNext adds the bundle's value (qty x entry rate) to the
+balance as it is, and the BNS bundle patch (utils._apply_bns_transfer_rate_bundle_patch) prices
+those entries at the transfer rate, so the receipt's step already equals the transfer value.
 """
 
 from __future__ import annotations
@@ -194,7 +195,7 @@ def conserve_transfer_value_in_engine(engine, sle, transfer_rate, svd_before, do
 	if cint(sle.get("is_cancelled")):
 		return
 	if sle.get("serial_and_batch_bundle") or sle.get("serial_no") or sle.get("batch_no"):
-		return  # incremental valuation paths already step by qty x incoming_rate
+		return  # bundle-valued: the step is qty x the bundle entry rate (the transfer rate)
 
 	precision = _currency_precision(engine)
 	conserved = flt(flt(sle.get("actual_qty")) * flt(transfer_rate), precision)

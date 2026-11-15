@@ -218,3 +218,103 @@ def find_unconserved_transfer_receipts(
 			as_dict=True,
 		)
 	return rows
+
+
+def find_batch_receipts_at_wrong_rate(
+	company: str | None = None,
+	from_date: str | None = None,
+	voucher_types: tuple = ("Purchase Receipt", "Purchase Invoice"),
+) -> list[dict]:
+	"""BNS internal receipts (PR, update-stock PI) whose serial/batch bundle is not priced at
+	the transfer rate.
+
+	Before the bundle patch, ERPNext priced these bundles at the receipt's own valuation rate
+	(the invoice rate) while the SLE showed the transfer rate, so the stock value was wrong
+	although every document matched. Each voucher is listed once with the value gap
+	(transfer value - booked value). Only receipts on or after the Accounting Rewrite cutoff.
+	"""
+	from business_needed_solutions.bns_branch_accounting.utils import (
+		_bundle_entries_off_rate,
+		_get_accounting_rewrite_cutoff_date,
+		_get_bns_transfer_rate_for_sle,
+	)
+
+	cutoff = _get_accounting_rewrite_cutoff_date()
+	if not cutoff:
+		return []
+	start = max(getdate(cutoff), getdate(from_date)) if from_date else getdate(cutoff)
+	company_condition = "AND sle.company = %(company)s" if company else ""
+	rows = frappe.db.sql(
+		f"""
+		SELECT sle.name, sle.voucher_type, sle.voucher_no, sle.voucher_detail_no, sle.item_code,
+			sle.warehouse, sle.posting_date, sle.actual_qty, sle.stock_value_difference,
+			sle.serial_and_batch_bundle
+		FROM `tabStock Ledger Entry` sle
+		WHERE sle.voucher_type IN %(voucher_types)s
+			AND sle.is_cancelled = 0 AND sle.actual_qty > 0
+			AND IFNULL(sle.serial_and_batch_bundle, '') != ''
+			AND sle.posting_date >= %(start)s {company_condition}
+		ORDER BY sle.posting_date, sle.posting_time, sle.creation
+		""",
+		{"start": start, "company": company, "voucher_types": tuple(voucher_types)},
+		as_dict=True,
+	)
+	out: dict[tuple, dict] = {}
+	for r in rows:
+		rate = _get_bns_transfer_rate_for_sle(r)
+		if rate is None:
+			continue
+		if not _bundle_entries_off_rate(r.serial_and_batch_bundle, rate):
+			continue
+		entries = frappe.get_all(
+			"Serial and Batch Entry",
+			filters={"parent": r.serial_and_batch_bundle},
+			fields=["qty", "incoming_rate"],
+		)
+		gap = flt(flt(r.actual_qty) * flt(rate) - flt(r.stock_value_difference), 2)
+		key = (r.voucher_type, r.voucher_no)
+		voucher = out.setdefault(key, {
+			"voucher_type": r.voucher_type, "voucher_no": r.voucher_no,
+			"posting_date": r.posting_date, "rows": 0, "gap": 0.0, "items": [],
+		})
+		voucher["rows"] += 1
+		voucher["gap"] = flt(voucher["gap"] + gap, 2)
+		voucher["items"].append({
+			"item_code": r.item_code, "qty": flt(r.actual_qty), "transfer_rate": flt(rate),
+			"bundle_rates": sorted({flt(e.incoming_rate, 2) for e in entries}),
+			"booked": flt(r.stock_value_difference, 2), "gap": gap,
+		})
+	return list(out.values())
+
+
+def repair_batch_receipts_at_wrong_rate(
+	company: str | None = None, from_date: str | None = None, dry_run: int = 1
+) -> dict:
+	"""Queue one Transaction Repost Item Valuation per receipt found by
+	find_batch_receipts_at_wrong_rate. The repost re-prices the bundle at the transfer rate
+	(bundle patch), revalues every later row and rebuilds GL; the BNS after-repost hooks
+	rewrite the transfer GL. dry_run (default) only lists them.
+
+	    bench --site <site> execute \
+	        business_needed_solutions.bns_branch_accounting.ledger_chain_repair.repair_batch_receipts_at_wrong_rate \
+	        --kwargs "{'dry_run': 0}"
+	"""
+	from business_needed_solutions.bns_branch_accounting.transfer_value_conservation import (
+		queue_transfer_rate_repost,
+	)
+
+	found = find_batch_receipts_at_wrong_rate(company=company, from_date=from_date)
+	result = {
+		"dry_run": bool(cint(dry_run)), "vouchers": len(found),
+		"gap": flt(sum(v["gap"] for v in found), 2), "queued": [], "not_queued": [], "found": found,
+	}
+	if cint(dry_run):
+		return result
+	for v in found:
+		if queue_transfer_rate_repost(v["voucher_type"], v["voucher_no"], context="batch_bundle_rate_repair"):
+			result["queued"].append(v["voucher_no"])
+		else:
+			result["not_queued"].append(v["voucher_no"])
+	if not frappe.flags.in_test:
+		frappe.db.commit()
+	return result

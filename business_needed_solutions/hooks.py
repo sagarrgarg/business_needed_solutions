@@ -240,6 +240,7 @@ doc_events = {
         "validate": "business_needed_solutions.bns_branch_accounting.utils.bns_block_direct_asset_movement"
     },
     "Batch": {
+        "before_naming": "business_needed_solutions.business_needed_solutions.overrides.batch_naming.bns_batch_before_naming",
         "autoname": "business_needed_solutions.business_needed_solutions.overrides.batch_naming.bns_batch_autoname"
     },
     "Stock Ledger Entry": {

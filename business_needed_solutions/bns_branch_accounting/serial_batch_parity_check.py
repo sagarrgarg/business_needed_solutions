@@ -44,14 +44,16 @@ def enforce_internal_batch_serial_parity(doc, method=None):
         if not source_item:
             continue
 
-        src_serials, src_batches = _extract(source_item, has_serial, has_batch)
-        if not src_serials and not src_batches:
+        src = _extract(source_item, has_serial, has_batch)
+        if not src.serials and not src.batches:
             # Source itself carries no serial/batch (e.g. tracking enabled later) - nothing to enforce.
             continue
 
-        tgt_serials, tgt_batches = _extract(item, has_serial, has_batch)
-        _assert_serial_parity(item, src_serials, tgt_serials)
-        _assert_batch_parity(item, src_batches, tgt_batches)
+        tgt = _extract(item, has_serial, has_batch)
+        _assert_serial_parity(item, src.serials, tgt.serials)
+        _assert_batch_parity(item, src.batches, tgt.batches)
+        if has_serial and has_batch:
+            _assert_serial_batch_pairs(item, src.serial_batch, tgt.serial_batch)
 
 
 def _tracking(item_code):
@@ -64,29 +66,49 @@ def _split_serials(text):
 
 
 def _extract(row_like, has_serial, has_batch):
-    """Return (set_of_serials, {batch_no: abs_qty}) from a doc/row (bundle or legacy)."""
+    """Return frappe._dict(serials=set, batches={batch_no: abs_qty}, serial_batch={serial_no: batch_no}).
+
+    Bundle rows are read straight from `Serial and Batch Entry` and summed here.
+    ERPNext's `get_batches_from_bundle` (v15 and v16) returns `frappe._dict(entries)`,
+    which keeps only the LAST entry per batch: a serial+batch bundle has one entry per
+    serial, so the per-batch qty collapses to one serial's qty and a serial moved to a
+    different batch is invisible. Summing the rows ourselves gives the real batch qty
+    and the serial -> batch pairing.
+    """
     serials = set()
     batches = {}
+    serial_batch = {}
     bundle = row_like.get("serial_and_batch_bundle")
 
     if bundle:
-        if has_serial:
-            from erpnext.stock.serial_batch_bundle import get_serial_nos_from_bundle
-
-            serials = set(get_serial_nos_from_bundle(bundle) or [])
-        if has_batch:
-            from erpnext.stock.serial_batch_bundle import get_batches_from_bundle
-
-            for batch_no, qty in (get_batches_from_bundle(bundle) or {}).items():
-                batches[batch_no] = batches.get(batch_no, 0.0) + abs(flt(qty))
+        for entry in _bundle_entries(bundle):
+            serial_no = (entry.get("serial_no") or "").strip()
+            batch_no = (entry.get("batch_no") or "").strip()
+            if has_serial and serial_no:
+                serials.add(serial_no)
+                if has_batch and batch_no:
+                    serial_batch[serial_no] = batch_no
+            if has_batch and batch_no:
+                batches[batch_no] = batches.get(batch_no, 0.0) + abs(flt(entry.get("qty")))
     else:
+        legacy_batch = (row_like.get("batch_no") or "").strip() if has_batch else ""
         if has_serial and row_like.get("serial_no"):
             serials = _split_serials(row_like.get("serial_no"))
-        if has_batch and row_like.get("batch_no"):
-            qty = abs(flt(row_like.get("stock_qty") or row_like.get("qty")))
-            batches[row_like.get("batch_no")] = qty
+            if legacy_batch:
+                serial_batch = {s: legacy_batch for s in serials}
+        if legacy_batch:
+            batches[legacy_batch] = abs(flt(row_like.get("stock_qty") or row_like.get("qty")))
 
-    return serials, batches
+    return frappe._dict(serials=serials, batches=batches, serial_batch=serial_batch)
+
+
+def _bundle_entries(bundle):
+    return frappe.get_all(
+        "Serial and Batch Entry",
+        filters={"parent": bundle},
+        fields=["serial_no", "batch_no", "qty"],
+        order_by="idx",
+    )
 
 
 def _assert_serial_parity(item, src, tgt):
@@ -131,6 +153,23 @@ def _assert_batch_parity(item, src, tgt):
                 ),
                 title=_("Batch Parity Failed"),
             )
+
+
+def _assert_serial_batch_pairs(item, src, tgt):
+    """Each serial must arrive in the batch it left in (serial+batch items)."""
+    moved = sorted(
+        f"{serial_no} ({src[serial_no]} -> {tgt[serial_no]})"
+        for serial_no in set(src) & set(tgt)
+        if src[serial_no] != tgt[serial_no]
+    )
+    if not moved:
+        return
+    frappe.throw(
+        _("Row {0} ({1}): serial numbers must stay in the batch they were transferred in - {2}.").format(
+            item.idx, bold(item.item_code), _fmt(moved)
+        ),
+        title=_("Batch Parity Failed"),
+    )
 
 
 def _fmt(values):

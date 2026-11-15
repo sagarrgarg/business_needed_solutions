@@ -43,8 +43,11 @@ from erpnext.stock.stock_ledger import (
 	NegativeStockError,
 	get_previous_sle,
 	get_future_sle_with_negative_qty,
-	get_future_sle_with_negative_batch_qty,
 	is_negative_with_precision,
+)
+
+from business_needed_solutions.business_needed_solutions.overrides.batch_stock_ledger import (
+	find_negative_batch_point,
 )
 
 
@@ -114,11 +117,19 @@ def validate_sle_negative_stock_cutoff(doc, method=None):
 			row["voucher_no"],
 		)
 
-	# Step 3 — batch-level check (legacy batch_no or Serial & Batch Bundle).
-	if doc.batch_no:
-		_check_batch(args, doc.batch_no)
-	elif doc.serial_and_batch_bundle:
-		_check_sbb_batches(args, doc.serial_and_batch_bundle)
+	# Step 3 — batch level: bundle entries and legacy batch_no rows
+	# (SLE.batch_no is empty on bundle rows, so ERPNext's SLE-only query misses them).
+	point = find_negative_batch_point(args)
+	if point:
+		_throw_batch(
+			abs(flt(point.qty)),
+			point.batch_no,
+			args["warehouse"],
+			point.posting_date,
+			point.posting_time,
+			point.voucher_type,
+			point.voucher_no,
+		)
 
 
 def _should_restrict(posting_date):
@@ -207,30 +218,6 @@ def _diff_threshold():
 	"""Same threshold ERPNext uses in validate_negative_stock."""
 	prec = _precision()
 	return 0.0001 if prec <= 4 else 10 ** (-prec)
-
-
-def _check_batch(args, batch_no):
-	batch_args = dict(args)
-	batch_args["batch_no"] = batch_no
-	neg = get_future_sle_with_negative_batch_qty(batch_args)
-	if is_negative_with_precision(neg, is_batch=True):
-		row = neg[0]
-		_throw_batch(
-			abs(row["cumulative_total"]),
-			batch_no,
-			args["warehouse"],
-			row["posting_date"],
-			row["posting_time"],
-			row["voucher_type"],
-			row["voucher_no"],
-		)
-
-
-def _check_sbb_batches(args, bundle_id):
-	from erpnext.stock.serial_batch_bundle import get_batch_nos
-
-	for batch_no in (get_batch_nos(bundle_id) or {}):
-		_check_batch(args, batch_no)
 
 
 def _throw(deficit, item_code, warehouse, posting_date, posting_time, voucher_type, voucher_no):

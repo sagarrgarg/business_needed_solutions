@@ -730,3 +730,103 @@ class TestChainRepair(LedgerTestCase):
 		rows = self.assert_chain_consistent(item)
 		self.assertEqual(ledger_chain_repair.find_chain_breaks(item_code=item), [])
 		self.assertAlmostEqual(self.row_of(rows, transfer).stock_value_difference, 3000, places=2)
+
+
+# ======================================================================================
+# F. Serial/batch receipts: the bundle is priced at the transfer rate
+# ======================================================================================
+
+
+class TestBatchedReceipt(LedgerTestCase):
+	"""ERPNext values a batched row from its Serial and Batch Bundle, which it prices from the
+	voucher row's own valuation rate. The BNS bundle patch makes it use the transfer rate."""
+
+	def batch_item(self, code):
+		name = f"BNS-TVC-B-{code}"
+		if not frappe.db.exists("Item", name):
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": name,
+					"item_name": name,
+					"item_group": frappe.db.get_value("Item Group", {"is_group": 0}) or "All Item Groups",
+					"stock_uom": "Nos",
+					"is_stock_item": 1,
+					"valuation_method": "Moving Average",
+					"gst_hsn_code": "61149090",
+					"has_batch_no": 1,
+					"create_new_batch": 1,
+					"batch_number_series": f"BTVC{code}-.#####",
+				}
+			).insert()
+		return name
+
+	def bundle_rates(self, se):
+		bundle = frappe.db.get_value(
+			"Stock Ledger Entry",
+			{"voucher_no": se.name, "is_cancelled": 0, "actual_qty": (">", 0)},
+			"serial_and_batch_bundle",
+		)
+		self.assertTrue(bundle, "receipt has no Serial and Batch Bundle")
+		return {flt(r) for r in frappe.get_all("Serial and Batch Entry", {"parent": bundle}, pluck="incoming_rate")}
+
+	def test_batched_receipt_is_priced_at_transfer_rate(self):
+		item = self.batch_item("A")
+		se = self.receive(item, 600, 363.53, days_ago=5, transfer_rate=906.27)
+		rows = self.assert_chain_consistent(item)
+		row = self.row_of(rows, se)
+		self.assertAlmostEqual(row.stock_value_difference, 600 * 906.27, places=2)
+		self.assertAlmostEqual(row.incoming_rate, 906.27, places=2)
+		self.assertEqual(self.bundle_rates(se), {906.27})
+
+	def test_batched_receipt_without_transfer_rate_keeps_erpnext_rate(self):
+		item = self.batch_item("B")
+		se = self.receive(item, 10, 363.53, days_ago=5)
+		row = self.row_of(self.assert_chain_consistent(item), se)
+		self.assertAlmostEqual(row.stock_value_difference, 3635.3, places=2)
+		self.assertEqual(self.bundle_rates(se), {363.53})
+
+	def test_old_wrong_bundle_is_found_and_repost_fixes_it(self):
+		"""Booked before the fix: the SLE shows the transfer rate, the bundle the invoice rate."""
+		item = self.batch_item("C")
+		se = self.receive(item, 600, 363.53, days_ago=5)  # priced by ERPNext alone
+		sle = frappe.db.get_value(
+			"Stock Ledger Entry", {"voucher_no": se.name, "is_cancelled": 0}, ["name", "voucher_detail_no"], as_dict=True
+		)
+		frappe.db.set_value("Stock Ledger Entry", sle.name, "incoming_rate", 906.27)  # the old SLE patch
+		self.transfer_rates[se.name] = 906.27
+
+		# The sync's stale check now looks at the bundle, not only the SLE rate.
+		self.assertEqual(
+			bns_utils._count_sle_rows_at_stale_transfer_rate("Stock Entry", se.name, {sle.voucher_detail_no: 906.27}),
+			1,
+		)
+		with patch.object(bns_utils, "_get_accounting_rewrite_cutoff_date", return_value=add_days(nowdate(), -30)):
+			found = ledger_chain_repair.find_batch_receipts_at_wrong_rate(voucher_types=("Stock Entry",))
+		mine = [v for v in found if v["voucher_no"] == se.name]
+		self.assertEqual(len(mine), 1)
+		self.assertAlmostEqual(mine[0]["gap"], 600 * (906.27 - 363.53), places=2)
+
+		self.assertTrue(tvc.queue_transfer_rate_repost("Stock Entry", se.name))  # runs now under tests
+		row = self.row_of(self.assert_chain_consistent(item), se)
+		self.assertAlmostEqual(row.stock_value_difference, 600 * 906.27, places=2)
+		self.assertEqual(self.bundle_rates(se), {906.27})
+		self.assertEqual(
+			bns_utils._count_sle_rows_at_stale_transfer_rate("Stock Entry", se.name, {sle.voucher_detail_no: 906.27}),
+			0,
+		)
+
+	def test_zero_transfer_rate_on_a_batch(self):
+		item = self.batch_item("D")
+		se = self.receive(item, 5, 100, days_ago=5, transfer_rate=0.0)
+		row = self.row_of(self.assert_chain_consistent(item), se)
+		self.assertAlmostEqual(row.stock_value_difference, 0, places=2)
+		self.assertEqual(self.bundle_rates(se), {0.0})
+
+	def test_rejected_and_outward_bundles_are_not_touched(self):
+		self.assertIsNone(bns_utils._get_bns_transfer_rate_for_bundle(
+			frappe._dict(type_of_transaction="Outward", voucher_detail_no="X", voucher_no="V")
+		))
+		self.assertIsNone(bns_utils._get_bns_transfer_rate_for_bundle(
+			frappe._dict(type_of_transaction="Inward", is_rejected=1, voucher_detail_no="X", voucher_no="V")
+		))

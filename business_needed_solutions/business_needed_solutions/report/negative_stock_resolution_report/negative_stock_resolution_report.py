@@ -4,6 +4,9 @@
 import frappe
 from frappe import _
 from frappe.utils import flt
+from business_needed_solutions.business_needed_solutions.overrides.batch_stock_ledger import (
+    get_batch_qty_by_warehouse,
+)
 from business_needed_solutions.business_needed_solutions.report.stock_ledger_negative_episodes.stock_ledger_negative_episodes import (
     get_stock_ledger_data,
     find_negative_episodes
@@ -251,22 +254,11 @@ def get_bin_qty(item_code, warehouse, uom=None, batch_no=None):
     """
     Get actual stock quantity in specified UOM.
 
-    When batch_no is provided, computes qty from Stock Ledger Entries
-    since the Bin doctype does not track batch-level balances.
+    When batch_no is provided, reads the batch ledger (bundle entries and legacy
+    batch_no rows), since the Bin doctype does not track batch-level balances.
     """
     if batch_no:
-        bin_qty = flt(
-            frappe.db.sql(
-                """
-                SELECT SUM(actual_qty)
-                FROM `tabStock Ledger Entry`
-                WHERE item_code = %s AND warehouse = %s AND batch_no = %s
-                  AND is_cancelled = 0
-                """,
-                (item_code, warehouse, batch_no),
-            )[0][0]
-            or 0
-        )
+        bin_qty = get_batch_qty_by_warehouse(item_code, batch_no).get(warehouse, 0)
     else:
         bin_qty = frappe.db.get_value(
             "Bin",
@@ -285,25 +277,16 @@ def find_alternative_warehouse(item_code, required_qty, current_warehouse, batch
     """
     Find alternative warehouse with sufficient stock.
 
-    When batch_no is provided, queries SLE aggregates instead of the Bin
-    doctype to find warehouses with batch-level availability.
+    When batch_no is provided, reads the batch ledger (bundle entries and legacy
+    batch_no rows) instead of the Bin doctype.
     """
     if batch_no:
-        rows = frappe.db.sql(
-            """
-            SELECT warehouse, SUM(actual_qty) as total_qty
-            FROM `tabStock Ledger Entry`
-            WHERE item_code = %s AND warehouse != %s AND batch_no = %s
-              AND is_cancelled = 0
-            GROUP BY warehouse
-            HAVING total_qty >= %s
-            ORDER BY total_qty DESC
-            LIMIT 1
-            """,
-            (item_code, current_warehouse, batch_no, required_qty),
-            as_dict=True,
-        )
-        return rows[0].warehouse if rows else ""
+        candidates = [
+            (qty, wh)
+            for wh, qty in get_batch_qty_by_warehouse(item_code, batch_no).items()
+            if wh != current_warehouse and qty >= flt(required_qty)
+        ]
+        return max(candidates)[1] if candidates else ""
 
     bins = frappe.get_all(
         "Bin",

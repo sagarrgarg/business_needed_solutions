@@ -867,40 +867,62 @@ def _check_transfer_rate_missing_for_pr(doc):
 # SLE validation
 # ---------------------------------------------------------------------------
 
-def _check_sle_for_pr(doc):
+# Value tolerance for a receipt row: 1 paisa per unit (rate rounding on the bundle entries
+# and the SLE), never below 1 paisa for the row.
+_TRANSFER_VALUE_TOLERANCE_PER_UNIT = 0.01
+
+
+def _transfer_rates_by_row(doc):
+	"""{item row name: bns_transfer_rate} for rows with a positive transfer rate."""
+	return {
+		row.name: flt(row.get("bns_transfer_rate") or 0)
+		for row in (doc.get("items") or [])
+		if flt(row.get("bns_transfer_rate") or 0) > 0
+	}
+
+
+def _transfer_value_tolerance(qty):
+	return max(_TRANSFER_VALUE_TOLERANCE_PER_UNIT * abs(flt(qty)), _TRANSFER_VALUE_TOLERANCE_PER_UNIT)
+
+
+def _check_sle_transfer_value(voucher_type, voucher_no, transfer_rates, item_warehouses=None):
+	"""Issues for the forward (incoming) SLE rows of an internal receipt.
+
+	1. SLE incoming_rate != bns_transfer_rate.
+	2. The value booked (stock_value_difference) != actual_qty x bns_transfer_rate:
+	   - Serial/batch rows: ERPNext values them from the Serial and Batch Bundle, not from the
+	     SLE rate, so a bundle priced at the invoice rate books the wrong value while the SLE
+	     rate looks right. The entries of a multi-batch receipt may carry per-batch rates (the
+	     sender's per-batch cost); only their total has to equal qty x transfer rate.
+	   - Plain rows: only when the bin was not negative before the receipt. Into a negative bin
+	     the transfer-value conservation may legitimately leave a residual (it cannot always be
+	     applied as a valid rate); those rows are listed by
+	     ledger_chain_repair.find_unconserved_transfer_receipts, not here.
+
+	Args:
+		transfer_rates: {voucher_detail_no: bns_transfer_rate} (positive rates only).
+		item_warehouses: optional {voucher_detail_no: accepted warehouse}; SLE rows in another
+			warehouse (the rejected warehouse) are not compared on value.
 	"""
-	Validate SLE incoming_rate against bns_transfer_rate for PR items.
-
-	Returns:
-		list of issue description strings
-	"""
-	pr_meta = frappe.get_meta("Purchase Receipt Item")
-	if not pr_meta.has_field("bns_transfer_rate"):
-		return []
-
-	items = doc.get("items") or []
-	transfer_rates = {}
-	for row in items:
-		rate = flt(row.get("bns_transfer_rate") or 0)
-		if rate > 0:
-			transfer_rates[row.name] = rate
-
 	if not transfer_rates:
 		return []
+	item_warehouses = item_warehouses or {}
 
 	sle_rows = frappe.db.sql(
 		"""
-		SELECT name, voucher_detail_no, actual_qty, incoming_rate
+		SELECT name, voucher_detail_no, warehouse, actual_qty, incoming_rate,
+			stock_value_difference, qty_after_transaction, serial_and_batch_bundle
 		FROM `tabStock Ledger Entry`
-		WHERE voucher_type = 'Purchase Receipt' AND voucher_no = %s AND is_cancelled = 0
+		WHERE voucher_type = %s AND voucher_no = %s AND is_cancelled = 0
 		""",
-		(doc.name,),
+		(voucher_type, voucher_no),
 		as_dict=True,
 	) or []
 
 	issues = []
 	for sle in sle_rows:
-		if flt(sle.get("actual_qty") or 0) <= 0:
+		qty = flt(sle.get("actual_qty") or 0)
+		if qty <= 0:
 			continue
 		expected_rate = transfer_rates.get(sle.get("voucher_detail_no"))
 		if not expected_rate:
@@ -910,13 +932,56 @@ def _check_sle_for_pr(doc):
 			issues.append(
 				f"SLE {sle.name}: incoming_rate={actual_rate}, expected={expected_rate}"
 			)
+			continue
+
+		accepted_warehouse = item_warehouses.get(sle.get("voucher_detail_no"))
+		if accepted_warehouse and sle.get("warehouse") != accepted_warehouse:
+			continue
+		bundle = sle.get("serial_and_batch_bundle")
+		if not bundle:
+			prior_qty = flt(sle.get("qty_after_transaction") or 0) - qty
+			if prior_qty < 0:
+				continue  # negative bin: a conservation residual may be legitimate
+		expected_value = flt(qty * expected_rate, 2)
+		booked = flt(sle.get("stock_value_difference") or 0, 2)
+		if abs(booked - expected_value) <= _transfer_value_tolerance(qty):
+			continue
+		if bundle:
+			issues.append(
+				f"SLE {sle.name}: serial/batch bundle {bundle} valued at {booked} "
+				f"(~{flt(booked / qty, 2)}/unit), expected {qty:g} x transfer rate {expected_rate} "
+				f"= {expected_value} (gap {flt(expected_value - booked, 2)}); the SLE rate is right "
+				"but the bundle is priced at another rate - repost re-prices it"
+			)
+		else:
+			issues.append(
+				f"SLE {sle.name}: stock value booked {booked}, expected {qty:g} x transfer rate "
+				f"{expected_rate} = {expected_value} (gap {flt(expected_value - booked, 2)})"
+			)
 
 	return issues
 
 
+def _check_sle_for_pr(doc):
+	"""
+	Validate SLE incoming_rate and booked value against bns_transfer_rate for PR items.
+
+	Returns:
+		list of issue description strings
+	"""
+	pr_meta = frappe.get_meta("Purchase Receipt Item")
+	if not pr_meta.has_field("bns_transfer_rate"):
+		return []
+
+	return _check_sle_transfer_value(
+		"Purchase Receipt", doc.name, _transfer_rates_by_row(doc), _item_warehouses(doc)
+	)
+
+
 def _check_sle_for_pi(doc):
 	"""
-	Validate SLE incoming_rate against bns_transfer_rate for PI items (update_stock flow).
+	Validate SLE incoming_rate and booked value against bns_transfer_rate for PI items
+	(update_stock flow).
 
 	Returns:
 		list of issue description strings
@@ -928,40 +993,13 @@ def _check_sle_for_pi(doc):
 	if not pi_meta.has_field("bns_transfer_rate"):
 		return []
 
-	items = doc.get("items") or []
-	transfer_rates = {}
-	for row in items:
-		rate = flt(row.get("bns_transfer_rate") or 0)
-		if rate > 0:
-			transfer_rates[row.name] = rate
+	return _check_sle_transfer_value(
+		"Purchase Invoice", doc.name, _transfer_rates_by_row(doc), _item_warehouses(doc)
+	)
 
-	if not transfer_rates:
-		return []
 
-	sle_rows = frappe.db.sql(
-		"""
-		SELECT name, voucher_detail_no, actual_qty, incoming_rate
-		FROM `tabStock Ledger Entry`
-		WHERE voucher_type = 'Purchase Invoice' AND voucher_no = %s AND is_cancelled = 0
-		""",
-		(doc.name,),
-		as_dict=True,
-	) or []
-
-	issues = []
-	for sle in sle_rows:
-		if flt(sle.get("actual_qty") or 0) <= 0:
-			continue
-		expected_rate = transfer_rates.get(sle.get("voucher_detail_no"))
-		if not expected_rate:
-			continue
-		actual_rate = flt(sle.get("incoming_rate") or 0)
-		if abs(actual_rate - expected_rate) > 0.01:
-			issues.append(
-				f"SLE {sle.name}: incoming_rate={actual_rate}, expected={expected_rate}"
-			)
-
-	return issues
+def _item_warehouses(doc):
+	return {row.name: row.get("warehouse") for row in (doc.get("items") or []) if row.get("warehouse")}
 
 
 # ---------------------------------------------------------------------------
@@ -2096,7 +2134,6 @@ def _process_sle_repost_batch(documents):
 	Args:
 		documents: list of dicts [{voucher_type, voucher_no}, ...].
 	"""
-	from erpnext.controllers.stock_controller import create_repost_item_valuation_entry
 	from business_needed_solutions.bns_branch_accounting.utils import _voucher_owns_sle
 
 	def _riv(vt, vn, vdoc):
@@ -2105,15 +2142,7 @@ def _process_sle_repost_batch(documents):
 		# and any downstream receivers, are reposted on their own).
 		if not _voucher_owns_sle(vt, vdoc):
 			return
-		create_repost_item_valuation_entry({
-			"based_on": "Transaction",
-			"voucher_type": vt,
-			"voucher_no": vn,
-			"posting_date": vdoc.posting_date,
-			"posting_time": getattr(vdoc, "posting_time", "00:00:00") or "00:00:00",
-			"company": vdoc.company,
-			"allow_zero_rate": 1,
-		})
+		_queue_transaction_repost(vt, vn, context="audit_sle_repost")
 
 	success = 0
 	errors = 0
@@ -2253,6 +2282,22 @@ def fix_transfer_rate_for_audit_documents(documents):
 	}
 
 
+def _queue_transaction_repost(voucher_type, voucher_no, context):
+	"""Queue one Transaction-based Repost Item Valuation for the voucher.
+
+	Goes through transfer_value_conservation.queue_transfer_rate_repost: it skips a voucher
+	that already has a repost pending (the rate syncs run just before may have queued one)
+	and stops a voucher that keeps needing reposts. A Transaction repost re-runs the stock
+	engine for the voucher, which re-prices a serial/batch receipt's bundle at the transfer
+	rate (BNS bundle patch) and conserves qty x transfer rate on plain rows.
+	"""
+	from business_needed_solutions.bns_branch_accounting.transfer_value_conservation import (
+		queue_transfer_rate_repost,
+	)
+
+	return queue_transfer_rate_repost(voucher_type, voucher_no, context=context)
+
+
 def _repost_one_voucher(voucher_type, voucher_no, doc):
 	"""Repost a single voucher via RIV (when it owns SLE) + RAL.
 
@@ -2260,22 +2305,13 @@ def _repost_one_voucher(voucher_type, voucher_no, doc):
 	rate; RAL deletes and regenerates the full GL through the BNS-patched
 	get_gl_entries. update_stock=0 invoices own no SLE, so they are GL-only (RAL).
 	"""
-	from erpnext.controllers.stock_controller import create_repost_item_valuation_entry
 	from business_needed_solutions.bns_branch_accounting.utils import (
 		_apply_bns_internal_gl_rewrite_patch,
 		_voucher_owns_sle,
 	)
 
 	if _voucher_owns_sle(voucher_type, doc):
-		create_repost_item_valuation_entry({
-			"based_on": "Transaction",
-			"voucher_type": voucher_type,
-			"voucher_no": voucher_no,
-			"posting_date": doc.posting_date,
-			"posting_time": getattr(doc, "posting_time", "00:00:00") or "00:00:00",
-			"company": doc.company,
-			"allow_zero_rate": 1,
-		})
+		_queue_transaction_repost(voucher_type, voucher_no, context="audit_gl_repost")
 
 	_apply_bns_internal_gl_rewrite_patch()
 	ral = frappe.new_doc("Repost Accounting Ledger")
