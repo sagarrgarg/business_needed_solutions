@@ -45,6 +45,13 @@ frappe.query_reports["Internal Transfer Receive Mismatch"] = {
 			"fieldtype": "Date",
 			"default": frappe.datetime.get_today(),
 			"reqd": 0
+		},
+		{
+			"fieldname": "older_than_days",
+			"label": __("Older than (days)"),
+			"fieldtype": "Int",
+			"description": __("Receiver-missing rows: only Delivery Notes / Sales Invoices older than this many days"),
+			"reqd": 0
 		}
 	],
 	"onload": function(report) {

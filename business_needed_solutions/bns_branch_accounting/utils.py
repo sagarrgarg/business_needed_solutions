@@ -1499,7 +1499,19 @@ def validate_internal_purchase_receipt_linkage(doc, method: Optional[str] = None
 
 
 def _validate_internal_pr_one_to_one_parity(doc) -> None:
-    """Validate strict one-to-one parity for internal PR against its source."""
+    """Strict one-to-one parity for an internal PR against its DN / SI: rows, amounts,
+    item-level GST, GST per head, totals, and (on submit) batches and serials.
+    See internal_parity."""
+    source_name = (doc.get("bns_inter_company_reference") or "").strip()
+    if not source_name:
+        return
+    from business_needed_solutions.bns_branch_accounting.internal_parity import assert_internal_pair
+
+    assert_internal_pair(doc, force=True)
+
+
+def _legacy_validate_internal_pr_one_to_one_parity(doc) -> None:
+    """Previous PR parity (kept for reference; replaced by internal_parity)."""
     source_name = (doc.get("bns_inter_company_reference") or "").strip()
     if not source_name:
         return
@@ -2143,7 +2155,7 @@ def validate_internal_purchase_invoice_transfer_rate(doc, method: Optional[str] 
 
 
 def validate_internal_purchase_invoice_si_parity(doc, method: Optional[str] = None) -> None:
-    """Block PI submit when items/amounts/taxes diverge from the linked Sales Invoice.
+    """Block PI submit when anything diverges from the linked Sales Invoice / Purchase Receipt.
 
     Runs on before_submit for BNS internal different-GSTIN PI flows.
     Drafts can be edited freely; only submission is gated.
@@ -2161,8 +2173,13 @@ def validate_internal_purchase_invoice_si_parity(doc, method: Optional[str] = No
     if not is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc)):
         return
 
-    si_name = _resolve_si_name_for_internal_pi(doc)
-    if not si_name:
+    from business_needed_solutions.bns_branch_accounting.internal_parity import (
+        assert_internal_pair,
+        detect_links,
+    )
+
+    links = detect_links(doc)  # SI -> PI, and PR -> PI when made from a receipt
+    if not links:
         return
 
     company_gstin = (doc.get("company_gstin") or "").strip()
@@ -2170,45 +2187,9 @@ def validate_internal_purchase_invoice_si_parity(doc, method: Optional[str] = No
     if company_gstin and billing_gstin and company_gstin == billing_gstin:
         return
 
-    tolerance = flt(
-        frappe.db.get_single_value("BNS Branch Accounting Settings", "si_pi_amount_tolerance") or 0
-    )
-    result = validate_si_pi_items_match(si_name, doc.name, check_all=True, amount_tolerance=tolerance)
-    if result.get("match"):
-        return
-
-    errors: List[str] = []
-    for item in (result.get("missing_items") or [])[:5]:
-        errors.append(_("Item {0}: SI qty {1}, PI missing").format(item["item_code"], item["si_qty"]))
-    for item in (result.get("qty_mismatches") or [])[:5]:
-        errors.append(_("Item {0}: SI qty {1}, PI qty {2}").format(item["item_code"], item["si_qty"], item["pi_qty"]))
-    for item in (result.get("taxable_value_mismatches") or [])[:5]:
-        errors.append(
-            _("Item {0}: SI taxable {1:.2f}, PI taxable {2:.2f}").format(
-                item["item_code"], item["si_taxable_value"], item["pi_taxable_value"]
-            )
-        )
-    gt = result.get("grand_total_mismatch")
-    if gt:
-        errors.append(
-            _("Grand Total: SI {0:.2f} vs PI {1:.2f} (diff {2:.2f})").format(
-                gt["si_total"], gt["pi_total"], abs(gt["diff"])
-            )
-        )
-    tx = result.get("tax_mismatch")
-    if tx:
-        errors.append(
-            _("Total Taxes: SI {0:.2f} vs PI {1:.2f} (diff {2:.2f})").format(
-                tx["si_tax"], tx["pi_tax"], abs(tx["diff"])
-            )
-        )
-
-    frappe.throw(
-        _(
-            "Purchase Invoice does not match source Sales Invoice {0}:\n{1}"
-        ).format(si_name, "\n".join(errors)),
-        title=_("Internal SI-PI Parity Mismatch"),
-    )
+    # Exact copy, row by row, GST per head, batches/serials: no amount tolerance
+    # (si_pi_amount_tolerance no longer applies to internal PIs).
+    assert_internal_pair(doc, links=links, force=True)
 
 
 def _throw_si_dn_mismatch(
@@ -2598,7 +2579,9 @@ def validate_internal_sales_invoice_linkage(doc, method: Optional[str] = None) -
         return
 
     _validate_single_internal_si_per_dn(doc, dn_names)
-    _validate_internal_si_dn_one_to_one_parity(doc, dn_names)
+    from business_needed_solutions.bns_branch_accounting.internal_parity import assert_internal_pair
+
+    assert_internal_pair(doc, links=["DN->SI"], force=True)
 
 
 @frappe.whitelist()
@@ -9454,6 +9437,7 @@ def validate_si_pi_items_match(
         is_match = (
             len(missing_items) == 0 and 
             len(qty_mismatches) == 0 and 
+            len(extra_items) == 0 and 
             (not check_all or (
                 len(taxable_value_mismatches) == 0 and 
                 grand_total_mismatch is None and 

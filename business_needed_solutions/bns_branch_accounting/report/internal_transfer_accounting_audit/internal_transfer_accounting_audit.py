@@ -1020,6 +1020,9 @@ _SCOPE_LABELS = {
 	"address_parity": "Address Parity Mismatch",
 }
 
+# Differences shown per Document Parity row (the rest are counted).
+_PARITY_SHOWN = 20
+
 
 # ---------------------------------------------------------------------------
 # Main data builder
@@ -1056,6 +1059,7 @@ def _get_data(filters):
 	if "Purchase Invoice" in doc_types:
 		data.extend(_audit_purchase_invoices(filters, settings))
 
+	data.extend(_audit_document_parity(filters))
 	data.extend(_audit_cross_document_consistency(filters, settings))
 	data.extend(_audit_internal_pair_balance(filters, settings))
 	data.extend(_audit_address_parity(filters, settings))
@@ -1210,7 +1214,7 @@ def _audit_delivery_notes(filters, settings):
 	)
 
 	sql = f"""
-		SELECT dn.name, dn.posting_date, dn.company, dn.customer,
+		SELECT 'Delivery Note' AS doctype, dn.name, dn.posting_date, dn.company, dn.customer,
 			   dn.is_bns_internal_customer, dn.company_gstin, dn.billing_address_gstin,
 			   dn.status, dn.bns_allow_diff_gstin_dn_pr
 		FROM `tabDelivery Note` dn
@@ -1262,7 +1266,7 @@ def _audit_sales_invoices(filters, settings):
 	)
 
 	sql = f"""
-		SELECT si.name, si.posting_date, si.company, si.customer,
+		SELECT 'Sales Invoice' AS doctype, si.name, si.posting_date, si.company, si.customer,
 			   si.is_bns_internal_customer, si.company_gstin, si.billing_address_gstin,
 			   si.update_stock, si.is_return
 		FROM `tabSales Invoice` si
@@ -1388,7 +1392,7 @@ def _audit_purchase_receipts(filters, settings):
 	)
 
 	sql = f"""
-		SELECT pr.name, pr.posting_date, pr.company, pr.supplier,
+		SELECT 'Purchase Receipt' AS doctype, pr.name, pr.posting_date, pr.company, pr.supplier,
 			   pr.is_bns_internal_supplier, pr.bns_inter_company_reference
 		FROM `tabPurchase Receipt` pr
 		LEFT JOIN `tabSupplier` s ON pr.supplier = s.name
@@ -1453,7 +1457,7 @@ def _audit_purchase_invoices(filters, settings):
 	)
 
 	sql = f"""
-		SELECT pi.name, pi.posting_date, pi.company, pi.supplier,
+		SELECT 'Purchase Invoice' AS doctype, pi.name, pi.posting_date, pi.company, pi.supplier,
 			   pi.is_bns_internal_supplier, pi.bns_inter_company_reference,
 			   pi.bill_no, pi.update_stock, pi.is_return
 		FROM `tabPurchase Invoice` pi
@@ -1523,6 +1527,31 @@ def _audit_purchase_invoices(filters, settings):
 
 
 # ---------------------------------------------------------------------------
+# Document parity (internal_parity -- the validators' own comparison)
+# ---------------------------------------------------------------------------
+
+def _audit_document_parity(filters):
+	"""One "Document Parity" row per internal SI / PR / PI and link that differs from its
+	source, exactly as the save / submit checks compare them (internal_parity: row by
+	row through the link fields, GST per head, totals, batches / serials, no tolerance).
+	Informational: a repost cannot fix it, so the repost buttons skip these rows."""
+	from business_needed_solutions.bns_branch_accounting import internal_transfer_scan as scan
+
+	doctypes = [dt for dt in _get_doc_types_to_audit(filters) if dt in (scan.SI, scan.PR, scan.PI)]
+	rows = []
+	for f in scan.parity_findings(filters, doctypes=doctypes):
+		messages = [m.message() for m in f.mismatches]
+		shown = messages[:_PARITY_SHOWN]
+		more = f"; ... and {len(messages) - len(shown)} more" if len(messages) > len(shown) else ""
+		rows.append(_build_row(
+			{"name": f.name, "posting_date": f.posting_date, "doctype": f.doctype},
+			f.link, "Document Parity",
+			details=f"{f.link} against {f.mismatches[0].source}: " + "; ".join(shown) + more,
+		))
+	return rows
+
+
+# ---------------------------------------------------------------------------
 # Cross-document consistency audit
 # ---------------------------------------------------------------------------
 
@@ -1533,7 +1562,9 @@ def _audit_cross_document_consistency(filters, settings):
 	Checks:
 	1. Orphaned PR/PI: references a cancelled/missing source DN/SI but has BNS internal GL.
 	2. Flag mismatch: PI has internal GL but referenced SI does not (or PR vs DN).
-	3. Missing counter-document: DN/SI has BNS internal GL but no submitted PR/PI exists.
+	3. Missing counter-document: internal DN/SI after the internal-transfer cutoff whose
+	   receiver (PR / SI / PI, see internal_transfer_scan.missing_receivers) was never
+	   submitted.
 	"""
 	results = []
 	internal_accounts = {
@@ -1570,7 +1601,7 @@ def _audit_cross_document_consistency(filters, settings):
 
 	# --- Check 1 & 2: PR with orphaned/mismatched DN ---
 	pr_rows = frappe.db.sql(
-		f"""SELECT pr.name, pr.posting_date, pr.bns_inter_company_reference,
+		f"""SELECT 'Purchase Receipt' AS doctype, pr.name, pr.posting_date, pr.bns_inter_company_reference,
 		          pr.is_bns_internal_supplier, pr.supplier
 		   FROM `tabPurchase Receipt` pr
 		   WHERE pr.docstatus = 1
@@ -1619,7 +1650,7 @@ def _audit_cross_document_consistency(filters, settings):
 
 	# --- Check 1 & 2: PI with orphaned/mismatched SI ---
 	pi_rows = frappe.db.sql(
-		f"""SELECT pi.name, pi.posting_date, pi.bns_inter_company_reference,
+		f"""SELECT 'Purchase Invoice' AS doctype, pi.name, pi.posting_date, pi.bns_inter_company_reference,
 		          pi.is_bns_internal_supplier, pi.supplier, pi.is_return
 		   FROM `tabPurchase Invoice` pi
 		   WHERE pi.docstatus = 1
@@ -1652,110 +1683,17 @@ def _audit_cross_document_consistency(filters, settings):
 					details=f"PI has BNS internal GL but source SI {ref} does not.",
 				))
 
-	company_cond_dn = "AND dn.company = %s" if company else ""
+	# --- Check 3: DN / SI whose receiver was never submitted ---
+	# Same rule as the Internal Transfer Receive Mismatch report (which receiver a DN /
+	# SI needs, SI -> PR -> PI included), so the two reports agree.
+	from business_needed_solutions.bns_branch_accounting import internal_transfer_scan as scan
 
-	# --- Check 3: DN with BNS internal GL but no submitted PR/SI->PI ---
-	dn_rows = frappe.db.sql(
-		f"""SELECT dn.name, dn.posting_date, dn.is_bns_internal_customer, dn.customer,
-		          dn.company_gstin, dn.billing_address_gstin, dn.status,
-		          dn.bns_allow_diff_gstin_dn_pr
-		   FROM `tabDelivery Note` dn
-		   WHERE dn.docstatus = 1
-		     AND dn.posting_date >= %s AND dn.posting_date <= %s
-		     {company_cond_dn}
-		     AND dn.is_return = 0
-		     AND (dn.is_bns_internal_customer = 1
-		          OR dn.customer IN (SELECT name FROM tabCustomer WHERE is_bns_internal_customer = 1))
-		""",
-		(date_from, date_to, *company_vals),
-		as_dict=True,
-	) or []
-
-	for dn in dn_rows:
-		if not _has_internal_gl("Delivery Note", dn.name):
-			continue
-
-		# A diff-GSTIN DN that took the internal DN->PR path (flag or the
-		# 'BNS Internally Transferred' status) has a PURCHASE RECEIPT counter,
-		# NOT a Sales Invoice -- otherwise it is falsely flagged as a
-		# different-GSTIN DN missing its SI.
-		if _dn_routes_as_internal_pr(dn):
-			has_pr = frappe.db.exists("Purchase Receipt", {
-				"bns_inter_company_reference": dn.name,
-				"docstatus": 1,
-			})
-			if not has_pr:
-				results.append(_build_row(
-					dn, "no_counter_doc", "No Counter-Document",
-					details="Internal DN has BNS internal GL but no submitted PR references it.",
-				))
-		else:
-			linked_si = frappe.db.sql(
-				"""SELECT DISTINCT si.name FROM `tabSales Invoice Item` sii
-				   JOIN `tabSales Invoice` si ON si.name = sii.parent
-				   WHERE sii.delivery_note = %s AND si.docstatus = 1
-				   LIMIT 1""",
-				(dn.name,),
-			)
-			if not linked_si:
-				results.append(_build_row(
-					dn, "no_counter_doc", "No Counter-Document",
-					details="Different-GSTIN DN has BNS internal GL but no submitted SI is linked to it.",
-				))
-			else:
-				si_name = linked_si[0][0]
-				has_pi = frappe.db.exists("Purchase Invoice", {
-					"bns_inter_company_reference": si_name,
-					"docstatus": 1,
-				})
-				if not has_pi:
-					has_pi = frappe.db.exists("Purchase Invoice", {
-						"bill_no": si_name,
-						"docstatus": 1,
-					})
-				if not has_pi:
-					results.append(_build_row(
-						dn, "no_counter_doc", "No Counter-Document",
-						details=f"DN->SI chain exists (SI {si_name}) but no submitted PI references the SI.",
-					))
-
-	company_cond_si = "AND si.company = %s" if company else ""
-
-	# --- Check 3: SI with BNS internal GL but no submitted PI ---
-	si_rows = frappe.db.sql(
-		f"""SELECT si.name, si.posting_date, si.is_bns_internal_customer, si.customer
-		   FROM `tabSales Invoice` si
-		   WHERE si.docstatus = 1
-		     AND si.posting_date >= %s AND si.posting_date <= %s
-		     {company_cond_si}
-		     AND si.is_return = 0
-		     AND (si.is_bns_internal_customer = 1
-		          OR si.customer IN (SELECT name FROM tabCustomer WHERE is_bns_internal_customer = 1))
-		     AND si.company_gstin IS NOT NULL
-		     AND si.billing_address_gstin IS NOT NULL
-		     AND si.company_gstin != si.billing_address_gstin
-		""",
-		(date_from, date_to, *company_vals),
-		as_dict=True,
-	) or []
-
-	for si in si_rows:
-		if not _has_internal_gl("Sales Invoice", si.name):
-			continue
-		has_pi = frappe.db.exists("Purchase Invoice", {
-			"bns_inter_company_reference": si.name,
-			"docstatus": 1,
-		})
-		if not has_pi:
-			has_pi_bill = frappe.db.exists("Purchase Invoice", {
-				"bill_no": si.name,
-				"docstatus": 1,
-			})
-			if not has_pi_bill:
-				results.append(_build_row(
-					si, "no_counter_doc", "No Counter-Document",
-					details=f"SI has BNS internal GL but no submitted PI references it.",
-				))
+	for r in scan.missing_receivers(filters, include_stock=False):
+		results.append(_build_row(
+			{"name": r.name, "posting_date": r.posting_date, "doctype": r.doctype},
+			"no_counter_doc", "No Counter-Document",
+			details=f"{r.chain}: {r.reason} (age {r.age_days} days)",
+		))
 
 	return results
 
@@ -1822,7 +1760,7 @@ def _audit_internal_pair_balance(filters, settings):
 			pairs.append(f"Stock-in-Transit Dr {round(td, 2)} != Cr {round(tc, 2)} (Δ {round(td - tc, 2)})")
 		if pairs:
 			results.append(_build_row(
-				{"name": recv_no, "posting_date": posting_date},
+				{"name": recv_no, "posting_date": posting_date, "doctype": recv_dt},
 				scope, "Internal Pair Imbalance",
 				details=f"{sender_dt} {sender_no} <-> {recv_dt} {recv_no}: " + "; ".join(pairs),
 			))
@@ -1831,7 +1769,9 @@ def _audit_internal_pair_balance(filters, settings):
 	for pr in frappe.db.sql(
 		f"""SELECT name, bns_inter_company_reference AS dn, posting_date
 		   FROM `tabPurchase Receipt`
-		   WHERE docstatus=1 AND is_bns_internal_supplier=1
+		   WHERE docstatus=1 AND IFNULL(is_return, 0) = 0
+		     AND (is_bns_internal_supplier=1
+		          OR supplier IN (SELECT name FROM tabSupplier WHERE is_bns_internal_supplier = 1))
 		     AND posting_date BETWEEN %s AND %s {company_cond}
 		     AND IFNULL(bns_inter_company_reference,'') != ''""",
 		(date_from, date_to, *company_vals), as_dict=True,
@@ -1880,7 +1820,7 @@ def _audit_internal_pair_balance(filters, settings):
 			pairs.append(f"Stock-in-Transit Dr {round(t_dr, 2)} != Cr {round(t_cr, 2)} (Δ {round(t_dr - t_cr, 2)})")
 		if pairs:
 			results.append(_build_row(
-				{"name": si.name, "posting_date": si.posting_date},
+				{"name": si.name, "posting_date": si.posting_date, "doctype": "Sales Invoice"},
 				"si_linked", "Internal Pair Imbalance",
 				details=f"Chain [{', '.join(sorted(vn for _vt, vn in chain))}]: " + "; ".join(pairs),
 			))
@@ -1982,11 +1922,14 @@ def _build_row(
 		"tabPurchase Invoice": "Purchase Invoice",
 	}
 	doc_name = doc_row.get("name") or ""
-	document_type = ""
-	for dt in ("Delivery Note", "Sales Invoice", "Purchase Receipt", "Purchase Invoice"):
-		if frappe.db.exists(dt, doc_name):
-			document_type = dt
-			break
+	# The caller knows the doctype; guessing it from the name is a fallback only (names
+	# can repeat across doctypes, and it costs up to four queries per row).
+	document_type = doc_row.get("doctype") or ""
+	if not document_type:
+		for dt in ("Delivery Note", "Sales Invoice", "Purchase Receipt", "Purchase Invoice"):
+			if frappe.db.exists(dt, doc_name):
+				document_type = dt
+				break
 
 	if not details:
 		parts = []
