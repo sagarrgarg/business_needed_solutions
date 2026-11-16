@@ -339,10 +339,15 @@ def get_internal_purchase_doc_linkage_mismatches(filters=None):
 	- PR of an internal supplier after the cutoff with no source reference, or whose
 	  reference is neither a Delivery Note nor a Sales Invoice;
 	- internal SI after the cutoff without both GSTINs or with the same GSTIN.
+	- PR made from a Delivery Note while the two branches have different GSTINs (and the DN
+	  is not opted in to diff-GSTIN DN -> PR), or from a Sales Invoice with the same GSTIN;
+	- internal PI not made from the sending branch's submitted Sales Invoice (directly or
+	  through a PR made from it), or between same-GSTIN branches
+	  (utils.internal_purchase_invoice_source, the rule submit uses).
 	Not refused at submit, listed so they get fixed:
-	- PR whose source DN / SI is cancelled or not submitted;
-	- PR made from a different-GSTIN Delivery Note that is not on the DN -> PR path;
-	- internal PI (different GSTIN) not made from an internal SI or a Purchase Receipt.
+	- PR whose source DN / SI is cancelled or not submitted.
+	Everything is judged from the internal-transfer cutoff (on the source document's
+	date), as submit does.
 	"""
 	filters = frappe._dict(filters or {})
 	data = []
@@ -362,7 +367,8 @@ def get_internal_purchase_doc_linkage_mismatches(filters=None):
 	prs = frappe.db.sql(
 		f"""
 		SELECT d.name, d.posting_date, d.grand_total, d.company_gstin, d.supplier_delivery_note,
-			d.bns_inter_company_reference,
+			d.bns_inter_company_reference, d.supplier_gstin, d.supplier_address, d.billing_address,
+			d.shipping_address,
 			dn.docstatus AS dn_docstatus, dn.company_gstin AS dn_company_gstin,
 			dn.billing_address_gstin AS dn_billing_address_gstin, dn.status AS dn_status,
 			{opt_in} AS dn_opt_in, si.docstatus AS si_docstatus
@@ -375,18 +381,15 @@ def get_internal_purchase_doc_linkage_mismatches(filters=None):
 		tuple(vals),
 		as_dict=True,
 	) or []
-	global_allow = bool(
-		frappe.db.get_single_value("BNS Branch Accounting Settings", "allow_different_gstin_dn_to_pr")
-	)
-
 	for pr in prs:
 		ref = _s(pr.bns_inter_company_reference)
 		has_dn, has_si = pr.dn_docstatus is not None, pr.si_docstatus is not None
 		reason, missing = None, "Source Link (DN/SI)"
+		doc_like = frappe._dict(pr, doctype="Purchase Receipt")
+		if not utils.is_after_internal_transfer_cutoff(utils._resolve_source_posting_date(doc_like)):
+			continue
+		scope = utils._resolve_pr_gstin_scope(doc_like, has_dn, has_si) if ref else None
 		if not ref:
-			doc_like = frappe._dict(pr, doctype="Purchase Receipt")
-			if not utils.is_after_internal_transfer_cutoff(utils._resolve_source_posting_date(doc_like)):
-				continue
 			reason = _pr_scope_message(utils._resolve_pr_gstin_scope(doc_like, False, False))
 		elif has_dn and has_si:
 			reason = _("Reference {0} is both a Delivery Note and a Sales Invoice; only one source link is allowed.").format(ref)
@@ -399,14 +402,14 @@ def get_internal_purchase_doc_linkage_mismatches(filters=None):
 				_("Delivery Note") if has_dn else _("Sales Invoice"), ref,
 				_("cancelled") if cint(pr.dn_docstatus if has_dn else pr.si_docstatus) == 2 else _("a draft"),
 			)
-		elif has_dn and not global_allow and not scan.dn_routes_to_pr(frappe._dict(
-			company_gstin=pr.dn_company_gstin, billing_address_gstin=pr.dn_billing_address_gstin,
-			bns_allow_diff_gstin_dn_pr=pr.dn_opt_in, status=pr.dn_status,
-		)):
+		elif has_dn and scope == "different":
+			# validate_internal_purchase_receipt_linkage
 			missing = "Sales Invoice (DN->SI)"
-			reason = _("Delivery Note {0} is a different-GSTIN transfer that is not on the DN -> PR path "
-					   "(no opt-in, not 'BNS Internally Transferred'); it must be billed DN -> SI -> PI "
-					   "(not refused at submit).").format(ref)
+			reason = _("For different GSTIN internal flow, Purchase Receipt cannot be linked to a Delivery Note. "
+					   "Delivery Note {0} must be billed DN -> SI, and the goods received from the Sales Invoice.").format(ref)
+		elif has_si and scope == "same":
+			missing = "Delivery Note"
+			reason = _("For same GSTIN internal flow, Purchase Receipt cannot be linked to a Sales Invoice.")
 		if reason:
 			data.append(_empty_mismatch_row(
 				posting_date=pr.posting_date,
@@ -421,48 +424,43 @@ def get_internal_purchase_doc_linkage_mismatches(filters=None):
 			))
 
 	if cutoff:
+		# The submit rule decides (utils.internal_purchase_invoice_source). SQL only skips
+		# PIs that plainly pass it: made from a submitted internal SI, different GSTINs.
 		conds = [
 			"d.docstatus = 1", "IFNULL(d.is_return, 0) = 0", "d.posting_date >= %s",
 			"(d.is_bns_internal_supplier = 1 OR s.is_bns_internal_supplier = 1)",
-			"IFNULL(d.company_gstin, '') != ''", "IFNULL(d.supplier_gstin, '') != ''",
-			# Same GSTIN: no PI belongs there at all. Different GSTIN: no SI behind it.
-			"(d.company_gstin = d.supplier_gstin OR (si_ref.name IS NULL AND si_bill.name IS NULL))",
-			"""NOT EXISTS (SELECT 1 FROM `tabPurchase Invoice Item` i WHERE i.parent = d.name
-				AND IFNULL(i.purchase_receipt, '') != '')""",
+			"""NOT (si_ref.name IS NOT NULL AND si_ref.docstatus = 1
+				AND IFNULL(d.company_gstin, '') != '' AND IFNULL(d.supplier_gstin, '') != ''
+				AND d.company_gstin != d.supplier_gstin)""",
 		]
 		vals = [cutoff]
 		_date_company(filters, "d", conds, vals)
-		# An internal SI as _is_internal_transfer_sales_invoice defines it.
-		internal_si = "{0}.is_bns_internal_customer = 1 AND IFNULL({0}.is_return, 0) = 0"
 		pis = frappe.db.sql(
 			f"""
-			SELECT d.name, d.posting_date, d.grand_total, d.company_gstin = d.supplier_gstin AS same_gstin
+			SELECT d.name, d.posting_date, d.grand_total
 			FROM `tabPurchase Invoice` d
 			LEFT JOIN `tabSupplier` s ON s.name = d.supplier
 			LEFT JOIN `tabSales Invoice` si_ref ON si_ref.name = d.bns_inter_company_reference
-				AND {internal_si.format("si_ref")}
-			LEFT JOIN `tabSales Invoice` si_bill ON si_bill.name = d.bill_no
-				AND {internal_si.format("si_bill")}
+				AND si_ref.is_bns_internal_customer = 1 AND IFNULL(si_ref.is_return, 0) = 0
 			WHERE {" AND ".join(conds)}
 			""",
 			tuple(vals),
 			as_dict=True,
 		) or []
 		for pi in pis:
+			source = utils.internal_purchase_invoice_source(frappe.get_doc("Purchase Invoice", pi.name))
+			if not source.problem:
+				continue
+			same_gstin = source.title == _("Invalid Internal Purchase Invoice")
 			data.append(_empty_mismatch_row(
 				posting_date=pi.posting_date,
 				document_type="Purchase Invoice",
 				document_name=pi.name,
 				grand_total=flt(pi.grand_total),
-				missing_document="Delivery Note -> Purchase Receipt" if pi.same_gstin else "Sales Invoice / SI-linked PR",
-				mismatch_reason=_(
-					"Same-GSTIN internal PI: branches with one GSTIN move stock by DN -> PR and have no "
-					"Purchase Invoice. Submitted before this was refused; cancel it."
-				) if pi.same_gstin else _(
-					"Internal PI not made from an internal Sales Invoice or an SI-made Purchase Receipt, so "
-					"nothing is compared or paired. Submitted before this was refused; cancel and make it "
-					"from the Sales Invoice."
-				),
+				missing_document="Delivery Note -> Purchase Receipt" if same_gstin else "Sales Invoice / SI-linked PR",
+				mismatch_reason=frappe.utils.strip_html(source.problem)
+				+ " " + _("Submitted before this was refused; cancel it")
+				+ ("." if same_gstin else _(" and make it from the Sales Invoice.")),
 				purchase_invoice=pi.name,
 			))
 

@@ -264,11 +264,6 @@ def _classify_pi(doc):
 		is_linked = True
 
 	if not is_linked:
-		bill_no = (doc.get("bill_no") or "").strip()
-		if bill_no and frappe.db.exists("Sales Invoice", {"name": bill_no, "docstatus": 1}):
-			is_linked = True
-
-	if not is_linked:
 		pr_names = list({
 			(row.get("purchase_receipt") or "").strip()
 			for row in (doc.get("items") or [])
@@ -1447,22 +1442,28 @@ def _audit_purchase_receipts(filters, settings):
 	return results
 
 
-def _flag_internal_pi_without_source(row):
-	"""Submitted internal-supplier PI (not a return) with no internal Sales Invoice
-	behind it -- refused at submit now (utils.assert_internal_purchase_invoice_has_source),
-	so these were submitted before that rule. Nothing pairs or compares them."""
-	from business_needed_solutions.bns_branch_accounting.utils import is_after_internal_transfer_cutoff
+def _internal_pi_source_scope(row):
+	"""For an internal PI with no header link: the scope it is audited under, or a
+	'Missing Source Link' row. The submit rule decides (utils.internal_purchase_invoice_source):
+	- made from an SI through its rows or a Purchase Receipt: audited as si_linked;
+	- older than the cutoff with the SI number as bill number: audited as si_linked (old rules);
+	- refused at submit (submitted before that rule): flagged; nothing pairs or compares it.
+	Returns (scope, flag_row)."""
+	from business_needed_solutions.bns_branch_accounting.utils import internal_purchase_invoice_source
 
-	if cint(row.get("is_return")) or not is_after_internal_transfer_cutoff(row.get("posting_date")):
-		return None
-	return _build_row(
-		row, "internal_no_source", "Missing Source Link",
-		details=(
-			"Internal-branch Purchase Invoice not made from an internal Sales Invoice (or a Purchase "
-			"Receipt made from one), so it is not paired, compared or rewritten as a transfer. "
-			"Fix: cancel it and make the Purchase Invoice from the sending branch's Sales Invoice."
-		),
-	)
+	if cint(row.get("is_return")):
+		return None, None
+	source = internal_purchase_invoice_source(frappe.get_doc("Purchase Invoice", row.name))
+	if source.problem:
+		return None, _build_row(
+			row, "internal_no_source", "Missing Source Link",
+			details=frappe.utils.strip_html(source.problem)
+			+ " Submitted before this was refused; it is not paired, compared or rewritten as a transfer. "
+			"Fix: cancel it and make the Purchase Invoice from the sending branch's Sales Invoice.",
+		)
+	if source.si:
+		return "si_linked", None
+	return None, None
 
 
 def _audit_purchase_invoices(filters, settings):
@@ -1488,8 +1489,10 @@ def _audit_purchase_invoices(filters, settings):
 	for row in docs:
 		scope = _classify_pi(row)
 		if not scope:
-			_append_if(results, _flag_internal_pi_without_source(row))
-			continue
+			scope, flag = _internal_pi_source_scope(row)
+			_append_if(results, flag)
+			if not scope:
+				continue
 
 		doc = frappe.get_doc("Purchase Invoice", row.name)
 		if _is_zero_amount_document(doc):

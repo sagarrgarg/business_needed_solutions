@@ -162,10 +162,11 @@
   },
   {
    "default": "0",
-   "description": "Maximum acceptable amount difference (per line item taxable value, grand total, and total taxes) between source Sales Invoice and Purchase Invoice. Differences below this threshold are ignored during SI-PI parity validation. Set 0 for exact match.",
+   "description": "No longer used: an internal Purchase Invoice must match its Sales Invoice exactly, to the paisa.",
    "fieldname": "si_pi_amount_tolerance",
    "fieldtype": "Currency",
-   "label": "SI-PI Amount Tolerance"
+   "hidden": 1,
+   "label": "SI-PI Amount Tolerance (not used)"
   },
   {
    "default": "0",
@@ -236,7 +237,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-17 12:00:00.000000",
+ "modified": "2026-11-16 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "BNS Branch Accounting",
  "name": "BNS Branch Accounting Settings",

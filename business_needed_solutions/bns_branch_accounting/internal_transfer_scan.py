@@ -18,7 +18,8 @@ Audit" reports, so both list exactly what the validators would block:
     DN on the different-GSTIN path: needs a Sales Invoice made from it (DN->SI); the
       invoice then needs its own receiver (next rule).
     SI (different GSTIN): needs a Purchase Invoice resolving to it - directly
-      (reference / bill no.) or through a Purchase Receipt made from it (SI->PR->PI).
+      (its reference or rows; the supplier's bill number is not a link) or through a
+      Purchase Receipt made from it (SI->PR->PI).
       When the receiving PI neither updates stock nor comes from a receipt, the goods
       were never received (validate_internal_stock_movement_captured).
 
@@ -76,23 +77,24 @@ def parity_links(doc) -> list[str]:
 		return ["DN->SI"]
 	if doc.doctype == PR:
 		# utils.validate_internal_purchase_receipt_linkage -> _validate_internal_pr_one_to_one_parity:
-		# any PR with a source reference (the cutoff does not apply once a reference is set).
+		# a PR with a source reference, from the cutoff (on the source's date).
 		if not _s(doc.get("bns_inter_company_reference")):
 			return []
 		if not utils.is_bns_internal_supplier(doc):
 			return []  # refused earlier: an internal reference on a regular supplier
-		return ip.detect_links(doc)
-	if doc.doctype == PI:
-		# utils.validate_internal_purchase_invoice_si_parity
-		if not utils.is_bns_internal_supplier(doc):
-			return []
 		if not utils.is_after_internal_transfer_cutoff(utils._resolve_source_posting_date(doc)):
 			return []
 		links = ip.detect_links(doc)
-		co, bill = _s(doc.get("company_gstin")), _s(doc.get("billing_address_gstin"))
-		if co and bill and co == bill:
-			return []
+		scope = utils._resolve_pr_gstin_scope(doc, "DN->PR" in links, "SI->PR" in links)
+		if ("DN->PR" in links and scope == "different") or ("SI->PR" in links and scope == "same"):
+			return []  # refused for its GSTINs before parity (the linkage report lists it)
 		return links
+	if doc.doctype == PI:
+		# utils.validate_internal_purchase_invoice_si_parity: the source rule first
+		source = utils.internal_purchase_invoice_source(doc)
+		if not source.applies or source.problem:
+			return []  # older than the cutoff, or refused before parity (listed as such)
+		return ip.detect_links(doc)
 	return []
 
 
@@ -141,9 +143,10 @@ def _parity_candidates(doctype, filters):
 			return []
 		conds += [
 			"(d.is_bns_internal_supplier = 1 OR p.is_bns_internal_supplier = 1)",
-			"""(IFNULL(d.bns_inter_company_reference, '') != '' OR IFNULL(d.bill_no, '') != ''
+			"""(IFNULL(d.bns_inter_company_reference, '') != ''
 				OR EXISTS (SELECT 1 FROM `tabPurchase Invoice Item` i WHERE i.parent = d.name
-					AND (IFNULL(i.purchase_receipt, '') != '' OR IFNULL(i.pr_detail, '') != '')))""",
+					AND (IFNULL(i.purchase_receipt, '') != '' OR IFNULL(i.pr_detail, '') != ''
+						OR IFNULL(i.sales_invoice_item, '') != '')))""",
 		]
 		join = "LEFT JOIN `tabSupplier` p ON p.name = d.supplier"
 	else:
@@ -167,7 +170,7 @@ def sender_of(doc):
 				return dt, ref
 		return None, None
 	if doc.doctype == PI:
-		si = utils._resolve_si_name_for_internal_pi(doc)
+		si = utils._structural_si_for_internal_pi(doc)
 		if si:
 			return SI, si
 		for r in doc.get("items") or []:
@@ -398,24 +401,29 @@ def _missing_row(doctype, src, missing, chain, reason, kind="receiver", **links)
 def _si_receivers(sis, include_stock):
 	names = [s.name for s in sis]
 	si_set = set(names)
-	# Purchase Invoices resolving to the SI the way _resolve_si_name_for_internal_pi does:
-	# its reference, else its bill no. (when the reference is not an internal SI).
+	# Purchase Invoices made from the SI, as submit reads them
+	# (utils._structural_si_for_internal_pi): its reference, else its rows. The supplier's
+	# bill number is free text and does not make a PI the receiver.
 	pis = {}
 	pi_info = {}
 	for chunk in _chunks(names):
 		for r in frappe.db.sql(
-			"""SELECT name, bns_inter_company_reference AS ref, bill_no, update_stock, posting_date
+			"""SELECT name, bns_inter_company_reference AS ref, update_stock, posting_date
 			FROM `tabPurchase Invoice` WHERE docstatus = 1 AND IFNULL(is_return, 0) = 0
-			AND (bns_inter_company_reference IN %(c)s OR bill_no IN %(c)s)""",
+			AND bns_inter_company_reference IN %(c)s
+			UNION
+			SELECT DISTINCT pi.name, sii.parent AS ref, pi.update_stock, pi.posting_date
+			FROM `tabPurchase Invoice Item` i
+			JOIN `tabPurchase Invoice` pi ON pi.name = i.parent
+			JOIN `tabSales Invoice Item` sii ON sii.name = i.sales_invoice_item
+			WHERE pi.docstatus = 1 AND IFNULL(pi.is_return, 0) = 0 AND sii.parent IN %(c)s
+				AND NOT (IFNULL(pi.bns_inter_company_reference, '') != ''
+					AND pi.bns_inter_company_reference != sii.parent)""",
 			{"c": tuple(chunk)},
 			as_dict=True,
 		):
-			ref, bill = _s(r.ref), _s(r.bill_no)
-			if ref in si_set:
-				target = ref
-			elif bill in si_set and not (ref and utils._is_internal_transfer_sales_invoice(ref)):
-				target = bill
-			else:
+			target = _s(r.ref)
+			if target not in si_set or r.name in (pis.get(target) or []):
 				continue
 			pis.setdefault(target, []).append(r.name)
 			pi_info[r.name] = r

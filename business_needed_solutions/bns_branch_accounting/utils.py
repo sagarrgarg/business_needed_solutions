@@ -211,14 +211,19 @@ def _duplicate_serial_and_batch_bundle(
 
 def _source_incoming_rate_for_pr_item(pr_item, is_dn_linked):
     """Authoritative source rate for a PR item: the linked Delivery Note Item
-    incoming_rate (including a genuine 0). Returns None when no source item link
-    resolves, so the caller can tell "genuine zero" from "unresolved".
+    incoming_rate, or for a receipt made from a Sales Invoice the SI row's cost
+    (chasing the DN behind an SI made from a DN). Includes a genuine 0. Returns None
+    when no source item link resolves, so the caller can tell "genuine zero" from
+    "unresolved".
     """
-    if not is_dn_linked:
+    if is_dn_linked:
+        dn_item = (pr_item.get("delivery_note_item") or "").strip()
+        if dn_item and frappe.db.exists("Delivery Note Item", dn_item):
+            return flt(frappe.db.get_value("Delivery Note Item", dn_item, "incoming_rate") or 0)
         return None
-    dn_item = (pr_item.get("delivery_note_item") or "").strip()
-    if dn_item and frappe.db.exists("Delivery Note Item", dn_item):
-        return flt(frappe.db.get_value("Delivery Note Item", dn_item, "incoming_rate") or 0)
+    si_item = (pr_item.get("sales_invoice_item") or "").strip()
+    if si_item and frappe.db.exists("Sales Invoice Item", si_item):
+        return _get_si_item_transfer_rate(frappe._dict(name=si_item))
     return None
 
 
@@ -252,7 +257,8 @@ def _get_bns_transfer_rate_for_pr_sle(sle):
     pr_item = frappe.db.get_value(
         "Purchase Receipt Item",
         sle.voucher_detail_no,
-        ["parent", "bns_transfer_rate", "delivery_note_item"],
+        ["parent", "bns_transfer_rate", "delivery_note_item"]
+        + (["sales_invoice_item"] if pri_meta.has_field("sales_invoice_item") else []),
         as_dict=True,
     )
     if not pr_item:
@@ -288,7 +294,7 @@ def _get_bns_transfer_rate_for_pr_sle(sle):
     if transfer_rate > 0:
         return transfer_rate
 
-    # Stored rate is 0 -> consult the source DN item to disambiguate genuine
+    # Stored rate is 0 -> consult the source DN / SI item to disambiguate genuine
     # zero-cost from unresolved.
     source_rate = _source_incoming_rate_for_pr_item(pr_item, is_dn_linked)
     if source_rate is not None:
@@ -317,7 +323,7 @@ def _source_incoming_rate_for_pi_item(pi_item):
     # SI rate is itself 0 -> chase the DN behind it for the authoritative cost.
     dn_detail = (row.get("dn_detail") or "").strip()
     if dn_detail and frappe.db.exists("Delivery Note Item", dn_detail):
-        return flt(frappe.db.get_value("Delivery Note Item", dn_detail, "incoming_rate") or 0)
+        return _dn_row_cost(dn_detail)
     return rate  # SI item resolves but values to 0 everywhere -> genuine 0
 
 
@@ -565,6 +571,21 @@ def _source_entry_rates_for_bundle(bundle, transfer_rate: float):
         return None
 
 
+def _apply_per_entry_rates(bundle, rates, save=False) -> None:
+    """Set each inward entry's rate and value from {(serial_no, batch_no): rate}, then the
+    bundle totals (for ERPNext builds without get_transfer_rates)."""
+    for d in bundle.entries:
+        rate = rates.get((d.serial_no, d.batch_no))
+        if rate is None:
+            continue
+        d.incoming_rate = flt(rate)
+        d.stock_value_difference = flt(d.qty) * flt(rate)
+        if save:
+            d.db_set({"incoming_rate": d.incoming_rate, "stock_value_difference": d.stock_value_difference})
+    if hasattr(bundle, "calculate_qty_and_amount"):
+        bundle.calculate_qty_and_amount(save=bool(save))
+
+
 def _apply_bns_transfer_rate_bundle_patch() -> None:
     """Price serial/batch receipts of BNS internal transfers at the transfer rate.
 
@@ -577,7 +598,8 @@ def _apply_bns_transfer_rate_bundle_patch() -> None:
     Stock Entry transfers). When ERPNext has none, return the BNS transfer rate for every
     entry: the bundle, the SLE value difference and every later row then carry
     qty x transfer rate, at submit and on every repost. Older v15 builds without
-    get_transfer_rates get the rate through the `row` argument instead.
+    get_transfer_rates get the rate through the `row` argument instead, then each
+    batch / serial is re-priced at what the sender took it out at (_apply_per_entry_rates).
     """
     global _BNS_TRANSFER_RATE_BUNDLE_PATCHED
     if _BNS_TRANSFER_RATE_BUNDLE_PATCHED:
@@ -624,6 +646,12 @@ def _apply_bns_transfer_rate_bundle_patch() -> None:
                 if flt(transfer_rate) > 0:
                     arguments["row"] = frappe._dict(valuation_rate=flt(transfer_rate), rate=flt(transfer_rate))
                 result = original_inward(self, **arguments)
+                if flt(transfer_rate) > 0:
+                    # Older v15 builds price every entry at the one rate passed in `row`;
+                    # give each batch / serial what the sender took it out at, as v16 does.
+                    per_entry = _source_entry_rates_for_bundle(self, transfer_rate)
+                    if per_entry:
+                        _apply_per_entry_rates(self, per_entry, save=arguments.get("save"))
                 if not flt(transfer_rate):
                     # A zero rate falls back to the item row's rate inside ERPNext; force 0.
                     for d in self.entries:
@@ -1028,10 +1056,11 @@ def _resolve_pr_gstin_scope(doc, has_dn_link: bool, has_si_link: bool) -> Option
         for dn_name in link_flags.get("dn_names") or []:
             if _dn_has_diff_gstin_opt_in(dn_name):
                 return "same"
-    company_gstin = (doc.get("company_gstin") or "").strip()
-    billing_gstin = (doc.get("billing_address_gstin") or "").strip()
-    if company_gstin and billing_gstin:
-        return "same" if company_gstin == billing_gstin else "different"
+    # A receipt has no billing_address_gstin: the sending branch is its supplier.
+    company_gstin = _gstin_of(doc, "company_gstin", "billing_address") or _gstin_of(doc, "company_gstin", "shipping_address")
+    supplier_gstin = _gstin_of(doc, "supplier_gstin", "supplier_address")
+    if company_gstin and supplier_gstin:
+        return "same" if company_gstin == supplier_gstin else "different"
     if has_dn_link and not has_si_link:
         return "same"
     if has_si_link and not has_dn_link:
@@ -1442,7 +1471,10 @@ def validate_internal_purchase_receipt_linkage(doc, method: Optional[str] = None
         _validate_unique_internal_source_claim(doc)
     if not is_bns_internal_supplier(doc) and not source_ref:
         return
-    if not is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc)) and not source_ref:
+    # The linkage and parity rules apply from the internal-transfer cutoff (judged on the
+    # source DN / SI date), like the SI and PI rules; an older receipt that is amended or
+    # re-saved keeps the rules it was made under.
+    if not is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc)):
         return
 
     link_flags = _get_pr_source_link_flags(doc)
@@ -1711,18 +1743,31 @@ def _gstin_of(doc, gstin_field: str, address_field: str) -> str:
     return gstin
 
 
-def assert_internal_purchase_invoice_has_source(doc) -> Optional[str]:
-    """An internal-branch Purchase Invoice must be made from the sending branch's
-    submitted Sales Invoice: directly (Create > Purchase Invoice on the SI) or through
-    a Purchase Receipt made from that SI. Returns the SI name, or throws.
+def internal_purchase_invoice_source(doc) -> "frappe._dict":
+    """Where an internal-branch Purchase Invoice came from, and whether that is allowed.
 
-    The branch is internal when the supplier master is ticked internal, so a PI typed
-    by hand without the copied tick is caught too. Returns are left to the return rules.
+    Returns _dict(applies, si, legacy, problem, title):
+    - applies: the post-cutoff source rule governs this PI (si is then its Sales Invoice);
+    - legacy:  the source is from before the internal-transfer cutoff; the old rules apply
+               and si is the Sales Invoice its bill number names, if any;
+    - problem: why it cannot be submitted (None when it can).
+
+    Used by the submit check and by both internal-transfer reports, so the reports list
+    exactly what submit refuses.
+
+    After the cutoff, a PI from an internal branch must be made from the sending branch's
+    submitted Sales Invoice: Create > Purchase Invoice on the SI, or a Purchase Receipt
+    made from it. This holds for every bill from a different-GSTIN branch (goods or a
+    service recharge): it is a supply between two GST registrations, so the sending
+    branch raises the Sales Invoice first. Same-GSTIN branches have no Purchase Invoice.
+    The supplier's bill number is free text and is not a link; it only places an older
+    document before the cutoff.
     """
+    out = frappe._dict(applies=False, si=None, legacy=False, problem=None, title=None)
     if doc.doctype != "Purchase Invoice" or cint(doc.get("is_return")):
-        return None
+        return out
     if not is_bns_internal_supplier(doc):
-        return None
+        return out
 
     si_name = _structural_si_for_internal_pi(doc)
     si = None
@@ -1731,49 +1776,113 @@ def assert_internal_purchase_invoice_has_source(doc) -> Optional[str]:
             "Sales Invoice", si_name,
             ["posting_date", "docstatus", "company_gstin", "billing_address_gstin"], as_dict=True,
         )
-    # Without a source, the PI's own date decides; a typed bill number cannot move
-    # the document before the cutoff.
-    if not is_after_internal_transfer_cutoff(si.posting_date if si else doc.get("posting_date")):
-        return None
+    if si:
+        source_date = si.posting_date
+    else:
+        legacy_si, source_date = _pre_cutoff_source_of_internal_pi(doc)
+        if source_date and not is_after_internal_transfer_cutoff(source_date):
+            out.legacy, out.si = True, legacy_si
+            return out
+        source_date = doc.get("posting_date")
+    if not is_after_internal_transfer_cutoff(source_date):
+        out.legacy, out.si = True, si_name
+        return out
 
+    out.applies = True
+    out.title = _("Invalid Internal PI Linkage")
     company_gstin = _gstin_of(doc, "company_gstin", "company_address") or ((si or {}).get("billing_address_gstin") or "").strip()
     supplier_gstin = _gstin_of(doc, "supplier_gstin", "supplier_address") or ((si or {}).get("company_gstin") or "").strip()
     if company_gstin and supplier_gstin and company_gstin == supplier_gstin:
-        frappe.throw(
-            _(
-                "{0} is an internal branch with the same GSTIN ({1}). Stock between same-GSTIN branches "
-                "moves by Delivery Note and Purchase Receipt; no Purchase Invoice is made."
-            ).format(frappe.bold(doc.get("supplier")), company_gstin),
-            title=_("Invalid Internal Purchase Invoice"),
-        )
+        out.title = _("Invalid Internal Purchase Invoice")
+        out.problem = _(
+            "{0} is an internal branch with the same GSTIN ({1}). Stock between same-GSTIN branches "
+            "moves by Delivery Note and Purchase Receipt; no Purchase Invoice is made."
+        ).format(frappe.bold(doc.get("supplier")), company_gstin)
+        return out
 
     if not si:
         pr_names = sorted({(r.get("purchase_receipt") or "").strip() for r in doc.get("items") or []} - {""})
         if pr_names:
-            frappe.throw(
-                _(
-                    "Purchase Receipt {0} was not made from an internal Sales Invoice, so no Purchase Invoice "
-                    "can be made from it. An internal Purchase Invoice must come from the sending branch's "
-                    "Sales Invoice, directly or through a Purchase Receipt made from that Sales Invoice."
-                ).format(", ".join(frappe.bold(n) for n in pr_names)),
-                title=_("Invalid Internal PI Linkage"),
-            )
-        frappe.throw(
-            _(
+            out.problem = _(
+                "Purchase Receipt {0} was not made from an internal Sales Invoice, so no Purchase Invoice "
+                "can be made from it. An internal Purchase Invoice must come from the sending branch's "
+                "Sales Invoice, directly or through a Purchase Receipt made from that Sales Invoice."
+            ).format(", ".join(frappe.bold(n) for n in pr_names))
+        else:
+            out.problem = _(
                 "{0} is an internal branch. Its Purchase Invoice must be made from the sending branch's "
                 "Sales Invoice (open the Sales Invoice and use Create > Purchase Invoice), or from a "
-                "Purchase Receipt made from that Sales Invoice. A Purchase Invoice entered directly cannot be submitted."
-            ).format(frappe.bold(doc.get("supplier"))),
-            title=_("Invalid Internal PI Linkage"),
-        )
+                "Purchase Receipt made from that Sales Invoice. This applies to service and expense "
+                "recharges too: the sending branch raises the Sales Invoice first. A Purchase Invoice "
+                "entered directly cannot be submitted."
+            ).format(frappe.bold(doc.get("supplier")))
+        return out
     if cint(si.docstatus) != 1:
+        out.problem = _("Sales Invoice {0} is {1}. Submit it before submitting its Purchase Invoice.").format(
+            frappe.bold(si_name), _("cancelled") if cint(si.docstatus) == 2 else _("a draft")
+        )
+        return out
+    out.si = si_name
+    return out
+
+
+def _pre_cutoff_source_of_internal_pi(doc) -> Tuple[Optional[str], Optional[Any]]:
+    """(Sales Invoice, posting date) of an older source a PI without a structural link
+    names: the internal SI in its bill number, else the Purchase Receipt(s) it was made
+    from (their DN / SI, else their own date; the latest one counts). (None, None) when
+    nothing is named. The caller lets the PI through only when that date is before the
+    internal-transfer cutoff: SI -> PI mapping is refused for such SIs, so their PIs
+    were always typed with the SI number as the bill number.
+    """
+    bill = (doc.get("bill_no") or "").strip()
+    if bill and _is_internal_transfer_sales_invoice(bill):
+        posting_date = frappe.db.get_value("Sales Invoice", bill, "posting_date")
+        if posting_date:
+            return bill, posting_date
+
+    pr_names = sorted({(r.get("purchase_receipt") or "").strip() for r in doc.get("items") or []} - {""})
+    latest = None
+    for pr_name in pr_names:
+        pr = frappe.db.get_value(
+            "Purchase Receipt", pr_name,
+            ["bns_inter_company_reference", "supplier_delivery_note", "posting_date"], as_dict=True,
+        )
+        if not pr:
+            continue
+        pr.doctype = "Purchase Receipt"
+        source_date = _resolve_source_posting_date(pr)
+        if source_date and (latest is None or getdate(source_date) > getdate(latest)):
+            latest = source_date
+    return None, latest
+
+
+def assert_internal_purchase_invoice_has_source(doc) -> Optional[str]:
+    """Throw unless the internal PI may be submitted (internal_purchase_invoice_source).
+    Returns the Sales Invoice it was made from when the post-cutoff rule applies, else None."""
+    source = internal_purchase_invoice_source(doc)
+    if source.problem:
+        frappe.throw(source.problem, title=source.title)
+    if source.applies:
+        _assert_si_not_received_twice(doc, source.si)
+    return source.si if source.applies else None
+
+
+def _assert_si_not_received_twice(doc, si_name: Optional[str]) -> None:
+    """One Sales Invoice is received once: refuse a second submitted forward PI on it."""
+    if not si_name:
+        return
+    other = frappe.db.get_value(
+        "Purchase Invoice",
+        {"bns_inter_company_reference": si_name, "docstatus": 1, "is_return": 0, "name": ("!=", doc.name or "")},
+        "name",
+    )
+    if other:
         frappe.throw(
-            _("Sales Invoice {0} is {1}. Submit it before submitting its Purchase Invoice.").format(
-                frappe.bold(si_name), _("cancelled") if cint(si.docstatus) == 2 else _("a draft")
+            _("Sales Invoice {0} is already received on Purchase Invoice {1}.").format(
+                frappe.bold(si_name), frappe.bold(other)
             ),
             title=_("Invalid Internal PI Linkage"),
         )
-    return si_name
 
 
 def _is_internal_transfer_sales_invoice(si_name: str) -> bool:
@@ -2243,7 +2352,7 @@ def validate_internal_purchase_invoice_si_parity(doc, method: Optional[str] = No
     links = detect_links(doc)  # SI -> PI, and PR -> PI when made from a receipt
 
     # Exact copy, row by row, GST per head, batches/serials: no amount tolerance
-    # (si_pi_amount_tolerance no longer applies to internal PIs).
+    # (the old SI-PI amount tolerance setting is gone).
     assert_internal_pair(doc, links=links, force=True)
 
 
@@ -7149,17 +7258,40 @@ def _get_dn_item_transfer_rate(dn_item) -> float:
 
 
 def _get_si_item_transfer_rate(si_item) -> float:
-    """Get outgoing valuation mirror for a Sales Invoice Item."""
+    """The sender's cost per unit behind a Sales Invoice Item.
+
+    An SI that moved the stock carries it as incoming_rate. An SI made from a Delivery
+    Note moved nothing (incoming_rate 0): the cost is on the DN row, else in the DN's
+    stock ledger for that row."""
     rate = flt(si_item.get("incoming_rate") or 0)
     if rate:
         return rate
 
-    # Fallback to DB in case mapper source did not carry incoming_rate.
+    dn_detail = (si_item.get("dn_detail") or "").strip()
     if si_item.get("name"):
-        return flt(
-            frappe.db.get_value("Sales Invoice Item", si_item.get("name"), "incoming_rate") or 0
+        # Fallback to DB in case mapper source did not carry incoming_rate.
+        row = frappe.db.get_value(
+            "Sales Invoice Item", si_item.get("name"), ["incoming_rate", "dn_detail"], as_dict=True
         )
-    return 0.0
+        if row:
+            if flt(row.incoming_rate):
+                return flt(row.incoming_rate)
+            dn_detail = dn_detail or (row.dn_detail or "").strip()
+    return _dn_row_cost(dn_detail)
+
+
+def _dn_row_cost(dn_detail: Optional[str]) -> float:
+    """Cost per unit a Delivery Note row took out: its incoming_rate, else its SLE."""
+    if not dn_detail:
+        return 0.0
+    dn_row = frappe.db.get_value(
+        "Delivery Note Item", dn_detail, ["parent", "item_code", "incoming_rate"], as_dict=True
+    )
+    if not dn_row:
+        return 0.0
+    if flt(dn_row.incoming_rate):
+        return flt(dn_row.incoming_rate)
+    return flt(_get_rate_from_dn_stock_ledger(dn_row.parent, dn_row.item_code, None, dn_detail))
 
 
 def _clear_item_level_fields(target) -> None:
@@ -8655,7 +8787,10 @@ def _get_sales_invoice_mapping() -> Dict[str, Any]:
             "field_no_map": [
                 "set_warehouse", "cost_center", "project", "location", "bill_no", "bill_date",
                 "dispatch_address", "dispatch_address_name", "dispatch_address_display", 
-                "dispatch_address_template", "shipping_address_template"
+                "dispatch_address_template", "shipping_address_template",
+                # ERPNext's own inter-company link: copied, it makes ERPNext check the
+                # standard represents_company, which BNS branches do not use.
+                "inter_company_invoice_reference",
             ],
             "validation": {"docstatus": ["=", 1]},
             "postprocess": _update_details_pi,
@@ -8724,6 +8859,9 @@ def _update_details_pi(source_doc, target_doc, source_parent) -> None:
     target_doc.bns_inter_company_reference = source_doc.name
     target_doc.is_bns_internal_supplier = 1
     target_doc.bill_no = source_doc.name
+    # BNS links by bns_inter_company_reference only (see _get_sales_invoice_mapping).
+    if target_doc.meta.has_field("inter_company_invoice_reference"):
+        target_doc.inter_company_invoice_reference = None
 
     if cint(source_doc.get("is_return")):
         target_doc.is_return = 1
@@ -9350,176 +9488,56 @@ def validate_si_pi_items_match(
     check_all: bool = False,
     amount_tolerance: float = 0.0,
 ) -> Dict:
-    """Validate that all Sales Invoice items and quantities match Purchase Invoice items.
+    """Whether a Purchase Invoice is an exact copy of a Sales Invoice, by the same rules
+    as an internal PI's submit (internal_parity, SI->PI): rows one to one, item, UOM, qty,
+    rates, amounts, item GST, GST per head, totals, and batches / serials. Rows not linked
+    yet are paired by item, qty and rate.
 
-    Args:
-        sales_invoice: Name of the Sales Invoice.
-        purchase_invoice: Name of the Purchase Invoice.
-        check_all: If True, also validates taxable values, totals, and taxes.
-        amount_tolerance: Absolute amount below which taxable value, grand total,
-            and tax differences are ignored. Does not affect item/qty checks.
+    check_all and amount_tolerance are kept for old callers; every check always runs and
+    nothing is tolerated.
 
-    Returns:
-        Validation result with match status and details.
+    Returns {match, message, differences, missing_items, extra_items, qty_mismatches,
+    grand_total_mismatch}.
     """
     _bns_require_accounts_read()
-    amount_tolerance = flt(amount_tolerance or 0)
-    try:
-        si = frappe.get_doc("Sales Invoice", sales_invoice)
-        pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
-        
-        # Get SI items with taxable values
-        si_items = {}
-        for item in si.items:
-            item_code = item.item_code
-            qty = flt(item.qty or 0)
-            stock_qty = flt(item.stock_qty or qty)
-            net_amount = flt(item.net_amount or 0)
-            base_net_amount = flt(item.base_net_amount or 0)
-            
-            if item_code not in si_items:
-                si_items[item_code] = {
-                    "qty": 0, 
-                    "stock_qty": 0,
-                    "net_amount": 0,
-                    "base_net_amount": 0
-                }
-            si_items[item_code]["qty"] += qty
-            si_items[item_code]["stock_qty"] += stock_qty
-            si_items[item_code]["net_amount"] += net_amount
-            si_items[item_code]["base_net_amount"] += base_net_amount
-        
-        # Get PI items with taxable values
-        pi_items = {}
-        for item in pi.items:
-            item_code = item.item_code
-            qty = flt(item.qty or 0)
-            stock_qty = flt(item.stock_qty or qty)
-            net_amount = flt(item.net_amount or 0)
-            base_net_amount = flt(item.base_net_amount or 0)
-            
-            if item_code not in pi_items:
-                pi_items[item_code] = {
-                    "qty": 0, 
-                    "stock_qty": 0,
-                    "net_amount": 0,
-                    "base_net_amount": 0
-                }
-            pi_items[item_code]["qty"] += qty
-            pi_items[item_code]["stock_qty"] += stock_qty
-            pi_items[item_code]["net_amount"] += net_amount
-            pi_items[item_code]["base_net_amount"] += base_net_amount
-        
-        # Check if all SI items exist in PI and quantities match
-        missing_items = []
-        qty_mismatches = []
-        taxable_value_mismatches = []
-        
-        for item_code, si_data in si_items.items():
-            if item_code not in pi_items:
-                missing_items.append({
-                    "item_code": item_code,
-                    "si_qty": si_data["qty"],
-                    "pi_qty": 0
-                })
-            else:
-                pi_data = pi_items[item_code]
-                # Check stock_qty first, then qty (no tolerance: rounded comparison)
-                if si_data["stock_qty"] > 0:
-                    if round(flt(si_data["stock_qty"]), 6) != round(flt(pi_data["stock_qty"]), 6):
-                        qty_mismatches.append({
-                            "item_code": item_code,
-                            "si_qty": si_data["stock_qty"],
-                            "pi_qty": pi_data["stock_qty"]
-                        })
-                elif round(flt(si_data["qty"]), 6) != round(flt(pi_data["qty"]), 6):
-                    qty_mismatches.append({
-                        "item_code": item_code,
-                        "si_qty": si_data["qty"],
-                        "pi_qty": pi_data["qty"]
-                    })
-                
-                if check_all:
-                    si_taxable_value = si_data["base_net_amount"] if si_data["base_net_amount"] > 0 else si_data["net_amount"]
-                    pi_taxable_value = pi_data["base_net_amount"] if pi_data["base_net_amount"] > 0 else pi_data["net_amount"]
-                    diff = abs(round(flt(si_taxable_value), 2) - round(flt(pi_taxable_value), 2))
-                    if diff > amount_tolerance:
-                        taxable_value_mismatches.append({
-                            "item_code": item_code,
-                            "si_taxable_value": si_taxable_value,
-                            "pi_taxable_value": pi_taxable_value
-                        })
-        
-        # Check if PI has extra items (not in SI)
-        extra_items = []
-        for item_code, pi_data in pi_items.items():
-            if item_code not in si_items:
-                extra_items.append({
-                    "item_code": item_code,
-                    "pi_qty": pi_data["qty"]
-                })
-        
-        # Check grand total and tax mismatches if check_all is True
-        grand_total_mismatch = None
-        tax_mismatch = None
-        
-        if check_all:
-            si_grand_total = flt(si.grand_total or 0)
-            pi_grand_total = flt(pi.grand_total or 0)
-            gt_diff = abs(round(si_grand_total, 2) - round(pi_grand_total, 2))
-            if gt_diff > amount_tolerance:
-                grand_total_mismatch = {
-                    "si_total": si_grand_total,
-                    "pi_total": pi_grand_total,
-                    "diff": si_grand_total - pi_grand_total
-                }
-            
-            si_base_taxes = flt(si.base_total_taxes_and_charges or 0)
-            if si_base_taxes == 0:
-                si_base_taxes = flt(si.total_taxes_and_charges or 0)
-            pi_base_taxes = flt(pi.base_total_taxes_and_charges or 0)
-            if pi_base_taxes == 0:
-                pi_base_taxes = flt(pi.total_taxes_and_charges or 0)
+    from business_needed_solutions.bns_branch_accounting.internal_parity import (
+        mismatch_text,
+        si_pi_link_mismatches,
+    )
 
-            tax_diff = abs(round(si_base_taxes, 2) - round(pi_base_taxes, 2))
-            if tax_diff > amount_tolerance:
-                tax_mismatch = {
-                    "si_tax": si_base_taxes,
-                    "pi_tax": pi_base_taxes,
-                    "diff": si_base_taxes - pi_base_taxes
-                }
-        
-        is_match = (
-            len(missing_items) == 0 and 
-            len(qty_mismatches) == 0 and 
-            len(extra_items) == 0 and 
-            (not check_all or (
-                len(taxable_value_mismatches) == 0 and 
-                grand_total_mismatch is None and 
-                tax_mismatch is None
-            ))
-        )
-        
-        result = {
-            "match": is_match,
-            "missing_items": missing_items,
-            "qty_mismatches": qty_mismatches,
-            "extra_items": extra_items,
-            "message": _("Items and quantities match") if is_match else _("Items or quantities do not match")
-        }
-        
-        if check_all:
-            result.update({
-                "taxable_value_mismatches": taxable_value_mismatches,
-                "grand_total_mismatch": grand_total_mismatch,
-                "tax_mismatch": tax_mismatch
-            })
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error validating SI-PI items match: {str(e)}")
-        frappe.throw(_("Error validating items: {0}").format(str(e)))
+    si = frappe.get_doc("Sales Invoice", sales_invoice)
+    pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
+    mismatches = si_pi_link_mismatches(si, pi)
+
+    missing_items = [
+        {"item_code": m.item_code, "si_qty": m.expected, "pi_qty": 0}
+        for m in mismatches if m.row is None and m.found == _("missing")
+    ]
+    extra_items = [
+        {"item_code": m.item_code, "pi_qty": next((flt(r.qty) for r in pi.items if r.idx == m.row), 0)}
+        for m in mismatches if m.row and m.found == _("not linked to any")
+    ]
+    qty_mismatches = [
+        {"item_code": m.item_code, "si_qty": m.expected, "pi_qty": m.found}
+        for m in mismatches if m.field == _("Quantity")
+    ]
+    grand_total_mismatch = next(
+        ({"si_total": m.expected, "pi_total": m.found, "diff": flt(m.expected) - flt(m.found)}
+         for m in mismatches if m.field == _("Grand Total")),
+        None,
+    )
+    return {
+        "match": not mismatches,
+        "message": _("Items and amounts match") if not mismatches
+        else _("Purchase Invoice {0} is not an exact copy of Sales Invoice {1}: {2}").format(
+            pi.name, si.name, mismatch_text(mismatches)
+        ),
+        "differences": [m.message() for m in mismatches],
+        "missing_items": missing_items,
+        "extra_items": extra_items,
+        "qty_mismatches": qty_mismatches,
+        "grand_total_mismatch": grand_total_mismatch,
+    }
 
 
 def _match_and_set_item_references(si, pi) -> int:
@@ -9646,19 +9664,12 @@ def convert_sales_invoice_to_bns_internal(sales_invoice: str, purchase_invoice: 
                 raise BNSValidationError(_("Purchase Invoice {0} must be submitted before linking").format(purchase_invoice))
             
             # Validate items, quantities, rates, totals, and taxes
-            amount_tolerance = flt(frappe.db.get_single_value("BNS Branch Accounting Settings", "si_pi_amount_tolerance") or 0)
-            validation_result = validate_si_pi_items_match(si.name, pi.name, check_all=True, amount_tolerance=amount_tolerance)
+            # Exact copy by the submit rules (no tolerance).
+            validation_result = validate_si_pi_items_match(si.name, pi.name)
             if not validation_result.get("match"):
                 # Mismatch found — still convert (status already set above),
                 # but skip linking so it surfaces in the mismatch report.
-                mismatch_details = []
-                for item in validation_result.get("missing_items", [])[:3]:
-                    mismatch_details.append(_("Item {0}: SI has {1}, PI missing").format(item["item_code"], item["si_qty"]))
-                for item in validation_result.get("qty_mismatches", [])[:3]:
-                    mismatch_details.append(_("Item {0}: SI has {1}, PI has {2}").format(item["item_code"], item["si_qty"], item["pi_qty"]))
-                gt = validation_result.get("grand_total_mismatch")
-                if gt:
-                    mismatch_details.append(_("Grand Total diff: ₹{0:.2f}").format(abs(gt["diff"])))
+                mismatch_details = validation_result.get("differences", [])[:5]
 
                 warning = _("Converted to BNS Internally Transferred but PI {0} not linked (mismatch: {1}). Check Internal Transfer Mismatch report.").format(
                     pi.name, "; ".join(mismatch_details) or _("validation failed")
@@ -9801,19 +9812,12 @@ def convert_purchase_invoice_to_bns_internal(purchase_invoice: str, sales_invoic
                 raise BNSValidationError(_("Sales Invoice {0} must be submitted before linking").format(sales_invoice))
 
             # Validate items, quantities, rates, totals, and taxes
-            amount_tolerance = flt(frappe.db.get_single_value("BNS Branch Accounting Settings", "si_pi_amount_tolerance") or 0)
-            validation_result = validate_si_pi_items_match(si.name, pi.name, check_all=True, amount_tolerance=amount_tolerance)
+            # Exact copy by the submit rules (no tolerance).
+            validation_result = validate_si_pi_items_match(si.name, pi.name)
             if not validation_result.get("match"):
                 # Mismatch found — still convert (status already set above),
                 # but skip linking so it surfaces in the mismatch report.
-                mismatch_details = []
-                for item in validation_result.get("missing_items", [])[:3]:
-                    mismatch_details.append(_("Item {0}: SI has {1}, PI missing").format(item["item_code"], item["si_qty"]))
-                for item in validation_result.get("qty_mismatches", [])[:3]:
-                    mismatch_details.append(_("Item {0}: SI has {1}, PI has {2}").format(item["item_code"], item["si_qty"], item["pi_qty"]))
-                gt = validation_result.get("grand_total_mismatch")
-                if gt:
-                    mismatch_details.append(_("Grand Total diff: ₹{0:.2f}").format(abs(gt["diff"])))
+                mismatch_details = validation_result.get("differences", [])[:5]
 
                 warning = _("Converted to BNS Internally Transferred but SI {0} not linked (mismatch: {1}). Check Internal Transfer Mismatch report.").format(
                     si.name, "; ".join(mismatch_details) or _("validation failed")
@@ -11049,12 +11053,10 @@ def validate_internal_return_credit_note_parity(doc, method: Optional[str] = Non
     if not ref or not frappe.db.exists(counter_dt, ref):
         return  # linkage itself is enforced at validate by the standalone block
 
-    tolerance = flt(
-        frappe.db.get_single_value("BNS Branch Accounting Settings", "si_pi_amount_tolerance") or 0
-    )
+    # Exact to the paisa, like the forward documents (no tolerance).
     debit_grand = abs(flt(frappe.db.get_value(counter_dt, ref, "base_grand_total") or 0))
     credit_grand = abs(flt(doc.get("base_grand_total") or 0))
-    if abs(debit_grand - credit_grand) > tolerance:
+    if round(debit_grand, 2) != round(credit_grand, 2):
         frappe.throw(
             _(
                 "Internal return credit note total ({0}) must match its debit note {1} "
@@ -12055,21 +12057,10 @@ def link_si_pi(sales_invoice: str, purchase_invoice: str) -> Dict:
                     )
                 )
         
-        # Validate items match
+        # Exact copy by the submit rules: rows, amounts, GST, totals, batches / serials.
         items_validation = validate_si_pi_items_match(sales_invoice, purchase_invoice)
         if not items_validation.get("match"):
-            missing = items_validation.get("missing_items", [])
-            qty_mismatches = items_validation.get("qty_mismatches", [])
-            errors = []
-            if missing:
-                for item in missing[:3]:
-                    errors.append(_("Item {0}: SI has {1}, PI missing").format(item["item_code"], item["si_qty"]))
-            if qty_mismatches:
-                for item in qty_mismatches[:3]:
-                    errors.append(_("Item {0}: SI has {1}, PI has {2}").format(item["item_code"], item["si_qty"], item["pi_qty"]))
-            if len(missing) > 3 or len(qty_mismatches) > 3:
-                errors.append(_("... and more items"))
-            raise BNSValidationError(_("Items do not match: {0}").format("; ".join(errors)))
+            raise BNSValidationError(items_validation.get("message"))
         
         # Set bidirectional references
         si.db_set("bns_inter_company_reference", pi.name, update_modified=False)

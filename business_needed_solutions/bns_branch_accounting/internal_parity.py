@@ -13,7 +13,9 @@ Links covered (forward documents only; returns follow the return rules):
     PR -> PI   Purchase Invoice from a Purchase Receipt             (row.pr_detail)
 
 Nothing may change from one document to the next: every target row is linked to exactly
-one source row and every source row is used exactly once; item, UOM, conversion factor,
+one source row and every source row is used exactly once (one exception: a Sales Invoice
+made from a Delivery Note may add a non-stock row of zero value, such as packing, since it
+moves no stock and no money); item, UOM, conversion factor,
 quantities, rates, amounts, HSN and the item-level GST rates and amounts are equal; the
 taxes are equal per GST head (CGST / SGST / IGST / cess, rate and amount) and in total;
 the header totals are equal; and where both documents move stock, the batches and
@@ -130,9 +132,9 @@ def detect_links(doc) -> list[str]:
 		links = []
 		if any(cstr(r.get("pr_detail")).strip() or cstr(r.get("purchase_receipt")).strip() for r in items):
 			links.append("PR->PI")
-		from business_needed_solutions.bns_branch_accounting.utils import _resolve_si_name_for_internal_pi
+		from business_needed_solutions.bns_branch_accounting.utils import _structural_si_for_internal_pi
 
-		if _resolve_si_name_for_internal_pi(doc):
+		if _structural_si_for_internal_pi(doc):
 			links.append("SI->PI")
 		return links
 	return []
@@ -150,9 +152,10 @@ def _source_docs(doc, link):
 		names = sorted({cstr(r.get("purchase_receipt")).strip() for r in items} - {""})
 		return [frappe.get_doc(PR, n) for n in names if frappe.db.exists(PR, n)]
 	if link == "SI->PI":
-		from business_needed_solutions.bns_branch_accounting.utils import _resolve_si_name_for_internal_pi
+		from business_needed_solutions.bns_branch_accounting.utils import _structural_si_for_internal_pi
 
-		name = _resolve_si_name_for_internal_pi(doc)
+		# The supplier's bill number is free text, not a link (same rule as submit).
+		name = _structural_si_for_internal_pi(doc)
 		return [frappe.get_doc(SI, name)] if name else []
 	return []
 
@@ -174,12 +177,25 @@ def _source_row_name(doc, row, link) -> str:
 	return ""
 
 
+def _is_zero_value_extra_row(row) -> bool:
+	"""A non-stock row worth nothing (no amount, no GST): it moves no stock and no money."""
+	item = frappe.get_cached_value("Item", row.get("item_code"), ["is_stock_item", "is_fixed_asset"], as_dict=True) \
+		if row.get("item_code") else None
+	if not item or cint(item.is_stock_item) or cint(item.is_fixed_asset):
+		return False
+	fields = ("amount", "base_amount", "net_amount", "base_net_amount") + tuple(f[0] for f in ROW_GST if f[0].endswith("_amount"))
+	return not any(flt(row.get(f)) for f in fields)
+
+
 def _target_rows(doc, link):
+	"""Rows that must each match one source row, and the extra rows allowed beside them."""
 	rows = doc.get("items") or []
 	if link == "DN->SI":
-		# Rows not made from a DN cannot be part of a DN-linked internal invoice.
-		return rows
-	return rows
+		# A zero-value non-stock row (packing, a free note) may be added to an invoice made
+		# from a Delivery Note; every other row must come from the DN.
+		extra = [r for r in rows if not cstr(r.get("dn_detail")).strip() and _is_zero_value_extra_row(r)]
+		return [r for r in rows if r not in extra], extra
+	return rows, []
 
 
 def _moves_stock(doc) -> bool:
@@ -193,9 +209,12 @@ def _moves_stock(doc) -> bool:
 # --------------------------------------------------------------------------------------
 
 
-def compare_internal_pair(doc, link: str) -> list[Mismatch]:
-	"""Every difference between `doc` and its source(s) on `link`. Empty when identical."""
-	sources = _source_docs(doc, link)
+def compare_internal_pair(doc, link: str, sources=None, row_sources=None) -> list[Mismatch]:
+	"""Every difference between `doc` and its source(s) on `link`. Empty when identical.
+
+	sources / row_sources (target row name -> source row name) are given when the
+	documents are not linked yet (link / convert buttons); otherwise the links are read."""
+	sources = sources if sources is not None else _source_docs(doc, link)
 	if not sources:
 		return []
 	source_label = ", ".join(s.name for s in sources)
@@ -212,8 +231,9 @@ def compare_internal_pair(doc, link: str) -> list[Mismatch]:
 
 	used = set()
 	matched = []
-	for row in _target_rows(doc, link):
-		name = _source_row_name(doc, row, link)
+	rows, extra_rows = _target_rows(doc, link)
+	for row in rows:
+		name = (row_sources or {}).get(row.name) if row_sources is not None else _source_row_name(doc, row, link)
 		src = source_rows.get(name)
 		if not src:
 			add(row.idx, row.item_code, _("Source row"), _("a row of {0}").format(source_label),
@@ -247,6 +267,8 @@ def compare_internal_pair(doc, link: str) -> list[Mismatch]:
 
 	for field, label, places in HEADER_NUMBERS:
 		expected = sum(flt(s.get(field)) for s in sources)
+		if field == "total_qty":
+			expected += sum(flt(r.get("qty")) for r in extra_rows)
 		if round(flt(doc.get(field)), places) != round(expected, places):
 			add(None, "", _(label), expected, flt(doc.get(field)))
 
@@ -364,6 +386,48 @@ def assert_internal_pair(doc, method=None, links=None, force=False) -> None:
 		),
 		title=_("Internal Transfer Mismatch"),
 	)
+
+
+def pair_rows_by_item(source, target) -> dict:
+	"""Target row name -> source row name for two documents not linked yet: an existing
+	row link to this source wins, then the same item, quantity and rate, then the same
+	item, in row order. Each source row is used once; a row left unpaired is reported."""
+	pool = list(source.get("items") or [])
+	names = {r.name for r in pool}
+	pairs = {}
+	for row in target.get("items") or []:
+		linked = cstr(row.get("sales_invoice_item")).strip()
+		if linked in names and linked not in pairs.values():
+			pairs[row.name] = linked
+	pool = [r for r in pool if r.name not in pairs.values()]
+	for exact in (True, False):
+		for row in target.get("items") or []:
+			if row.name in pairs:
+				continue
+			for src in pool:
+				if src.item_code != row.item_code:
+					continue
+				if exact and (round(flt(src.qty), 6) != round(flt(row.qty), 6)
+							  or round(flt(src.rate), 6) != round(flt(row.rate), 6)):
+					continue
+				pairs[row.name] = src.name
+				pool.remove(src)
+				break
+	return pairs
+
+
+def si_pi_link_mismatches(si, pi) -> list[Mismatch]:
+	"""Differences between a Sales Invoice and a Purchase Invoice about to be linked as an
+	internal transfer: the same rules as submit (SI->PI), rows paired by item / qty / rate."""
+	return compare_internal_pair(pi, "SI->PI", sources=[si], row_sources=pair_rows_by_item(si, pi))
+
+
+def mismatch_text(mismatches, limit=10) -> str:
+	"""Plain-text list of differences for a message ("" when none)."""
+	lines = [m.message() for m in mismatches[:limit]]
+	if len(mismatches) > limit:
+		lines.append(_("… and {0} more.").format(len(mismatches) - limit))
+	return "; ".join(lines)
 
 
 def as_dicts(mismatches):
