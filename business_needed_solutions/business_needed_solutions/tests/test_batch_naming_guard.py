@@ -199,3 +199,30 @@ class TestBatchNamingGuard(FrappeTestCase):
 
 		self.assertEqual(typed.name, typed_id)
 		self.assertTrue(generated.name.startswith(PREFIX), generated.name)
+
+
+class TestOpeningStockBatch(FrappeTestCase):
+	"""Opening Stock brings new batches in, so a blank batch gets the BNS name;
+	a stock count (purpose Stock Reconciliation) never makes one."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_set_rule(active=True)
+
+	def tearDown(self):
+		frappe.db.rollback()
+
+	def _reco(self, purpose):
+		sr = frappe.new_doc("Stock Reconciliation")
+		sr.update({"company": COMPANY, "purpose": purpose})
+		sr.append("items", {"item_code": _batch_item(), "warehouse": WAREHOUSE, "qty": 5, "valuation_rate": 10})
+		set_custom_batch_nos(sr)
+		return sr.items[0].batch_no
+
+	def test_opening_stock_row_gets_a_bns_batch(self):
+		batch = self._reco("Opening Stock")
+		self.assertTrue((batch or "").startswith(PREFIX), batch)
+		self.assertTrue(frappe.db.exists("Batch", batch))
+
+	def test_stock_count_does_not_make_a_batch(self):
+		self.assertFalse(self._reco("Stock Reconciliation"))

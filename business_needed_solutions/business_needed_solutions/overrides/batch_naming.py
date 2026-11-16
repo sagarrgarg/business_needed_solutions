@@ -143,8 +143,8 @@ def set_custom_batch_nos(doc, method=None):
 	doctype = doc.doctype
 	purpose = doc.get("purpose") or doc.get("stock_entry_type") or ""
 
-	# Stock Reconciliation counts existing batches; it never makes new ones.
-	if doctype == "Stock Reconciliation":
+	# A stock count works on existing batches; only Opening Stock brings new batches in.
+	if doctype == "Stock Reconciliation" and doc.get("purpose") != "Opening Stock":
 		return
 
 	# For Purchase Invoice, only process if stock is updated

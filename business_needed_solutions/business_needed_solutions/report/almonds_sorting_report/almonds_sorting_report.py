@@ -69,20 +69,21 @@ def get_filtered_stock_entries(filters):
 
 	precision = cint(frappe.db.get_single_value("System Settings", "float_precision"))
 
-	stock_entries = frappe.db.get_list("Stock Ledger Entry",
-		filters={"docstatus": 1, "batch_no": filters.batch_no},
-		fields={"voucher_no"},
-		pluck="voucher_no")
+	# Only Stock Entries sort a batch; the batch can also be on invoices, receipts etc.
+	# Legacy rows carry batch_no, bundle rows (v15+) carry it in Serial and Batch Entry.
+	sle_filters = {"docstatus": 1, "is_cancelled": 0, "voucher_type": "Stock Entry"}
+	stock_entries = set(frappe.get_all("Stock Ledger Entry",
+		filters={**sle_filters, "batch_no": filters.batch_no},
+		pluck="voucher_no"))
 
-	if not stock_entries:
-		bundles = frappe.get_all("Serial and Batch Entry",
-			filters={"batch_no": filters.batch_no},
-			pluck="parent")
-		if bundles:
-			stock_entries = frappe.db.get_list("Stock Ledger Entry",
-				filters={"docstatus": 1, "serial_and_batch_bundle": ("in", bundles)},
-				fields={"voucher_no"},
-				pluck="voucher_no")
+	bundles = frappe.get_all("Serial and Batch Entry",
+		filters={"batch_no": filters.batch_no},
+		pluck="parent")
+	if bundles:
+		stock_entries.update(frappe.get_all("Stock Ledger Entry",
+			filters={**sle_filters, "serial_and_batch_bundle": ("in", bundles)},
+			pluck="voucher_no"))
+	stock_entries = sorted(stock_entries)
 
 	if not stock_entries:
 		return []
