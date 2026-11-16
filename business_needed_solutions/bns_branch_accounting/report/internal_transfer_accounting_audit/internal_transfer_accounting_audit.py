@@ -1447,6 +1447,24 @@ def _audit_purchase_receipts(filters, settings):
 	return results
 
 
+def _flag_internal_pi_without_source(row):
+	"""Submitted internal-supplier PI (not a return) with no internal Sales Invoice
+	behind it -- refused at submit now (utils.assert_internal_purchase_invoice_has_source),
+	so these were submitted before that rule. Nothing pairs or compares them."""
+	from business_needed_solutions.bns_branch_accounting.utils import is_after_internal_transfer_cutoff
+
+	if cint(row.get("is_return")) or not is_after_internal_transfer_cutoff(row.get("posting_date")):
+		return None
+	return _build_row(
+		row, "internal_no_source", "Missing Source Link",
+		details=(
+			"Internal-branch Purchase Invoice not made from an internal Sales Invoice (or a Purchase "
+			"Receipt made from one), so it is not paired, compared or rewritten as a transfer. "
+			"Fix: cancel it and make the Purchase Invoice from the sending branch's Sales Invoice."
+		),
+	)
+
+
 def _audit_purchase_invoices(filters, settings):
 	"""Audit GL and SLE for BNS internal Purchase Invoices (including debit notes)."""
 	from business_needed_solutions.bns_branch_accounting.utils import _internal_stock_movement_uncaptured, _is_internal_stock_movement_enforced
@@ -1470,6 +1488,7 @@ def _audit_purchase_invoices(filters, settings):
 	for row in docs:
 		scope = _classify_pi(row)
 		if not scope:
+			_append_if(results, _flag_internal_pi_without_source(row))
 			continue
 
 		doc = frappe.get_doc("Purchase Invoice", row.name)

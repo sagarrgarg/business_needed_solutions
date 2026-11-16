@@ -1668,53 +1668,112 @@ def validate_internal_purchase_invoice_linkage(doc, method: Optional[str] = None
     if (doc.get("bns_inter_company_reference") or "").strip():
         _validate_internal_ref_requires_internal_party(doc)
         _validate_unique_internal_source_claim(doc)
-    if not is_bns_internal_supplier(doc):
+    # Drafts are free; the source rule applies when the PI is submitted.
+    if cint(doc.get("docstatus")) != 1:
         return
-    if not is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc)):
-        return
-
-    company_gstin = (doc.get("company_gstin") or "").strip()
-    billing_gstin = (doc.get("billing_address_gstin") or "").strip()
-    if not (company_gstin and billing_gstin and company_gstin != billing_gstin):
-        return
-
-    ref_name = (doc.get("bns_inter_company_reference") or "").strip()
-    has_si_link = bool(ref_name and frappe.db.exists("Sales Invoice", ref_name))
-
-    valid_pr_link = False
-    pr_names = sorted(
-        {
-            (item.get("purchase_receipt") or "").strip()
-            for item in (doc.get("items") or [])
-            if item.get("purchase_receipt")
-        }
-    )
-    for pr_name in pr_names:
-        pr_link = frappe.db.get_value(
-            "Purchase Receipt",
-            pr_name,
-            ["bns_inter_company_reference"],
-            as_dict=True,
-        )
-        if not pr_link:
-            continue
-        ref_candidates = [(pr_link.get("bns_inter_company_reference") or "").strip()]
-        pr_has_si = any(ref and frappe.db.exists("Sales Invoice", ref) for ref in ref_candidates)
-        pr_has_dn = any(ref and frappe.db.exists("Delivery Note", ref) for ref in ref_candidates)
-        if pr_has_si and not pr_has_dn:
-            valid_pr_link = True
-            break
-
-    if has_si_link or valid_pr_link:
+    if assert_internal_purchase_invoice_has_source(doc):
         _ensure_internal_batch_bundle_mapping(doc)
-        return
 
-    frappe.throw(
-        _(
-            "For different GSTIN internal flow, Purchase Invoice must be linked to Sales Invoice directly or through a PR that is SI-linked."
-        ),
-        title=_("Invalid Internal PI Linkage"),
-    )
+
+def _pi_row_source_si(doc) -> Optional[str]:
+    """The Sales Invoice the PI's rows were made from (row sales_invoice_item, or the
+    PR row's sales_invoice_item for a PI made from a receipt)."""
+    si_rows, pr_rows = set(), set()
+    for row in doc.get("items") or []:
+        name = (row.get("sales_invoice_item") or "").strip()
+        if name:
+            si_rows.add(name)
+        elif (row.get("pr_detail") or "").strip():
+            pr_rows.add(row.pr_detail.strip())
+    if pr_rows:
+        si_rows |= {
+            n for n in frappe.get_all(
+                "Purchase Receipt Item", filters={"name": ("in", sorted(pr_rows))}, pluck="sales_invoice_item"
+            ) if n
+        }
+    if not si_rows:
+        return None
+    parents = set(frappe.get_all("Sales Invoice Item", filters={"name": ("in", sorted(si_rows))}, pluck="parent"))
+    return sorted(parents)[0] if len(parents) == 1 else None
+
+
+def _structural_si_for_internal_pi(doc) -> Optional[str]:
+    """The internal Sales Invoice a PI was made from: its header reference, its rows,
+    or the Purchase Receipt it was made from. The supplier's bill number is not used,
+    because it is free text."""
+    return _resolve_si_name_for_internal_pi(doc, use_bill_no=False)
+
+
+def _gstin_of(doc, gstin_field: str, address_field: str) -> str:
+    gstin = (doc.get(gstin_field) or "").strip()
+    if not gstin and doc.get(address_field):
+        gstin = (frappe.db.get_value("Address", doc.get(address_field), "gstin") or "").strip()
+    return gstin
+
+
+def assert_internal_purchase_invoice_has_source(doc) -> Optional[str]:
+    """An internal-branch Purchase Invoice must be made from the sending branch's
+    submitted Sales Invoice: directly (Create > Purchase Invoice on the SI) or through
+    a Purchase Receipt made from that SI. Returns the SI name, or throws.
+
+    The branch is internal when the supplier master is ticked internal, so a PI typed
+    by hand without the copied tick is caught too. Returns are left to the return rules.
+    """
+    if doc.doctype != "Purchase Invoice" or cint(doc.get("is_return")):
+        return None
+    if not is_bns_internal_supplier(doc):
+        return None
+
+    si_name = _structural_si_for_internal_pi(doc)
+    si = None
+    if si_name:
+        si = frappe.db.get_value(
+            "Sales Invoice", si_name,
+            ["posting_date", "docstatus", "company_gstin", "billing_address_gstin"], as_dict=True,
+        )
+    # Without a source, the PI's own date decides; a typed bill number cannot move
+    # the document before the cutoff.
+    if not is_after_internal_transfer_cutoff(si.posting_date if si else doc.get("posting_date")):
+        return None
+
+    company_gstin = _gstin_of(doc, "company_gstin", "company_address") or ((si or {}).get("billing_address_gstin") or "").strip()
+    supplier_gstin = _gstin_of(doc, "supplier_gstin", "supplier_address") or ((si or {}).get("company_gstin") or "").strip()
+    if company_gstin and supplier_gstin and company_gstin == supplier_gstin:
+        frappe.throw(
+            _(
+                "{0} is an internal branch with the same GSTIN ({1}). Stock between same-GSTIN branches "
+                "moves by Delivery Note and Purchase Receipt; no Purchase Invoice is made."
+            ).format(frappe.bold(doc.get("supplier")), company_gstin),
+            title=_("Invalid Internal Purchase Invoice"),
+        )
+
+    if not si:
+        pr_names = sorted({(r.get("purchase_receipt") or "").strip() for r in doc.get("items") or []} - {""})
+        if pr_names:
+            frappe.throw(
+                _(
+                    "Purchase Receipt {0} was not made from an internal Sales Invoice, so no Purchase Invoice "
+                    "can be made from it. An internal Purchase Invoice must come from the sending branch's "
+                    "Sales Invoice, directly or through a Purchase Receipt made from that Sales Invoice."
+                ).format(", ".join(frappe.bold(n) for n in pr_names)),
+                title=_("Invalid Internal PI Linkage"),
+            )
+        frappe.throw(
+            _(
+                "{0} is an internal branch. Its Purchase Invoice must be made from the sending branch's "
+                "Sales Invoice (open the Sales Invoice and use Create > Purchase Invoice), or from a "
+                "Purchase Receipt made from that Sales Invoice. A Purchase Invoice entered directly cannot be submitted."
+            ).format(frappe.bold(doc.get("supplier"))),
+            title=_("Invalid Internal PI Linkage"),
+        )
+    if cint(si.docstatus) != 1:
+        frappe.throw(
+            _("Sales Invoice {0} is {1}. Submit it before submitting its Purchase Invoice.").format(
+                frappe.bold(si_name), _("cancelled") if cint(si.docstatus) == 2 else _("a draft")
+            ),
+            title=_("Invalid Internal PI Linkage"),
+        )
+    return si_name
 
 
 def _is_internal_transfer_sales_invoice(si_name: str) -> bool:
@@ -1746,6 +1805,9 @@ def _resolve_si_name_for_internal_pi(doc, use_bill_no: bool = True) -> Optional[
     ref = (doc.get("bns_inter_company_reference") or "").strip()
     if ref and _is_internal_transfer_sales_invoice(ref):
         return ref
+    row_si = _pi_row_source_si(doc)
+    if row_si and _is_internal_transfer_sales_invoice(row_si):
+        return row_si
     bill = (doc.get("bill_no") or "").strip() if use_bill_no else ""
     if bill and _is_internal_transfer_sales_invoice(bill):
         return bill
@@ -2168,9 +2230,9 @@ def validate_internal_purchase_invoice_si_parity(doc, method: Optional[str] = No
     # spuriously fail. See [[validate_internal_purchase_return_linkage]].
     if cint(doc.get("is_return")):
         return
-    if not is_bns_internal_supplier(doc):
-        return
-    if not is_after_internal_transfer_cutoff(_resolve_source_posting_date(doc)):
+    # Throws unless the PI was made from a submitted internal SI (directly or via an
+    # SI-made PR); same-GSTIN branches have no PI at all.
+    if not assert_internal_purchase_invoice_has_source(doc):
         return
 
     from business_needed_solutions.bns_branch_accounting.internal_parity import (
@@ -2179,13 +2241,6 @@ def validate_internal_purchase_invoice_si_parity(doc, method: Optional[str] = No
     )
 
     links = detect_links(doc)  # SI -> PI, and PR -> PI when made from a receipt
-    if not links:
-        return
-
-    company_gstin = (doc.get("company_gstin") or "").strip()
-    billing_gstin = (doc.get("billing_address_gstin") or "").strip()
-    if company_gstin and billing_gstin and company_gstin == billing_gstin:
-        return
 
     # Exact copy, row by row, GST per head, batches/serials: no amount tolerance
     # (si_pi_amount_tolerance no longer applies to internal PIs).

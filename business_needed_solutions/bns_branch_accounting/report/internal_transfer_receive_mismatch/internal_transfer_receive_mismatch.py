@@ -425,8 +425,8 @@ def get_internal_purchase_doc_linkage_mismatches(filters=None):
 			"d.docstatus = 1", "IFNULL(d.is_return, 0) = 0", "d.posting_date >= %s",
 			"(d.is_bns_internal_supplier = 1 OR s.is_bns_internal_supplier = 1)",
 			"IFNULL(d.company_gstin, '') != ''", "IFNULL(d.supplier_gstin, '') != ''",
-			"d.company_gstin != d.supplier_gstin",
-			"si_ref.name IS NULL", "si_bill.name IS NULL",
+			# Same GSTIN: no PI belongs there at all. Different GSTIN: no SI behind it.
+			"(d.company_gstin = d.supplier_gstin OR (si_ref.name IS NULL AND si_bill.name IS NULL))",
 			"""NOT EXISTS (SELECT 1 FROM `tabPurchase Invoice Item` i WHERE i.parent = d.name
 				AND IFNULL(i.purchase_receipt, '') != '')""",
 		]
@@ -436,7 +436,7 @@ def get_internal_purchase_doc_linkage_mismatches(filters=None):
 		internal_si = "{0}.is_bns_internal_customer = 1 AND IFNULL({0}.is_return, 0) = 0"
 		pis = frappe.db.sql(
 			f"""
-			SELECT d.name, d.posting_date, d.grand_total
+			SELECT d.name, d.posting_date, d.grand_total, d.company_gstin = d.supplier_gstin AS same_gstin
 			FROM `tabPurchase Invoice` d
 			LEFT JOIN `tabSupplier` s ON s.name = d.supplier
 			LEFT JOIN `tabSales Invoice` si_ref ON si_ref.name = d.bns_inter_company_reference
@@ -454,10 +454,14 @@ def get_internal_purchase_doc_linkage_mismatches(filters=None):
 				document_type="Purchase Invoice",
 				document_name=pi.name,
 				grand_total=flt(pi.grand_total),
-				missing_document="Sales Invoice / SI-linked PR",
+				missing_document="Delivery Note -> Purchase Receipt" if pi.same_gstin else "Sales Invoice / SI-linked PR",
 				mismatch_reason=_(
-					"Different GSTIN internal PI is not made from an internal Sales Invoice or a Purchase "
-					"Receipt, so nothing is compared or paired (not refused at submit)."
+					"Same-GSTIN internal PI: branches with one GSTIN move stock by DN -> PR and have no "
+					"Purchase Invoice. Submitted before this was refused; cancel it."
+				) if pi.same_gstin else _(
+					"Internal PI not made from an internal Sales Invoice or an SI-made Purchase Receipt, so "
+					"nothing is compared or paired. Submitted before this was refused; cancel and make it "
+					"from the Sales Invoice."
 				),
 				purchase_invoice=pi.name,
 			))
