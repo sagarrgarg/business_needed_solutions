@@ -152,7 +152,11 @@ business_needed_solutions.DirectPrint = class DirectPrint {
      * @param {Object} frm - The form object
      */
     setup_print_button(frm) {
-        const $printButton = frm.page.wrapper.find('button[data-original-title="Print"]');
+        // The sidebar print icon carries the translated label (ui/page.js).
+        const labels = [...new Set(['Print', __('Print')])];
+        const $printButton = frm.page.wrapper.find(
+            labels.map(l => `button[data-original-title="${l.replace(/"/g, '\\"')}"]`).join(', ')
+        ).first();
         if (!$printButton.length) return;
         
         // Remove existing click handlers
@@ -314,6 +318,12 @@ business_needed_solutions.DirectPrint = class DirectPrint {
         
         // Add new handler
         $(document).on('keydown.directPrint', (e) => {
+            // Only while this form is the one on screen; elsewhere let Frappe's
+            // own Ctrl+P run (this handler outlives the form route).
+            const route = frappe.get_route() || [];
+            if (route[0] !== 'Form' || route[1] !== frm.doctype || route[2] !== frm.docname || cur_frm !== frm) {
+                return;
+            }
             if ((e.ctrlKey || e.metaKey) && (e.key === 'p' || e.key === 'P')) {
                 e.preventDefault();
                 e.stopPropagation();

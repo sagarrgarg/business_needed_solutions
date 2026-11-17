@@ -202,12 +202,17 @@ bns_tds.open_preview = function (opts) {
 	load();
 };
 
-if (!bns_tds._realtime_bound) {
+// frappe.realtime.on() is a no-op until frappe.realtime.init() has made the
+// socket (desk start-up, after this file loads), so bind once the desk is ready.
+bns_tds.bind_realtime = function () {
+	if (bns_tds._realtime_bound || !frappe.realtime || !frappe.realtime.socket) return;
 	bns_tds._realtime_bound = true;
 	frappe.realtime.on("bns_tds_apply_complete", function (s) {
 		bns_tds.show_summary(s);
 	});
-}
+};
+bns_tds.bind_realtime();
+$(document).on("app_ready", bns_tds.bind_realtime);
 
 bns_tds.add_category_button = function (frm) {
 	if (frm.doc.docstatus !== 1) return;

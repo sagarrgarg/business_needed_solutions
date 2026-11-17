@@ -1,41 +1,47 @@
-frappe.listview_settings['Delivery Note'] = {
-    // Pull per_billed + gstins so the bulk-action client-side eligibility hint is
-    // accurate (server re-checks authoritatively anyway).
-    add_fields: ["per_billed", "company_gstin", "billing_address_gstin"],
+// Extend ERPNext's Delivery Note list view settings (loaded before this file)
+// instead of replacing them, so ERPNext's statuses, add_fields and bulk actions
+// (Delivery Trip, Sales Invoice, Packaging Slip) stay.
+if (!frappe.listview_settings['Delivery Note']) {
+    frappe.listview_settings['Delivery Note'] = {};
+}
 
-    get_indicator: function(doc) {
-        if (doc.status === "BNS Internally Transferred") {
-            return [__("BNS Internally Transferred"), "purple", "status,=,BNS Internally Transferred"];
-        } else if (doc.status === "Draft") {
-            return [__("Draft"), "red", "status,=,Draft"];
-        } else if (doc.status === "To Bill") {
-            return [__("To Bill"), "orange", "status,=,To Bill"];
-        } else if (doc.status === "Completed") {
-            return [__("Completed"), "green", "status,=,Completed"];
-        } else if (doc.status === "Return Issued") {
-            return [__("Return Issued"), "grey", "status,=,Return Issued"];
-        } else if (doc.status === "Cancelled") {
-            return [__("Cancelled"), "red", "status,=,Cancelled"];
-        } else if (doc.status === "Closed") {
-            return [__("Closed"), "green", "status,=,Closed"];
-        }
-    },
+const bns_dn_settings = frappe.listview_settings['Delivery Note'];
+const original_dn_get_indicator = bns_dn_settings.get_indicator;
+const original_dn_onload = bns_dn_settings.onload;
 
-    onload: function(listview) {
-        // Bulk "Switch to Diff GSTIN Internal Transfer": appears in the multi-select
-        // Actions dropdown. Only enabled when the org setting is ON.
-        frappe.db.get_single_value('BNS Branch Accounting Settings', 'allow_different_gstin_dn_to_pr')
-            .then((global_on) => {
-                if (!global_on) {
-                    return;
-                }
-                listview.page.add_actions_menu_item(
-                    __('Switch to Diff GSTIN Internal Transfer'),
-                    () => bns_bulk_switch_diff_gstin(listview),
-                    false
-                );
-            });
-    },
+// Pull per_billed + gstins so the bulk-action client-side eligibility hint is
+// accurate (server re-checks authoritatively anyway).
+bns_dn_settings.add_fields = [...new Set([
+    ...(bns_dn_settings.add_fields || []),
+    "per_billed", "company_gstin", "billing_address_gstin",
+])];
+
+bns_dn_settings.get_indicator = function(doc) {
+    if (doc.status === "BNS Internally Transferred") {
+        return [__("BNS Internally Transferred"), "purple", "status,=,BNS Internally Transferred"];
+    }
+    if (original_dn_get_indicator) {
+        return original_dn_get_indicator(doc);
+    }
+};
+
+bns_dn_settings.onload = function(listview) {
+    if (original_dn_onload) {
+        original_dn_onload(listview);
+    }
+    // Bulk "Switch to Diff GSTIN Internal Transfer": appears in the multi-select
+    // Actions dropdown. Only enabled when the org setting is ON.
+    frappe.db.get_single_value('BNS Branch Accounting Settings', 'allow_different_gstin_dn_to_pr')
+        .then((global_on) => {
+            if (!global_on) {
+                return;
+            }
+            listview.page.add_actions_menu_item(
+                __('Switch to Diff GSTIN Internal Transfer'),
+                () => bns_bulk_switch_diff_gstin(listview),
+                false
+            );
+        });
 };
 
 function bns_bulk_switch_diff_gstin(listview) {

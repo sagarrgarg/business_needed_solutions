@@ -30,8 +30,9 @@ frappe.ui.form.on('Sales Invoice', {
                     title: __('Duplicate Internal Sales Invoice Not Allowed'),
                     indicator: 'red',
                     message: __(
-                        'Delivery Note {0} is already linked to Sales Invoice {1} ({2}). You cannot create another internal Sales Invoice for the same Delivery Note.'
-                    ).format(result.delivery_note, result.sales_invoice, result.docstatus_label || __('Draft'))
+                        'Delivery Note {0} is already linked to Sales Invoice {1} ({2}). You cannot create another internal Sales Invoice for the same Delivery Note.',
+                        [result.delivery_note, result.sales_invoice, result.docstatus_label || __('Draft')]
+                    )
                 });
             }
         });

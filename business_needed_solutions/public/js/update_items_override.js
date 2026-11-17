@@ -85,8 +85,12 @@ business_needed_solutions.updateItems = (() => {
     if (!frm.has_perm("write")) return false;
 
     if (frm.doc.doctype === "Sales Order") {
+      // Same guards as ERPNext's own Sales Order "Update Items" button.
+      const canUpdateItems = !frm.doc.__onload || frm.doc.__onload.can_update_items;
       return (
-        frm.doc.status !== "Closed" &&
+        canUpdateItems &&
+        !frm.doc.is_subcontracted &&
+        !["Closed", "Completed"].includes(frm.doc.status) &&
         flt(frm.doc.per_delivered) < 100 &&
         flt(frm.doc.per_billed) < 100
       );
@@ -105,9 +109,14 @@ business_needed_solutions.updateItems = (() => {
     return false;
   };
 
+  // Link get_query must return filters synchronously (a Promise is ignored),
+  // so allowed UOMs are fetched ahead of time and kept here per item.
+  const allowedUomCache = {};
+
   const getAllowedUoms = async (itemCode) => {
     if (!itemCode) return [];
-    
+    if (allowedUomCache[itemCode]) return allowedUomCache[itemCode];
+
     try {
       const item = await frappe.db.get_doc("Item", itemCode);
       const allowed = [];
@@ -115,6 +124,7 @@ business_needed_solutions.updateItems = (() => {
       (item.uoms || []).forEach((d) => {
         if (d.uom && !allowed.includes(d.uom)) allowed.push(d.uom);
       });
+      allowedUomCache[itemCode] = allowed;
       return allowed;
     } catch (e) {
       return [];
@@ -296,6 +306,7 @@ business_needed_solutions.updateItems = (() => {
         onchange: async function () {
           const dialog = getDialog && getDialog();
           if (!dialog || !this.value) return;
+          getAllowedUoms(this.value);
 
           // Get discountType for this call
           const currentDiscountType = await getDiscountType();
@@ -352,9 +363,15 @@ business_needed_solutions.updateItems = (() => {
         columns: 1,
         label: __("UOM"),
         reqd: 1,
-        get_query: async function () {
-          const allowed = await getAllowedUoms(this.doc.item_code);
-          return { filters: { name: ["in", allowed.length ? allowed : [""] ] } };
+        get_query: function (doc) {
+          const itemCode = doc && doc.item_code;
+          const allowed = itemCode && allowedUomCache[itemCode];
+          if (!allowed) {
+            // Not fetched yet: fetch now; the next keystroke gets the filter.
+            getAllowedUoms(itemCode);
+            return {};
+          }
+          return { filters: { name: ["in", allowed.length ? allowed : [""]] } };
         },
         onchange: async function () {
           const dialog = getDialog && getDialog();
@@ -563,6 +580,7 @@ business_needed_solutions.updateItems = (() => {
     let dialog = null;
     const fields = await buildDialogFields(frm, childMeta, () => dialog);
     const data = await getInitialData(frm);
+    await Promise.all([...new Set(data.map((d) => d.item_code).filter(Boolean))].map(getAllowedUoms));
 
     const hasReservedStock =
       frm.doc.doctype === "Sales Order" && frm.doc.__onload && frm.doc.__onload.has_reserved_stock;

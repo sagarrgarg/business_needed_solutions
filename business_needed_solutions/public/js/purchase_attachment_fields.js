@@ -231,12 +231,13 @@ frappe.ui.form.on('Purchase Receipt', {
   is_bns_internal_supplier: function (frm) { setupPurchaseAttachmentFields(frm); },
   bns_mode_of_transport: function (frm) { _refreshEwaybillVisibility(frm); },
   gst_category: function (frm) { _refreshEwaybillVisibility(frm); },
-  base_grand_total: function (frm) { _refreshEwaybillVisibility(frm); },
-  items_remove: function (frm) { _refreshEwaybillVisibility(frm); }
+  base_grand_total: function (frm) { _refreshEwaybillVisibility(frm); }
 });
 
+// items_remove fires on the child doctype, not the parent.
 frappe.ui.form.on('Purchase Receipt Item', {
-  item_code: function (frm) { _refreshEwaybillVisibility(frm); }
+  item_code: function (frm) { _refreshEwaybillVisibility(frm); },
+  items_remove: function (frm) { _refreshEwaybillVisibility(frm); }
 });
 
 frappe.ui.form.on('Purchase Invoice', {
@@ -254,13 +255,13 @@ frappe.ui.form.on('Purchase Invoice', {
   },
   update_stock: function (frm) {
     if (!_isLinkedToPR(frm)) _refreshEwaybillVisibility(frm);
-  },
-  items_remove: function (frm) { setupPurchaseAttachmentFields(frm); }
+  }
 });
 
 frappe.ui.form.on('Purchase Invoice Item', {
   item_code: function (frm) {
     if (!_isLinkedToPR(frm)) _refreshEwaybillVisibility(frm);
   },
-  purchase_receipt: function (frm) { setupPurchaseAttachmentFields(frm); }
+  purchase_receipt: function (frm) { setupPurchaseAttachmentFields(frm); },
+  items_remove: function (frm) { setupPurchaseAttachmentFields(frm); }
 });

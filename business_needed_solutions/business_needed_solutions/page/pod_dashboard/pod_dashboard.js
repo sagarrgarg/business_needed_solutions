@@ -27,6 +27,17 @@ frappe.pages["pod-dashboard"].on_page_show = function (wrapper) {
 // PODDashboard Class
 // ════════════════════════════════════════════════════════════════════
 
+// v16 has no fiscal_year default in Global Defaults; fall back to the current
+// fiscal year ERPNext puts in boot.
+function bns_pod_default_fiscal_year() {
+	return (
+		frappe.defaults.get_user_default("fiscal_year") ||
+		frappe.defaults.get_global_default("fiscal_year") ||
+		(frappe.boot.current_fiscal_year || [])[0] ||
+		""
+	);
+}
+
 class PODDashboard {
 	constructor(page) {
 		this.page = page;
@@ -39,6 +50,10 @@ class PODDashboard {
 		this.start = 0;
 		this.page_length = 500;
 		this.total = 0;
+
+		// Filter defaults and change handlers fire several refreshes at load;
+		// collapse each burst into one server call.
+		this.refresh = frappe.utils.debounce(this.refresh.bind(this), 300);
 
 		this.init();
 	}
@@ -166,7 +181,7 @@ class PODDashboard {
 				label: __("Fiscal Year"),
 				fieldtype: "Link",
 				options: "Fiscal Year",
-				default: frappe.defaults.get_user_default("fiscal_year") || frappe.defaults.get_global_default("fiscal_year")
+				default: bns_pod_default_fiscal_year()
 			},
 			{
 				fieldname: "from_date",
@@ -203,7 +218,7 @@ class PODDashboard {
 		});
 
 		// Resolve initial values
-		const default_fy = frappe.defaults.get_user_default("fiscal_year") || frappe.defaults.get_global_default("fiscal_year");
+		const default_fy = bns_pod_default_fiscal_year();
 		const default_co = frappe.defaults.get_user_default("Company") || frappe.defaults.get_global_default("company");
 
 		if (this.filters.company && default_co) {
