@@ -14,37 +14,26 @@ const SUPPORTED_DOCTYPES = {
     'Purchase Receipt': 'Purchase Receipt Item'
 };
 
+// BNS Settings are read once per form refresh and shared by the row events.
+function get_bns_grid_settings(frm, reload) {
+    if (reload || !frm.__bns_grid_settings) {
+        frm.__bns_grid_settings = frappe.db.get_doc('BNS Settings');
+    }
+    return frm.__bns_grid_settings;
+}
+
 // Setup handlers for all supported doctypes
 Object.entries(SUPPORTED_DOCTYPES).forEach(([doctype, child_doctype]) => {
     frappe.ui.form.on(doctype, {
-        after_grid_render(frm) {
-            // Apply overlays after grid is rendered
-            frappe.db.get_doc('BNS Settings').then(settings => {
-                if (settings.enable_conversion_tags) {
-                    apply_conversion_overlays(frm);
-                }
-            });
-        },
-
         refresh(frm) {
-            // Load BNS Settings
-            frappe.db.get_doc('BNS Settings').then(settings => {
+            get_bns_grid_settings(frm, true).then(settings => {
                 if (settings.enable_uom_restriction) {
                     setup_uom_restriction(frm);
                 }
-                if (settings.enable_conversion_tags) {
-                    // Apply to all existing rows
-                    apply_conversion_overlays(frm);
-                }
-            });
-        },
-
-        onload: function(frm) {
-            // Add custom CSS for conversion tags
-            frappe.db.get_doc('BNS Settings').then(settings => {
-                if (settings.enable_conversion_tags) {
+                frm.__bns_conversion_tags = !!settings.enable_conversion_tags;
+                if (frm.__bns_conversion_tags) {
                     add_conversion_styles();
-                    // Apply to all existing rows
+                    watch_items_grid(frm);
                     apply_conversion_overlays(frm);
                 }
             });
@@ -52,30 +41,17 @@ Object.entries(SUPPORTED_DOCTYPES).forEach(([doctype, child_doctype]) => {
     });
 
     // Setup handlers for child doctypes
+    const reapply_row = function(frm, cdt, cdn) {
+        get_bns_grid_settings(frm).then(settings => {
+            if (settings.enable_conversion_tags) {
+                setTimeout(() => apply_single_overlay(frm, cdt, cdn), 200);
+            }
+        });
+    };
     frappe.ui.form.on(child_doctype, {
-        item_code: function(frm, cdt, cdn) {
-            frappe.db.get_doc('BNS Settings').then(settings => {
-                if (settings.enable_conversion_tags) {
-                    setTimeout(() => apply_single_overlay(frm, cdt, cdn), 200);
-                }
-            });
-        },
-        
-        uom: function(frm, cdt, cdn) {
-            frappe.db.get_doc('BNS Settings').then(settings => {
-                if (settings.enable_conversion_tags) {
-                    setTimeout(() => apply_single_overlay(frm, cdt, cdn), 200);
-                }
-            });
-        },
-        
-        conversion_factor: function(frm, cdt, cdn) {
-            frappe.db.get_doc('BNS Settings').then(settings => {
-                if (settings.enable_conversion_tags) {
-                    setTimeout(() => apply_single_overlay(frm, cdt, cdn), 200);
-                }
-            });
-        }
+        item_code: reapply_row,
+        uom: reapply_row,
+        conversion_factor: reapply_row
     });
 });
 
@@ -166,6 +142,34 @@ function add_conversion_styles() {
     }
 }
 
+function get_items_grid(frm) {
+    const field = frm.fields_dict && frm.fields_dict.items;
+    return field && field.grid && field.grid.wrapper ? field.grid : null;
+}
+
+// ERPNext v16 rebuilds every grid row on refresh (grid.reset_grid() from
+// erpnext.toggle_serial_batch_fields when serial/batch fields are hidden), which
+// drops the tags drawn moments earlier. Watch the items grid and draw the tags
+// again whenever rows or columns are rebuilt. Only grid-row / grid-static-col
+// insertions count, so drawing a tag never wakes the watcher again.
+function watch_items_grid(frm) {
+    const grid = get_items_grid(frm);
+    const el = grid && grid.wrapper.get(0);
+    if (!el || el.__bns_conversion_observer) return;
+
+    let pending = null;
+    const observer = new MutationObserver(mutations => {
+        const rebuilt = mutations.some(m => Array.from(m.addedNodes).some(n =>
+            n.nodeType === 1 && (n.classList.contains('grid-row') || n.classList.contains('grid-static-col'))
+        ));
+        if (!rebuilt || !frm.__bns_conversion_tags) return;
+        clearTimeout(pending);
+        pending = setTimeout(() => apply_conversion_overlays(frm), 50);
+    });
+    observer.observe(el, { childList: true, subtree: true });
+    el.__bns_conversion_observer = observer;
+}
+
 function apply_conversion_overlays(frm) {
     // Get the child table name based on the doctype
     const child_doctype = SUPPORTED_DOCTYPES[frm.doc.doctype];
@@ -178,22 +182,27 @@ function apply_conversion_overlays(frm) {
 }
 
 function apply_single_overlay(frm, cdt, cdn) {
-    let row = locals[cdt][cdn];
+    let row = locals[cdt] && locals[cdt][cdn];
     if (!row) return;
-    
-    // Find the qty field first
-    let qty_field = $(`.grid-row[data-idx="${row.idx}"] .grid-static-col[data-fieldname="qty"]`);
-    
+
+    const grid = get_items_grid(frm);
+    if (!grid) return;
+
+    // Find the qty cell of this row in this form's items grid only
+    let qty_field = grid.wrapper.find(
+        `.grid-body .grid-row[data-name="${cdn}"] .grid-static-col[data-fieldname="qty"]`
+    );
+
     if (qty_field.length > 0) {
         // ALWAYS remove existing overlay and class first
         qty_field.find('.conversion-badge').remove();
         qty_field.removeClass('qty-conversion-container');
-        
+
         // Only add overlay if we have data AND UOM is different from Stock UOM
         if (row.uom && row.stock_uom && row.conversion_factor && row.uom !== row.stock_uom) {
             // Add container class
             qty_field.addClass('qty-conversion-container');
-            
+
             // Determine badge class based on conversion factor
             let badgeClass = 'conversion-badge';
             if (row.conversion_factor >= 40) {
@@ -203,15 +212,15 @@ function apply_single_overlay(frm, cdt, cdn) {
             } else if (row.conversion_factor >= 10) {
                 badgeClass += ' low-conversion';
             }
-            
+
             // Create badge HTML
             let badgeHtml = `
                 <div class="${badgeClass}">
-                    ${row.conversion_factor} ${row.stock_uom}
-                    <span>per ${row.uom}</span>
+                    ${frappe.utils.escape_html(String(row.conversion_factor))} ${frappe.utils.escape_html(row.stock_uom)}
+                    <span>per ${frappe.utils.escape_html(row.uom)}</span>
                 </div>
             `;
-            
+
             // Append badge
             qty_field.append(badgeHtml);
         }
