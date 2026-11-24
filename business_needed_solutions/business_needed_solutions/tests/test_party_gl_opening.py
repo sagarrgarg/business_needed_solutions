@@ -150,6 +150,20 @@ class TestPartyGLOpening(FrappeTestCase):
 		self.assertEqual(self._side(rows[0]), (600, 0))
 		self.assertEqual(self._side(rows[-1]), (800, 0))
 
+	def test_consolidated_prints_gross_total_above_net_closing(self):
+		c = self._customer()
+		self._je(BEFORE, c, debit=1000)
+		self._je("2026-04-10", c, debit=2862)
+		self._je("2026-05-10", c, credit=1190)
+
+		rows = self._run_checked(party=[c])
+		total, closing = rows[-2], rows[-1]
+		self.assertEqual(_label(total).strip("'"), "Total")
+		self.assertEqual(self._side(total), (2862, 1190))  # the period's real Dr and Cr
+		self.assertEqual(total.balance, "")  # a sum, not a balance
+		self.assertEqual(self._side(closing), (2672, 0))  # 1000 + 2862 - 1190, one-sided
+		self.assertTrue(closing.balance.endswith("Dr"))
+
 	def test_opening_mostly_credit(self):
 		c = self._customer()
 		self._je(BEFORE, c, debit=200)

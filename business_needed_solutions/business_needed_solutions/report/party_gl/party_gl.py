@@ -824,8 +824,11 @@ def get_data_with_opening_closing(filters, account_details, accounting_dimension
 	else:
 		data += entries
 
-	# totals
-	# data.append(totals.total)
+	# totals: the period's gross Dr/Cr. The other layouts print one per group above;
+	# the Consolidated statement has no groups, so this is the only place its real
+	# Dr/Cr totals show (Closing below is netted one-sided).
+	if filters.get("group_by") == "Group by Voucher (Consolidated)":
+		data.append(totals.total)
 
 	# closing
 	data.append(totals.closing)
@@ -834,7 +837,7 @@ def get_data_with_opening_closing(filters, account_details, accounting_dimension
 
 
 def get_totals_dict():
-	def _get_debit_credit_dict(label, is_opening_or_closing=0):
+	def _get_debit_credit_dict(label, is_opening_or_closing=0, is_total=0):
 		return _dict(
 			account=f"'{label}'",
 			debit=0.0,
@@ -845,11 +848,12 @@ def get_totals_dict():
 			credit_in_transaction_currency=None,
 			# net_opening_and_closing() shows these rows one-sided; Total stays gross.
 			is_opening_or_closing=is_opening_or_closing,
+			is_total=is_total,
 		)
 
 	return _dict(
 		opening=_get_debit_credit_dict(_("Opening"), 1),
-		total=_get_debit_credit_dict(_("Total")),
+		total=_get_debit_credit_dict(_("Total"), is_total=1),
 		closing=_get_debit_credit_dict(_("Closing"), 1),
 	)
 
@@ -1020,7 +1024,9 @@ def get_result_as_list(data, filters):
 		if d.get("voucher_no") or d.get("remarks"):
 			d["reference_with_remarks"] = f"{d.get('voucher_no', '')} {d.get('remarks', '')}".strip()
 
-		if balance >= 0:
+		if d.get("is_total"):
+			d["balance"] = ""  # a Total row sums the period's Dr and Cr; it is not a balance
+		elif balance >= 0:
 			d["balance"] = f"{fmt_money(balance, currency=display_currency)} Dr"
 		else:
 			d["balance"] = f"{fmt_money(abs(balance), currency=display_currency)} Cr"
