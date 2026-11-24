@@ -211,7 +211,7 @@ def parity_findings(filters, doctypes=(SI, PR, PI)):
 			if not sender_passes(filters, sender_type, sender):
 				continue
 			for link in links:
-				mismatches = ip.compare_internal_pair(doc, link)
+				mismatches = ip.compare_internal_pair(doc, link, report=True)
 				if mismatches:
 					out.append(frappe._dict(
 						doctype=doctype, name=name, posting_date=doc.posting_date, company=doc.company,

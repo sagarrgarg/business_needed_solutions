@@ -247,11 +247,11 @@ class TestInternalTransferReports(FrappeTestCase):
 			rows = {r["document_name"]: r for r in report.get_missing_receiver_rows(FILTERS)}
 		self.assertNotIn("_BNSRPT-SI-H", rows)  # neither side moves stock: a matching pair
 		self.assertEqual(rows["_BNSRPT-SI-J"]["missing_document"], "Stock receipt")  # SI moved goods out
-		# The submit check agrees.
+		# Report only: the submit check is unchanged and still asks both PIs to capture stock.
 		from business_needed_solutions.bns_branch_accounting import utils
 
 		with patch.object(utils, "is_bns_internal_supplier", return_value=True):
-			self.assertFalse(utils._internal_stock_movement_uncaptured(frappe.get_doc("Purchase Invoice", pi_off.name)))
+			self.assertTrue(utils._internal_stock_movement_uncaptured(frappe.get_doc("Purchase Invoice", pi_off.name)))
 			self.assertTrue(utils._internal_stock_movement_uncaptured(frappe.get_doc("Purchase Invoice", pi_on.name)))
 
 	# -- party judged on the master ----------------------------------------------------

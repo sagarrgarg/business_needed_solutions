@@ -9,8 +9,9 @@ validators always agree:
 
 1. Document parity (one row per difference): every internal SI made from a DN,
    PR made from a DN / SI and PI made from an SI / PR is compared row by row
-   through its link fields by bns_branch_accounting.internal_parity -- the same
-   function the validators call. An item on several rows is matched to its own
+   through its link fields by bns_branch_accounting.internal_parity with the
+   report's rules (report=True; the submit checks stay strict and are not changed
+   by this report). An item on several rows is matched to its own
    source row (matched by its link field), never by item code. Only tax-exclusive
    values are compared, so a tax-inclusive sender and a tax-exclusive receiver with
    the same ledger agree: item, quantity, UOM, HSN, item-level GST rates, taxable

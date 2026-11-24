@@ -69,9 +69,9 @@ class TestInternalParity(unittest.TestCase):
 		return _doc("Purchase Invoice", "PI-1", rows, taxes if taxes is not None else [
 			{**_igst(amount * 0.18), "add_deduct_tax": "Add"}])
 
-	def _compare(self, pi, si, link="SI->PI"):
+	def _compare(self, pi, si, link="SI->PI", report=False):
 		with patch.object(ip, "_source_docs", return_value=[si]):
-			return ip.compare_internal_pair(pi, link)
+			return ip.compare_internal_pair(pi, link, report=report)
 
 	def test_exact_copy_has_no_difference(self):
 		si = self._sale()
@@ -104,15 +104,19 @@ class TestInternalParity(unittest.TestCase):
 		found = self._compare(self._pi_from(si, change=twice), si)
 		self.assertTrue(any(m.field == "Source row" and m.found == "used again" for m in found), found)
 
-	def test_taxable_rate_and_hsn_must_be_equal(self):
+	def test_rate_and_hsn_must_be_equal(self):
 		si = self._sale()
 		def change(rows):
 			rows[0]["rate"] = 101
 			rows[1]["gst_hsn_code"] = "95030010"
 		fields = {m.field for m in self._compare(self._pi_from(si, change=change), si)}
+		self.assertIn("Rate", fields)
+		self.assertIn("HSN/SAC", fields)
+		# the report compares the taxable rate instead of the (maybe tax-inclusive) rate
+		fields = {m.field for m in self._compare(self._pi_from(si, change=change), si, report=True)}
 		self.assertIn("Taxable Rate", fields)
 		self.assertIn("HSN/SAC", fields)
-		self.assertNotIn("Rate", fields)  # tax-inclusive rate is not compared
+		self.assertNotIn("Rate", fields)
 
 	def test_tax_head_must_match_not_only_the_total(self):
 		si = self._sale()
@@ -133,13 +137,19 @@ class TestInternalParity(unittest.TestCase):
 		fields = {m.field for m in self._compare(self._pi_from(si, change=change), si)}
 		self.assertIn("IGST Amount", fields)
 
-	def test_totals_agree_within_a_rupee(self):
+	def test_paisa_difference_in_totals_is_refused(self):
+		si = self._sale()
+		pi = self._pi_from(si)
+		pi.grand_total += 0.01
+		self.assertTrue(any(m.field == "Grand Total" for m in self._compare(pi, si)))
+
+	def test_report_totals_agree_within_a_rupee(self):
 		si = self._sale()
 		pi = self._pi_from(si)
 		pi.grand_total += 1.0
-		self.assertFalse(any(m.field == "Grand Total" for m in self._compare(pi, si)))
+		self.assertFalse(any(m.field == "Grand Total" for m in self._compare(pi, si, report=True)))
 		pi.grand_total += 0.01
-		self.assertTrue(any(m.field == "Grand Total" for m in self._compare(pi, si)))
+		self.assertTrue(any(m.field == "Grand Total" for m in self._compare(pi, si, report=True)))
 
 	def test_tax_inclusive_sale_and_tax_exclusive_purchase_with_equal_net_values(self):
 		"""SI GT114 Rs 370 with 5% IGST inside the rate; the PI books Rs 352.381 with IGST
@@ -159,7 +169,8 @@ class TestInternalParity(unittest.TestCase):
 		self.assertNotEqual(pi.items[0].amount, si.items[0].amount)  # 3523.81 vs 3700: tax in one
 		self.assertNotEqual(pi.total, si.total)
 		self.assertAlmostEqual(pi.grand_total, si.grand_total, delta=1)
-		self.assertEqual(self._compare(pi, si), [])
+		self.assertEqual(self._compare(pi, si, report=True), [])
+		self.assertIn("Rate", {m.field for m in self._compare(pi, si)})  # submit check stays strict
 
 	def test_repeated_item_on_one_invoice_is_matched_by_its_row_link(self):
 		"""WL-06 twice on SI060827-2840 at different rates; the PI lists the rows the other
@@ -167,6 +178,7 @@ class TestInternalParity(unittest.TestCase):
 		si = self._sale({"item_code": "WL-06", "qty": 4, "rate": 90}, {"item_code": "WL-06", "qty": 6, "rate": 75})
 		pi = self._pi_from(si, change=lambda rows: rows.reverse())
 		self.assertEqual(pi.items[0].sales_invoice_item, "SIR-2")
+		self.assertEqual(self._compare(pi, si, report=True), [])
 		self.assertEqual(self._compare(pi, si), [])
 
 	def test_real_taxable_rate_difference_is_reported(self):
@@ -174,7 +186,7 @@ class TestInternalParity(unittest.TestCase):
 		si = self._sale({"item_code": "P340", "qty": 10, "rate": 50})
 		def change(rows):
 			rows[0]["rate"] = 44.64
-		found = self._compare(self._pi_from(si, change=change), si)
+		found = self._compare(self._pi_from(si, change=change), si, report=True)
 		rate = [m for m in found if m.field == "Taxable Rate"]
 		self.assertEqual([(m.item_code, m.expected, m.found) for m in rate], [("P340", 50.0, 44.64)])
 
@@ -183,7 +195,7 @@ class TestInternalParity(unittest.TestCase):
 		si = self._sale({"item_code": "H-DP", "qty": 4, "rate": 6666.6667})
 		def change(rows):
 			rows[0]["rate"] = 6666.67
-		found = self._compare(self._pi_from(si, change=change), si)
+		found = self._compare(self._pi_from(si, change=change), si, report=True)
 		self.assertIn("Taxable Rate", {m.field for m in found})
 		self.assertNotIn("Taxable Amount", {m.field for m in found})  # Rs 0.01 on the amount
 

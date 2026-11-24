@@ -15,23 +15,26 @@ Links covered (forward documents only; returns follow the return rules):
 Nothing may change from one document to the next: every target row is linked to exactly
 one source row and every source row is used exactly once (one exception: a Sales Invoice
 made from a Delivery Note may add a non-stock row of zero value, such as packing, since it
-moves no stock and no money); item, UOM, conversion factor, quantities, HSN and the
-item-level GST rates are equal; the taxable (net) rates are equal; the taxable amounts,
-item-level GST amounts, GST per head, taxable totals, total taxes and grand total agree
-within Rs 1; and where both documents move stock, the batches and serials are the same.
+moves no stock and no money); item, UOM, conversion factor, quantities, rates, amounts,
+HSN and the item-level GST rates and amounts are equal; the taxes are equal per GST head
+and in total; the header totals are equal; and where both documents move stock, the
+batches and serials are the same. These strict rules are what the submit / save checks
+enforce (assert_internal_pair, si_pi_link_mismatches).
 
-Only tax-exclusive values are compared. One side may carry tax inside its rate
-(included_in_print_rate) and the other add it on top: their rate / amount / total differ
-by the tax while the ledger is the same, so those fields are not compared. The Rs 1 on
-amounts absorbs the paise that inclusive and exclusive tax round differently.
+The reports (report=True) compare tax-exclusive values only. One side may carry tax
+inside its rate (included_in_print_rate) and the other add it on top: their rate /
+amount / total differ by the tax while the ledger is the same, so the reports skip those
+fields; taxable rates stay exact, and taxable amounts, item-level GST amounts, GST per
+head, taxable totals, total taxes and grand total agree within Rs 1 (inclusive and
+exclusive tax round the paise apart).
 
 Rows are matched through their link (dn_detail / delivery_note_item / sales_invoice_item
 / pr_detail), never by item code, so an item on several rows of one invoice is compared
 with its own source row.
 
-`compare_internal_pair` returns the differences (the reports list them);
-`assert_internal_pair` throws them (the submit / save checks). Both use the same rules,
-so a document the check lets through never shows up in the reports, and the reverse.
+`compare_internal_pair` returns the differences (the reports list them, report=True);
+`assert_internal_pair` throws them (the submit / save checks, strict). A document the
+check lets through never shows up in the reports.
 """
 
 from __future__ import annotations
@@ -48,9 +51,24 @@ DN, SI, PR, PI = "Delivery Note", "Sales Invoice", "Purchase Receipt", "Purchase
 # Rupees two amounts may differ by: inclusive and exclusive tax round the paise apart.
 AMOUNT_TOLERANCE = 1.0
 
-# (field, label, decimals, tolerance). Quantities and rates exact (6 places), amounts
-# within AMOUNT_TOLERANCE. Tax-inclusive fields (rate, amount, total) are not compared.
+# Submit / save checks: (field, label, decimals, tolerance), all exact. Rates and
+# quantities at 6 places, amounts at the paisa.
 ROW_NUMBERS = (
+	("qty", "Quantity", 6, 0),
+	("stock_qty", "Stock Quantity", 6, 0),
+	("conversion_factor", "Conversion Factor", 6, 0),
+	("rate", "Rate", 6, 0),
+	("base_rate", "Base Rate", 6, 0),
+	("amount", "Amount", 2, 0),
+	("base_amount", "Base Amount", 2, 0),
+	("net_rate", "Taxable Rate", 6, 0),
+	("base_net_rate", "Base Taxable Rate", 6, 0),
+	("net_amount", "Taxable Amount", 2, 0),
+	("base_net_amount", "Base Taxable Amount", 2, 0),
+)
+# Reports: tax-exclusive values only. Quantities and rates exact, amounts within
+# AMOUNT_TOLERANCE; rate, amount and total (tax-inclusive on one side) are skipped.
+REPORT_ROW_NUMBERS = (
 	("qty", "Quantity", 6, 0),
 	("stock_qty", "Stock Quantity", 6, 0),
 	("conversion_factor", "Conversion Factor", 6, 0),
@@ -68,6 +86,18 @@ ROW_TEXT = (
 # India Compliance item-level GST (present on v15 and v16 when it is installed).
 ROW_GST = (
 	("igst_rate", "IGST Rate", 3, 0),
+	("igst_amount", "IGST Amount", 2, 0),
+	("cgst_rate", "CGST Rate", 3, 0),
+	("cgst_amount", "CGST Amount", 2, 0),
+	("sgst_rate", "SGST Rate", 3, 0),
+	("sgst_amount", "SGST Amount", 2, 0),
+	("cess_rate", "Cess Rate", 3, 0),
+	("cess_amount", "Cess Amount", 2, 0),
+	("cess_non_advol_rate", "Cess (Non-Advol) Rate", 3, 0),
+	("cess_non_advol_amount", "Cess (Non-Advol) Amount", 2, 0),
+)
+REPORT_ROW_GST = (
+	("igst_rate", "IGST Rate", 3, 0),
 	("igst_amount", "IGST Amount", 2, AMOUNT_TOLERANCE),
 	("cgst_rate", "CGST Rate", 3, 0),
 	("cgst_amount", "CGST Amount", 2, AMOUNT_TOLERANCE),
@@ -79,6 +109,17 @@ ROW_GST = (
 	("cess_non_advol_amount", "Cess (Non-Advol) Amount", 2, AMOUNT_TOLERANCE),
 )
 HEADER_NUMBERS = (
+	("total_qty", "Total Quantity", 6, 0),
+	("total", "Total", 2, 0),
+	("base_total", "Base Total", 2, 0),
+	("net_total", "Taxable Total", 2, 0),
+	("base_net_total", "Base Taxable Total", 2, 0),
+	("total_taxes_and_charges", "Total Taxes", 2, 0),
+	("base_total_taxes_and_charges", "Base Total Taxes", 2, 0),
+	("grand_total", "Grand Total", 2, 0),
+	("base_grand_total", "Base Grand Total", 2, 0),
+)
+REPORT_HEADER_NUMBERS = (
 	("total_qty", "Total Quantity", 6, 0),
 	("net_total", "Taxable Total", 2, AMOUNT_TOLERANCE),
 	("base_net_total", "Base Taxable Total", 2, AMOUNT_TOLERANCE),
@@ -222,11 +263,17 @@ def _moves_stock(doc) -> bool:
 # --------------------------------------------------------------------------------------
 
 
-def compare_internal_pair(doc, link: str, sources=None, row_sources=None) -> list[Mismatch]:
+def compare_internal_pair(doc, link: str, sources=None, row_sources=None, report=False) -> list[Mismatch]:
 	"""Every difference between `doc` and its source(s) on `link`. Empty when identical.
 
 	sources / row_sources (target row name -> source row name) are given when the
-	documents are not linked yet (link / convert buttons); otherwise the links are read."""
+	documents are not linked yet (link / convert buttons); otherwise the links are read.
+	report=True uses the reports' tax-exclusive rules; the default is the strict rules
+	the submit / save checks enforce."""
+	row_numbers = REPORT_ROW_NUMBERS if report else ROW_NUMBERS
+	row_gst = REPORT_ROW_GST if report else ROW_GST
+	header_numbers = REPORT_HEADER_NUMBERS if report else HEADER_NUMBERS
+	tax_tolerance = AMOUNT_TOLERANCE if report else 0
 	sources = sources if sources is not None else _source_docs(doc, link)
 	if not sources:
 		return []
@@ -263,7 +310,7 @@ def compare_internal_pair(doc, link: str, sources=None, row_sources=None) -> lis
 			add(None, src.item_code, _("Row"), _("row {0}, qty {1}").format(src.idx, _fmt(flt(src.qty))),
 				_("missing"))
 
-	gst_fields = [f for f in ROW_GST if frappe.get_meta(doc.doctype + " Item").has_field(f[0])]
+	gst_fields = [f for f in row_gst if frappe.get_meta(doc.doctype + " Item").has_field(f[0])]
 	# Lots are compared once the document is being submitted (or is submitted): a draft
 	# receiver gets its bundle copied from the sender only at validate / submit.
 	stock = cint(doc.docstatus) == 1 and _moves_stock(doc) and all(_moves_stock(s) for s in sources)
@@ -271,14 +318,14 @@ def compare_internal_pair(doc, link: str, sources=None, row_sources=None) -> lis
 		for field, label in ROW_TEXT:
 			if cstr(row.get(field)).strip() != cstr(src.get(field)).strip():
 				add(row.idx, row.item_code, _(label), src.get(field), row.get(field))
-		for field, label, places, tolerance in ROW_NUMBERS + tuple(gst_fields):
+		for field, label, places, tolerance in row_numbers + tuple(gst_fields):
 			if _differs(row.get(field), src.get(field), places, tolerance):
 				add(row.idx, row.item_code, _(label), flt(src.get(field)), flt(row.get(field)))
 		if stock:
 			for field, expected, found in _lot_differences(row, src):
 				add(row.idx, row.item_code, field, expected, found)
 
-	for field, label, places, tolerance in HEADER_NUMBERS:
+	for field, label, places, tolerance in header_numbers:
 		expected = sum(flt(s.get(field)) for s in sources)
 		if field == "total_qty":
 			expected += sum(flt(r.get("qty")) for r in extra_rows)
@@ -296,7 +343,7 @@ def compare_internal_pair(doc, link: str, sources=None, row_sources=None) -> lis
 		label = head.upper()
 		# The rate is compared per row (cgst_rate, igst_rate, ...); a tax row may carry it
 		# as "Actual" with rate 0 on one side, so only the amount per head is compared here.
-		if _differs(t["amount"], s["amount"], 2, AMOUNT_TOLERANCE):
+		if _differs(t["amount"], s["amount"], 2, tax_tolerance):
 			add(None, "", _("{0} amount").format(label), s["amount"], t["amount"])
 	return out
 
@@ -403,8 +450,8 @@ def assert_internal_pair(doc, method=None, links=None, force=False) -> None:
 
 def pair_rows_by_item(source, target) -> dict:
 	"""Target row name -> source row name for two documents not linked yet: an existing
-	row link to this source wins, then the same item, quantity and taxable rate, then the
-	same item, in row order. Each source row is used once; a row left unpaired is reported."""
+	row link to this source wins, then the same item, quantity and rate, then the same
+	item, in row order. Each source row is used once; a row left unpaired is reported."""
 	pool = list(source.get("items") or [])
 	names = {r.name for r in pool}
 	pairs = {}
@@ -421,7 +468,7 @@ def pair_rows_by_item(source, target) -> dict:
 				if src.item_code != row.item_code:
 					continue
 				if exact and (round(flt(src.qty), 6) != round(flt(row.qty), 6)
-							  or round(flt(src.net_rate), 6) != round(flt(row.net_rate), 6)):
+							  or round(flt(src.rate), 6) != round(flt(row.rate), 6)):
 					continue
 				pairs[row.name] = src.name
 				pool.remove(src)
