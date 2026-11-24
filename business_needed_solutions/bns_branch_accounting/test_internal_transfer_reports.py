@@ -212,6 +212,48 @@ class TestInternalTransferReports(FrappeTestCase):
 		self.assertNotIn("_BNSRPT-SI-D", names)
 		self.assertIn("_BNSRPT-SI-E", names)
 
+	def test_dn_received_on_a_receipt_is_never_missing(self):
+		dn = self._dn("_BNSRPT-DN-G", billing_address_gstin=GSTIN_B)  # different-GSTIN route
+		names = {r["document_name"] for r in report.get_missing_receiver_rows(FILTERS)}
+		self.assertIn("_BNSRPT-DN-G", names)
+		self._pr_from(dn, "_BNSRPT-PR-G")
+		names = {r["document_name"] for r in report.get_missing_receiver_rows(FILTERS)}
+		self.assertNotIn("_BNSRPT-DN-G", names)
+
+	def _stock_items(self):
+		for code in ("P799", "WL-06"):
+			if not frappe.db.exists("Item", code):
+				frappe.get_doc({"doctype": "Item", "item_code": code, "item_group": "All Item Groups",
+								"stock_uom": "Nos", "is_stock_item": 1, "gst_hsn_code": "61149090"}).insert()
+			else:
+				frappe.db.set_value("Item", code, "is_stock_item", 1)
+		frappe.clear_cache(doctype="Item")
+
+	def _non_stock_pi(self, name, si):
+		return _insert("Purchase Invoice", name, {
+			"supplier": SUPPLIER, "posting_date": "2026-06-02", "company_gstin": GSTIN_B,
+			"supplier_gstin": GSTIN_A, "bns_inter_company_reference": si.name, "bill_no": si.name,
+			"is_bns_internal_supplier": 1, "update_stock": 0,
+		}, [(r.item_code, r.qty, r.rate, r.name) for r in si.items], name,
+			link=lambda i, src: {"sales_invoice_item": src})
+
+	def test_non_stock_sale_received_on_non_stock_purchase_is_good(self):
+		self._stock_items()
+		si_off = self._si("_BNSRPT-SI-H", update_stock=0)
+		si_on = self._si("_BNSRPT-SI-J", update_stock=1)
+		pi_off = self._non_stock_pi("_BNSRPT-PI-H", si_off)
+		pi_on = self._non_stock_pi("_BNSRPT-PI-J", si_on)
+		with patch.object(scan.utils, "_is_internal_stock_movement_enforced", return_value=True):
+			rows = {r["document_name"]: r for r in report.get_missing_receiver_rows(FILTERS)}
+		self.assertNotIn("_BNSRPT-SI-H", rows)  # neither side moves stock: a matching pair
+		self.assertEqual(rows["_BNSRPT-SI-J"]["missing_document"], "Stock receipt")  # SI moved goods out
+		# The submit check agrees.
+		from business_needed_solutions.bns_branch_accounting import utils
+
+		with patch.object(utils, "is_bns_internal_supplier", return_value=True):
+			self.assertFalse(utils._internal_stock_movement_uncaptured(frappe.get_doc("Purchase Invoice", pi_off.name)))
+			self.assertTrue(utils._internal_stock_movement_uncaptured(frappe.get_doc("Purchase Invoice", pi_on.name)))
+
 	# -- party judged on the master ----------------------------------------------------
 
 	def test_reference_on_a_regular_supplier_is_listed(self):

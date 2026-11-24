@@ -354,9 +354,9 @@ def missing_receivers(filters, include_stock=True):
 			):
 				sis.setdefault(r.dn, []).append(r.name)
 		for dn in dns:
+			if prs.get(dn.name):
+				continue  # received on a Purchase Receipt (DN -> PR): good, whichever route
 			if dn_routes_to_pr(dn):
-				if prs.get(dn.name):
-					continue
 				draft = draft_prs.get(dn.name)
 				rows.append(_missing_row(
 					DN, dn, PR, "DN->PR",
@@ -466,10 +466,12 @@ def _si_receivers(sis, include_stock):
 				sales_invoice=si.name,
 			))
 			continue
-		if pr_names or not enforced:
+		if pr_names or not enforced or not cint(si.update_stock):
 			continue
 		# Invoice received but no stock: the receiving PI neither updates stock nor comes
 		# from a receipt (validate_internal_stock_movement_captured, same switch + cutoff).
+		# An SI that does not update stock itself is matched by a PI that does not either:
+		# the goods, if any, move on the DN -> PR leg, which is checked on its own.
 		for pi_name in found:
 			info = pi_info.get(pi_name) or {}
 			if cint(info.get("update_stock")):

@@ -19,6 +19,8 @@ validators always agree:
 2. Receiver missing: a submitted internal DN / SI after the internal-transfer
    cutoff whose receiving PR / PI was never submitted, with its age in days
    (see internal_transfer_scan.missing_receivers for which receiver is required).
+   A DN received on a submitted PR, and an SI without Update Stock received on a
+   PI without Update Stock, are good and not listed.
 3. Linkage: internal PR / PI / SI linkage the validators refuse, half-written
    DN <-> PR back-references, duplicate claimants, references on non-internal
    parties and external parties treated as internal.

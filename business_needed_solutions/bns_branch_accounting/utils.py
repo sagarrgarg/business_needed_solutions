@@ -6233,6 +6233,25 @@ def _voucher_owns_sle(voucher_type, doc) -> bool:
     return False
 
 
+def _source_si_moves_no_stock(pi) -> bool:
+    """True when the internal PI is made from Sales Invoice(s) and none of them updates
+    stock (its reference, else the SIs its rows come from)."""
+    names = set()
+    ref = (pi.get("bns_inter_company_reference") or "").strip()
+    if ref and frappe.db.exists("Sales Invoice", ref):
+        names.add(ref)
+    else:
+        rows = [(r.get("sales_invoice_item") or "").strip() for r in pi.get("items") or []]
+        rows = [r for r in rows if r]
+        if rows:
+            names.update(frappe.get_all("Sales Invoice Item", filters={"name": ["in", rows]}, pluck="parent"))
+    if not names:
+        return False
+    return not any(
+        cint(frappe.db.get_value("Sales Invoice", n, "update_stock")) for n in names
+    )
+
+
 def _internal_stock_movement_uncaptured(doc) -> bool:
     """True when an internal SI/PI carries stock items but records no stock
     movement anywhere: Update Stock is off AND no source stock document is
@@ -6256,6 +6275,11 @@ def _internal_stock_movement_uncaptured(doc) -> bool:
         return False
 
     if cint(doc.get("update_stock")):
+        return False
+
+    if dt == "Purchase Invoice" and _source_si_moves_no_stock(doc):
+        # Mirrors its Sales Invoice, which did not update stock either: the goods (if any)
+        # move on the DN -> PR leg, which is checked on its own.
         return False
 
     has_stock_item = False
