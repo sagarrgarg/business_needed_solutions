@@ -824,6 +824,27 @@ class BNSDashboard {
 								</div>
 							</div>
 
+							<div class="sub-section mb-3" id="subsection-tds-year">
+								<div class="sub-section-header d-flex justify-content-between align-items-center"
+									 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
+									 data-subsection="tds-year">
+									<strong>
+										<i class="fa fa-chevron-right subsection-toggle collapsed" id="subtoggle-tds-year"></i>
+										${__("Recalculate TDS for a Fiscal Year")}
+									</strong>
+								</div>
+								<div class="sub-section-content" id="subcontent-tds-year" style="display: none; padding-top: 10px;">
+									<p class="text-muted" style="font-size: 0.8rem;">
+										${__("Works out TDS again for every supplier's purchase invoices in the year, in posting order, the way ERPNext does at submit, and shows each invoice whose TDS would change before anything is written. Filed quarters and frozen periods stay as they are. On ERPNext v16 each item line keeps its own category; Defaults takes the Item's purchase TDS category, else the Supplier's.")}
+									</p>
+									<div id="tds-year-controls" class="d-flex align-items-center flex-wrap mb-2" style="gap: 8px;">
+										<div class="tds-year-fy" style="width: 200px;"></div>
+										<div class="tds-year-mode" style="width: 300px;"></div>
+										<button class="btn btn-primary btn-xs btn-tds-year-preview">${__("Preview")}</button>
+									</div>
+								</div>
+							</div>
+
 							<div class="sub-section mb-3" id="subsection-suppliers-tds-redo">
 								<div class="sub-section-header d-flex justify-content-between align-items-center"
 									 style="cursor: pointer; padding: 8px 10px; background: var(--control-bg); border-radius: 4px;"
@@ -906,6 +927,7 @@ class BNSDashboard {
 			this.load_suppliers_missing_tds(),
 			this.load_pi_wrong_tds(),
 			this.load_suppliers_tds_redo(),
+			this.load_tds_year(),
 			this.load_tds_account_remap(),
 			this.load_all_suppliers_tds(),
 		]);
@@ -953,6 +975,42 @@ class BNSDashboard {
 			console.error("Failed to load TDS account remap:", e);
 			container.html('<p class="text-danger">' + __("Failed to load data") + "</p>");
 		}
+	}
+
+	load_tds_year() {
+		const self = this;
+		const holder = this.wrapper.find("#tds-year-controls");
+		if (!holder.length || this._tds_year_fy) return;
+		this._tds_year_fy = frappe.ui.form.make_control({
+			parent: holder.find(".tds-year-fy"),
+			df: { fieldtype: "Link", fieldname: "tds_year_fy", options: "Fiscal Year", placeholder: __("Fiscal Year (current)") },
+			render_input: true,
+		});
+		this._tds_year_mode = frappe.ui.form.make_control({
+			parent: holder.find(".tds-year-mode"),
+			df: {
+				fieldtype: "Select", fieldname: "tds_year_mode",
+				options: [
+					{ value: "keep", label: __("Keep each invoice's categories") },
+					{ value: "defaults", label: __("Defaults: Item's category, else Supplier's") },
+				],
+			},
+			render_input: true,
+		});
+		this._tds_year_mode.set_value("keep");
+		holder.find(".btn-tds-year-preview").on("click", function () {
+			const fiscal_year = self._tds_year_fy.get_value() || "";
+			const mode = self._tds_year_mode.get_value() || "keep";
+			const tds = "business_needed_solutions.business_needed_solutions.overrides.tds_backfill.";
+			bns_tds.open_preview({
+				title: __("Recalculate TDS for {0}: preview", [fiscal_year || __("this fiscal year")]),
+				start_method: tds + "start_year_tds_preview",
+				poll_method: tds + "get_year_tds_preview",
+				apply_method: tds + "recalculate_year_tds",
+				args: { company: self.get_company(), fiscal_year: fiscal_year, mode: mode },
+				on_done: function () { self.load_tds_fixables(); },
+			});
+		});
 	}
 
 	async load_suppliers_tds_redo() {

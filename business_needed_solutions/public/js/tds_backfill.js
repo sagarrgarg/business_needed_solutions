@@ -126,13 +126,46 @@ bns_tds.show_summary = function (s, title) {
 	});
 };
 
-// opts: title, preview_method, apply_method, args, on_done
+// opts: title, preview_method, apply_method, args, on_done. A long preview (the whole
+// year) passes start_method + poll_method instead of preview_method: it runs in the
+// background and is polled until ready.
 bns_tds.open_preview = function (opts) {
 	let allow_filed = 0;
 	let dialog = null;
 	let preview = null;
 
+	const poll = function (key, tries) {
+		frappe.call({
+			method: opts.poll_method,
+			args: { key: key },
+			callback: function (r) {
+				const data = r.message || {};
+				if (data.status === "done") {
+					frappe.hide_progress();
+					preview = data.view || {};
+					show();
+				} else if (data.status === "running" && tries < 600) {
+					frappe.show_progress(__("Working out TDS for the year"), Math.min(95, tries), 100,
+						__("Every supplier's invoices are replayed in posting order. This can take a few minutes."));
+					setTimeout(function () { poll(key, tries + 1); }, 3000);
+				} else {
+					frappe.hide_progress();
+					frappe.msgprint({ title: __("TDS preview failed"), indicator: "red",
+						message: frappe.utils.escape_html(data.error || __("The preview did not finish. Try again.")) });
+				}
+			},
+		});
+	};
+
 	const load = function () {
+		if (opts.start_method) {
+			frappe.call({
+				method: opts.start_method,
+				args: Object.assign({}, opts.args, { allow_filed: allow_filed }),
+				callback: function (r) { poll((r.message || {}).key, 0); },
+			});
+			return;
+		}
 		frappe.call({
 			method: opts.preview_method,
 			args: Object.assign({}, opts.args, { allow_filed: allow_filed }),
@@ -223,6 +256,10 @@ bns_tds.add_category_button = function (frm) {
 			const state = r.message || {};
 			if (!state.show) return;
 			frm.add_custom_button(__("Change TDS Category"), function () {
+				if (state.model === "v16" && state.rows) {
+					bns_tds.line_dialog(frm, state);
+					return;
+				}
 				const d = new frappe.ui.Dialog({
 					title: __("Change TDS Category — {0}", [frm.doc.name]),
 					fields: [
@@ -254,6 +291,67 @@ bns_tds.add_category_button = function (frm) {
 			}, __("Actions"));
 		},
 	});
+};
+
+// ERPNext v16: TDS category per item line (Item's purchase category, else Supplier's).
+bns_tds.line_dialog = function (frm, state) {
+	const lines = (state.rows || []).map(function (r) {
+		return {
+			row: r.name, item: r.item_code + (r.item_name && r.item_name !== r.item_code ? ": " + r.item_name : ""),
+			amount: r.base_net_amount, in_tds: r.apply_tds ? __("Yes") : __("No"),
+			category: r.tax_withholding_category || "", default_category: r.default_category || "",
+		};
+	});
+	const d = new frappe.ui.Dialog({
+		title: __("Change TDS Category — {0}", [frm.doc.name]),
+		size: "large",
+		fields: [
+			{
+				fieldtype: "Link", fieldname: "all", options: "Tax Withholding Category", label: __("Set every line to"),
+				description: __("Or pick per line below. Empty takes the line out of TDS. Now: {0}. Supplier: {1}.", [
+					state.current_category || __("none"), state.supplier_category || __("none")]),
+				change: function () {
+					const v = d.get_value("all");
+					if (!v) return;
+					d.fields_dict.lines.df.data.forEach(function (x) { x.category = v; });
+					d.fields_dict.lines.grid.refresh();
+				},
+			},
+			{
+				fieldtype: "Button", fieldname: "use_defaults", label: __("Use defaults (Item's, else Supplier's)"),
+				click: function () {
+					d.fields_dict.lines.df.data.forEach(function (x) { x.category = x.default_category; });
+					d.fields_dict.lines.grid.refresh();
+				},
+			},
+			{
+				fieldtype: "Table", fieldname: "lines", label: __("Lines"), cannot_add_rows: 1, cannot_delete_rows: 1,
+				in_place_edit: 1, data: lines,
+				fields: [
+					{ fieldtype: "Data", fieldname: "row", hidden: 1 },
+					{ fieldtype: "Data", fieldname: "item", label: __("Item"), read_only: 1, in_list_view: 1, columns: 4 },
+					{ fieldtype: "Currency", fieldname: "amount", label: __("Amount"), read_only: 1, in_list_view: 1, columns: 2 },
+					{ fieldtype: "Data", fieldname: "in_tds", label: __("In TDS"), read_only: 1, in_list_view: 1, columns: 1 },
+					{ fieldtype: "Link", fieldname: "category", options: "Tax Withholding Category", label: __("Category"), in_list_view: 1, columns: 3 },
+					{ fieldtype: "Data", fieldname: "default_category", hidden: 1 },
+				],
+			},
+		],
+		primary_action_label: __("Preview"),
+		primary_action: function () {
+			const rows = {};
+			d.fields_dict.lines.df.data.forEach(function (x) { rows[x.row] = x.category || ""; });
+			d.hide();
+			bns_tds.open_preview({
+				title: __("TDS Category for {0}: preview", [frm.doc.name]),
+				preview_method: BNS_TDS + "preview_tds_category_change",
+				apply_method: BNS_TDS + "apply_tds_category_change",
+				args: { name: frm.doc.name, rows: JSON.stringify(rows) },
+				on_done: function () { frm.reload_doc(); },
+			});
+		},
+	});
+	d.show();
 };
 
 frappe.ui.form.on("Purchase Invoice", {

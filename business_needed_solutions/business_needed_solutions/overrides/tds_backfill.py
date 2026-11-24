@@ -37,8 +37,14 @@ Who may use it: BNS Settings `enable_tds_category_fixables` on, a role listed in
 `tds_backfill_roles` (System Manager always allowed), and write permission on each
 Purchase Invoice that changes. The same check draws the button and guards every endpoint.
 
-ERPNext v16 keeps TDS in Tax Withholding Entries instead; there
-the tools stay off (no button, no dashboard section, endpoints refuse).
+ERPNext v16 keeps TDS in Tax Withholding Entries, with the category on each item row.
+There every plan and apply goes to tds_backfill_v16, which replays ERPNext's own v16
+calculation over the year instead of the v15 rules below. The endpoints, the token and
+the preview are the same for both; `_model()` says which one this site runs.
+
+Recalculate a whole fiscal year (every supplier of a company, grouped by PAN):
+preview_year_tds / recalculate_year_tds. The preview runs in the background
+(start_year_tds_preview, then get_year_tds_preview).
 """
 
 import hashlib
@@ -53,6 +59,7 @@ from business_needed_solutions.business_needed_solutions.overrides import auto_p
 
 PI = "Purchase Invoice"
 TAX_ROW = "Purchase Taxes and Charges"
+DEFAULTS = "__defaults__"  # override: the Item's (v16), else the Supplier's, category
 
 # Header fields that a TDS change recomputes and that are saved back on the invoice.
 _HEADER_TOTAL_FIELDS = (
@@ -76,17 +83,31 @@ _INLINE_LIMIT = 20  # more invoice changes than this run in the background
 # Gates
 # --------------------------------------------------------------------------------------
 
+def _v16():
+    from business_needed_solutions.business_needed_solutions.overrides import tds_backfill_v16
+
+    return tds_backfill_v16
+
+
+def _model() -> str:
+    """'v15' (category on the invoice) or 'v16' (Tax Withholding Entries, category per row)."""
+    if _v16().supported():
+        return "v16"
+    if _tax_withholding_on_invoice():
+        return "v15"
+    return ""
+
+
 def _feature_enabled() -> bool:
     # One BNS Settings switch governs the dashboard TDS tools and the per-invoice button.
-    if not _tax_withholding_on_invoice():
+    if not _model():
         return False
     return bool(frappe.db.get_single_value("BNS Settings", "enable_tds_category_fixables", cache=True))
 
 
 def _tax_withholding_on_invoice() -> bool:
-    """These tools implement ERPNext v15's tax withholding, which keeps the category on
-    the invoice. v16 moved it to Tax Withholding Entries and removed Purchase Invoice
-    `tax_withholding_category`; the tools are not ported to that, so they stay off."""
+    """ERPNext v15's tax withholding: the category on the invoice header. v16 removed
+    that field (Tax Withholding Entries; see tds_backfill_v16)."""
     return frappe.get_meta(PI).has_field("tax_withholding_category")
 
 
@@ -184,7 +205,7 @@ def _default_company(company=None):
 def _filed_upto():
     if not frappe.get_meta("BNS Settings").has_field("tds_filed_upto"):
         return None
-    value = frappe.db.get_single_value("BNS Settings", "tds_filed_upto")
+    value = frappe.db.get_single_value("BNS Settings", "tds_filed_upto", cache=False)
     # v15 reads an empty Date single back as 0001-01-01
     value = getdate(value) if value else None
     return value if value and value.year > 1900 else None
@@ -298,11 +319,17 @@ def plan_supplier_year(supplier, company, date=None, mode="keep", overrides=None
 
     mode      "keep": each invoice keeps its own category (its category when apply_tds
               is on, none otherwise). "supplier": the supplier's invoices take the
-              supplier's category as it stands now (the redo).
-    overrides {invoice: category or ""} on top of the mode ("" takes TDS off).
+              supplier's category as it stands now (the redo). "defaults": every
+              invoice of the PAN takes its own supplier's category (whole-year redo).
+    overrides {invoice: category or ""} on top of the mode ("" takes TDS off,
+              DEFAULTS the supplier's category). On v16 a value may also be
+              {item row: category or ""}.
     scope     "all", or "account" to move TDS to the category's account and change no
               amount (the re-map).
     """
+    if _model() == "v16":
+        return _v16().plan_supplier_year(supplier, company, date=date, mode=mode, overrides=overrides,
+                                         scope=scope, allow_filed=allow_filed)
     overrides = {k: (v or None) for k, v in (overrides or {}).items()}
     fy_start, fy_end = _fiscal_year(company, date)
     parties = _parties(supplier)
@@ -313,10 +340,6 @@ def plan_supplier_year(supplier, company, date=None, mode="keep", overrides=None
         mode=mode, scope=scope, overrides=overrides, parties=parties,
         problems=[], warnings=[], docs=[],
     )
-    if not _tax_withholding_on_invoice():
-        plan.problems.append(_("This ERPNext version keeps TDS in Tax Withholding Entries; not supported."))
-        return plan
-
     docs = _load_year(parties, company, fy_start, fy_end)
     if not docs:
         return plan
@@ -343,7 +366,9 @@ def plan_supplier_year(supplier, company, date=None, mode="keep", overrides=None
             continue
         if d.name in overrides:
             d.category = overrides[d.name]
-        elif mode == "supplier" and d.supplier == supplier:
+            if d.category == DEFAULTS:
+                d.category = supplier_info[d.supplier].tax_withholding_category or None
+        elif mode == "defaults" or (mode == "supplier" and d.supplier == supplier):
             d.category = supplier_info[supplier].tax_withholding_category or None
         else:
             d.category = d.current_category if cint(d.apply_tds) else None
@@ -637,6 +662,13 @@ def _plan_token(plans):
     refuses if it differs from the one that was previewed."""
     rows = []
     for plan in plans:
+        if plan.get("v16"):
+            # v16 entries link the year's invoices: any change anywhere in it counts.
+            rows.append([plan.supplier, plan.problems])
+            for d in plan.docs:
+                rows.append([d.name, d.action, cstr(d.blocked or ""), flt(d.current_tds, 2), flt(d.target_tds, 2),
+                             d.target_account or "", d.category or "", d.get("sig") or ""])
+            continue
         for d in plan.docs:
             if d.action in ("ledger", "flags") and not d.blocked:
                 rows.append([d.name, d.action, flt(d.current_tds, 2), flt(d.target_tds, 2),
@@ -1028,11 +1060,14 @@ def _comment(d, before, after, caps=None):
 # Running plans
 # --------------------------------------------------------------------------------------
 
-def run_plans(plans):
+def run_plans(plans, specs=None, allow_filed=False):
     """Apply the plans' changes in posting order, one invoice per transaction. Stops a
     supplier's year at its first failure: later invoices were planned assuming the
-    earlier ones changed."""
+    earlier ones changed. On v16 each PAN-year is one transaction (tds_backfill_v16)."""
     done, errors, skipped = [], [], []
+    if plans and plans[0].get("v16"):
+        done, errors, skipped = _v16().run_plans(plans, specs, allow_filed)
+        plans = []
     for plan in plans:
         for d in plan.docs:
             if d.action not in ("ledger", "flags"):
@@ -1079,7 +1114,7 @@ def _apply_specs(specs, token, allow_filed=False, event=None, user=None):
         frappe.throw(_("The invoices changed since the preview. Preview again before applying."),
                      title=_("Preview is out of date"))
     _require_write_on(plans)  # again here: a queued run happens later, as the same user
-    summary = run_plans(plans)
+    summary = run_plans(plans, specs, allow_filed)
     summary["remaining"] = _remap_leftovers(specs) if any(s.get("scope") == "account" for s in specs) else None
     if event:
         frappe.publish_realtime(event, summary, user=user or frappe.session.user)
@@ -1098,8 +1133,9 @@ def _dispatch(specs, token, allow_filed, event, plans):
     return {"status": "done", "summary": _apply_specs(specs, token, allow_filed)}
 
 
-def _view(plans, extra=None):
-    """What a preview returns: the plans with only the invoices worth showing."""
+def _view(plans, extra=None, compact=False):
+    """What a preview returns: the plans with only the invoices worth showing.
+    `compact` leaves out plans with nothing to show (the whole-year preview)."""
     out = {"token": _plan_token(plans), "filed_upto": str(_filed_upto() or ""),
            "can_override_filed": _is_system_manager(), "plans": []}
     total = {"changes": 0, "ledger_changes": 0, "flag_changes": 0, "blocked": 0,
@@ -1109,7 +1145,7 @@ def _view(plans, extra=None):
         for d in plan.docs:
             if d.action == "none" and not d.blocked:
                 continue
-            row = {k: d.get(k) for k in (
+            row = {k: d.get(k) for k in ("keep_reason",
                 "name", "supplier", "posting_date", "is_return", "taxable", "current_category",
                 "category", "current_tds", "target_tds", "current_accounts", "target_account",
                 "action", "blocked", "quarter", "filed", "months_late", "late_interest", "challans",
@@ -1125,6 +1161,8 @@ def _view(plans, extra=None):
                 total["tds_before"] += flt(d.current_tds)
                 total["tds_after"] += flt(d.target_tds)
                 total["late_interest"] += flt(d.get("late_interest"))
+        if compact and not rows and not plan.problems:
+            continue
         out["plans"].append({
             "supplier": plan.supplier, "supplier_name": plan.supplier_name, "company": plan.company,
             "fiscal_year_start": plan.fiscal_year_start, "fiscal_year_end": plan.fiscal_year_end,
@@ -1151,18 +1189,17 @@ def _return_original(pi, fy_start, fy_end):
     year (the debit note then takes its category). None otherwise."""
     if not cint(pi.get("is_return")) or not pi.get("return_against"):
         return None
-    original = frappe.db.get_value(
-        PI, pi.return_against,
-        ["name", "docstatus", "company", "posting_date", "apply_tds", "tax_withholding_category"],
-        as_dict=True,
-    )
+    fields = ["name", "docstatus", "company", "posting_date", "apply_tds"]
+    if _tax_withholding_on_invoice():
+        fields.append("tax_withholding_category")
+    original = frappe.db.get_value(PI, pi.return_against, fields, as_dict=True)
     if (original and original.docstatus == 1 and original.company == pi.company
             and fy_start <= getdate(original.posting_date) <= fy_end):
         return original
     return None
 
 
-def _invoice_spec(name, category):
+def _invoice_spec(name, category, rows=None):
     if not frappe.db.exists(PI, name):
         frappe.throw(_("Purchase Invoice {0} not found.").format(name))
     pi = frappe.db.get_value(
@@ -1175,33 +1212,61 @@ def _invoice_spec(name, category):
     if not (fy_start <= getdate(pi.posting_date) <= fy_end):
         frappe.throw(_("TDS category can be changed only on invoices of the current fiscal year."),
                      title=_("Not this year"))
-    if category and not frappe.db.exists("Tax Withholding Category", category):
+    if category and category != DEFAULTS and not frappe.db.exists("Tax Withholding Category", category):
         frappe.throw(_("Tax Withholding Category {0} not found.").format(category))
+    value = category or ""
+    if rows:
+        # v16: a category per item row ({row: category or ""})
+        if _model() != "v16":
+            frappe.throw(_("Item-row TDS categories need ERPNext v16."))
+        rows = json.loads(rows) if isinstance(rows, str) else rows
+        own = set(frappe.get_all("Purchase Invoice Item", filters={"parent": name, "parenttype": PI}, pluck="name"))
+        for row, cat in rows.items():
+            if row not in own:
+                frappe.throw(_("Row {0} is not on {1}.").format(row, name))
+            if cat and not frappe.db.exists("Tax Withholding Category", cat):
+                frappe.throw(_("Tax Withholding Category {0} not found.").format(cat))
+        value = {row: (cat or "") for row, cat in rows.items()}
     # A debit note takes the category of the invoice it returns, so the change goes there.
     original = _return_original(pi, fy_start, fy_end)
     target = original.name if original else name
+    if original and isinstance(value, dict):
+        frappe.throw(_("Set the categories on {0}, the invoice this debit note returns.").format(original.name))
     return {"supplier": pi.supplier, "company": pi.company, "date": str(pi.posting_date),
-            "mode": "keep", "overrides": {target: category or ""}}
+            "mode": "keep", "overrides": {target: value}}
 
 
 @frappe.whitelist()
-def preview_tds_category_change(name, category=None, allow_filed=0):
+def preview_tds_category_change(name, category=None, allow_filed=0, rows=None):
     """Read-only: what changing this invoice's TDS category would do, across the
-    supplier's year (later invoices can change with it)."""
+    supplier's year (later invoices can change with it). On v16 `rows` sets a
+    category per item row instead."""
     _require_tool()
-    spec = _invoice_spec(name, category)
+    spec = _invoice_spec(name, category, rows)
     plans = _plans_from_specs([spec], cint(allow_filed))
-    current = frappe.db.get_value(PI, name, ["tax_withholding_category", "apply_tds"], as_dict=True)
     return _view(plans, {"invoice": name, "category": category or "",
-                         "current_category": current.tax_withholding_category if cint(current.apply_tds) else ""})
+                         "current_category": _current_category(name)})
 
 
 @frappe.whitelist()
-def apply_tds_category_change(name, category=None, token=None, allow_filed=0):
+def apply_tds_category_change(name, category=None, token=None, allow_filed=0, rows=None):
     _require_tool(write=True)
-    spec = _invoice_spec(name, category)
+    spec = _invoice_spec(name, category, rows)
     plans = _plans_from_specs([spec], cint(allow_filed))
     return _dispatch([spec], token, cint(allow_filed), "bns_tds_apply_complete", plans)
+
+
+def _current_category(name):
+    """The categories the invoice deducts under now: the header's (v15) or its rows' (v16)."""
+    apply_tds = frappe.db.get_value(PI, name, "apply_tds")
+    if not cint(apply_tds):
+        return ""
+    if _model() == "v16":
+        return ", ".join(sorted(set(frappe.get_all(
+            "Purchase Invoice Item", filters={"parent": name, "parenttype": PI, "apply_tds": 1,
+                                              "tax_withholding_category": ["is", "set"]},
+            pluck="tax_withholding_category"))))
+    return frappe.db.get_value(PI, name, "tax_withholding_category") or ""
 
 
 # Older entry points, kept for callers of the API: backfill = the supplier's category,
@@ -1209,14 +1274,12 @@ def apply_tds_category_change(name, category=None, token=None, allow_filed=0):
 
 @frappe.whitelist()
 def preview_tds_backfill(name):
-    category = frappe.db.get_value("Supplier", frappe.db.get_value(PI, name, "supplier"), "tax_withholding_category")
-    return preview_tds_category_change(name, category)
+    return preview_tds_category_change(name, DEFAULTS)
 
 
 @frappe.whitelist()
 def apply_tds_backfill(name, token=None):
-    category = frappe.db.get_value("Supplier", frappe.db.get_value(PI, name, "supplier"), "tax_withholding_category")
-    return apply_tds_category_change(name, category, token)
+    return apply_tds_category_change(name, DEFAULTS, token)
 
 
 @frappe.whitelist()
@@ -1237,6 +1300,8 @@ def get_suppliers_needing_tds_redo(company=None):
         return {"count": 0, "suppliers": []}
     company = _default_company(company)
     fy_start, fy_end = _current_fy(company)
+    if _model() == "v16":
+        return _suppliers_needing_redo_v16(company, fy_start, fy_end)
     rows = frappe.db.sql(
         """
         SELECT
@@ -1274,6 +1339,56 @@ def get_suppliers_needing_tds_redo(company=None):
     for r in rows:
         r["reason"] = _("Category removed") if not r["supplier_category"] else _("Category changed")
         r["tds_amount"] = flt(r["tds_amount"], 2)
+    return {
+        "count": len(rows), "suppliers": rows, "company": company,
+        "fiscal_year_start": str(fy_start), "fiscal_year_end": str(fy_end),
+    }
+
+
+def _suppliers_needing_redo_v16(company, fy_start, fy_end):
+    """v16: suppliers with item rows deducting under a category other than the row's
+    own default (the Item's purchase category, else the Supplier's) this fiscal year."""
+    item_cat = ("NULLIF(it.purchase_tax_withholding_category, '')"
+                if frappe.get_meta("Item").has_field("purchase_tax_withholding_category") else "NULL")
+    rows = frappe.db.sql(
+        f"""
+        SELECT
+            pi.supplier,
+            MAX(pi.supplier_name) AS supplier_name,
+            IFNULL(MAX(s.tax_withholding_category), '') AS supplier_category,
+            GROUP_CONCAT(DISTINCT NULLIF(i.tax_withholding_category, '') SEPARATOR ', ') AS invoice_categories,
+            COUNT(DISTINCT pi.name) AS invoices
+        FROM `tabPurchase Invoice` pi
+        INNER JOIN `tabSupplier` s ON s.name = pi.supplier
+        INNER JOIN `tabPurchase Invoice Item` i ON i.parent = pi.name AND i.parenttype = 'Purchase Invoice'
+        LEFT JOIN `tabItem` it ON it.name = i.item_code
+        WHERE
+            pi.docstatus = 1
+            AND pi.company = %(company)s
+            AND pi.posting_date BETWEEN %(fy_start)s AND %(fy_end)s
+            AND pi.apply_tds = 1 AND i.apply_tds = 1
+            AND IFNULL(i.tax_withholding_category, '') != ''
+            AND i.tax_withholding_category != COALESCE({item_cat}, NULLIF(s.tax_withholding_category, ''), '')
+        GROUP BY pi.supplier
+        ORDER BY supplier_name
+        LIMIT 500
+        """,
+        {"company": company, "fy_start": fy_start, "fy_end": fy_end},
+        as_dict=True,
+    )
+    tds = dict(frappe.db.sql(
+        """SELECT pi.supplier, IFNULL(SUM(t.base_tax_amount), 0)
+           FROM `tabPurchase Invoice` pi
+           INNER JOIN `tabPurchase Taxes and Charges` t
+               ON t.parent = pi.name AND t.parenttype = 'Purchase Invoice' AND t.is_tax_withholding_account = 1
+           WHERE pi.docstatus = 1 AND pi.company = %(company)s AND pi.supplier IN %(s)s
+             AND pi.posting_date BETWEEN %(fy_start)s AND %(fy_end)s
+           GROUP BY pi.supplier""",
+        {"company": company, "s": tuple(r.supplier for r in rows) or ("",), "fy_start": fy_start, "fy_end": fy_end},
+    )) if rows else {}
+    for r in rows:
+        r["reason"] = _("Category removed") if not r["supplier_category"] else _("Category changed")
+        r["tds_amount"] = flt(tds.get(r.supplier), 2)
     return {
         "count": len(rows), "suppliers": rows, "company": company,
         "fiscal_year_start": str(fy_start), "fiscal_year_end": str(fy_end),
@@ -1326,10 +1441,43 @@ _REMAP_FROM = """
 """
 
 
+_REMAP_FROM_V16 = """
+    FROM `tabPurchase Invoice` pi
+    INNER JOIN `tabPurchase Taxes and Charges` t
+        ON t.parent = pi.name AND t.parenttype = 'Purchase Invoice' AND t.is_tax_withholding_account = 1
+    INNER JOIN (
+        SELECT DISTINCT parent, tax_withholding_category FROM `tabTax Withholding Entry`
+        WHERE parenttype = 'Purchase Invoice' AND docstatus = 1 AND withholding_name = parent
+          AND withholding_amount != 0
+    ) w ON w.parent = pi.name
+    INNER JOIN `tabTax Withholding Account` a
+        ON a.parent = w.tax_withholding_category AND a.company = pi.company
+    WHERE
+        pi.docstatus = 1
+        AND pi.company = %(company)s
+        AND pi.posting_date BETWEEN %(fy_start)s AND %(fy_end)s
+        AND a.account != t.account_head
+        AND NOT EXISTS (
+            SELECT 1 FROM `tabTax Withholding Account` a2
+            INNER JOIN `tabTax Withholding Entry` w2
+                ON w2.tax_withholding_category = a2.parent AND w2.parent = pi.name
+               AND w2.parenttype = 'Purchase Invoice' AND w2.docstatus = 1
+            WHERE a2.company = pi.company AND a2.account = t.account_head
+        )
+"""
+
+
+def _remap_from():
+    """(FROM clause, category column) of invoices whose TDS sits off its category's account."""
+    if _model() == "v16":
+        return _REMAP_FROM_V16, "w.tax_withholding_category"
+    return _REMAP_FROM, "pi.tax_withholding_category"
+
+
 def _remap_specs(company):
     fy_start, fy_end = _current_fy(company)
     suppliers = frappe.db.sql(
-        "SELECT DISTINCT pi.supplier " + _REMAP_FROM + " ORDER BY pi.supplier",
+        "SELECT DISTINCT pi.supplier " + _remap_from()[0] + " ORDER BY pi.supplier",
         {"company": company, "fy_start": fy_start, "fy_end": fy_end}, pluck=True,
     )
     return [{"supplier": s, "company": company, "mode": "keep", "scope": "account"} for s in suppliers]
@@ -1338,7 +1486,7 @@ def _remap_specs(company):
 def _old_accounts(company):
     fy_start, fy_end = _current_fy(company)
     return frappe.db.sql(
-        "SELECT DISTINCT t.account_head " + _REMAP_FROM,
+        "SELECT DISTINCT t.account_head " + _remap_from()[0],
         {"company": company, "fy_start": fy_start, "fy_end": fy_end}, pluck=True,
     )
 
@@ -1386,17 +1534,18 @@ def get_tds_account_remap_summary(company=None):
         return {"count": 0, "groups": []}
     company = _default_company(company)
     fy_start, fy_end = _current_fy(company)
+    remap_from, category = _remap_from()
     groups = frappe.db.sql(
-        """
+        f"""
         SELECT
-            pi.tax_withholding_category AS category,
+            {category} AS category,
             t.account_head AS old_account,
             a.account AS new_account,
             COUNT(*) AS invoices,
             SUM(t.base_tax_amount) AS amount
-        """ + _REMAP_FROM + """
-        GROUP BY pi.tax_withholding_category, t.account_head, a.account
-        ORDER BY pi.tax_withholding_category, t.account_head
+        """ + remap_from + f"""
+        GROUP BY {category}, t.account_head, a.account
+        ORDER BY {category}, t.account_head
         """,
         {"company": company, "fy_start": fy_start, "fy_end": fy_end},
         as_dict=True,
@@ -1490,12 +1639,10 @@ def get_tds_category_button(name):
     offer: only for submitted invoices of the current fiscal year."""
     if not can_backfill_tds():
         return {"show": False}
-    pi = frappe.db.get_value(
-        PI, name,
-        ["docstatus", "company", "posting_date", "supplier", "apply_tds", "tax_withholding_category",
-         "is_return", "return_against"],
-        as_dict=True,
-    )
+    fields = ["name", "docstatus", "company", "posting_date", "supplier", "apply_tds", "is_return", "return_against"]
+    if _tax_withholding_on_invoice():
+        fields.append("tax_withholding_category")
+    pi = frappe.db.get_value(PI, name, fields, as_dict=True)
     if not pi or pi.docstatus != 1:
         return {"show": False}
     fy_start, fy_end = _current_fy(pi.company)
@@ -1506,10 +1653,129 @@ def get_tds_category_button(name):
     # A debit note follows the invoice it returns: the dialog offers that invoice's category.
     original = _return_original(pi, fy_start, fy_end)
     source = original or pi
-    return {
+    out = {
         "show": True,
+        "model": _model(),
         "is_return": cint(pi.is_return),
         "follows": original.name if original else "",
-        "current_category": source.tax_withholding_category if cint(source.apply_tds) else "",
+        "current_category": _current_category(source.name),
         "supplier_category": frappe.db.get_value("Supplier", pi.supplier, "tax_withholding_category") or "",
     }
+    if out["model"] == "v16" and not original:
+        cache = {}
+        rows = frappe.get_all(
+            "Purchase Invoice Item", filters={"parent": name, "parenttype": PI},
+            fields=["name", "idx", "item_code", "item_name", "base_net_amount", "apply_tds", "tax_withholding_category"],
+            order_by="idx",
+        )
+        for r in rows:
+            r["default_category"] = _v16()._default_category(r, pi.supplier, cache) or ""
+            r["base_net_amount"] = flt(r.base_net_amount, 2)
+        out["rows"] = rows
+    return out
+
+
+# --------------------------------------------------------------------------------------
+# Recalculate a whole fiscal year
+# --------------------------------------------------------------------------------------
+
+YEAR_MODES = ("keep", "defaults")
+
+
+def _year_dates(company, fiscal_year=None):
+    if fiscal_year:
+        fy = frappe.db.get_value("Fiscal Year", fiscal_year, ["year_start_date", "year_end_date"], as_dict=True)
+        if not fy:
+            frappe.throw(_("Fiscal Year {0} not found.").format(fiscal_year))
+        return getdate(fy.year_start_date), getdate(fy.year_end_date)
+    return _current_fy(company)
+
+
+def _year_specs(company, fiscal_year=None, mode="keep"):
+    """One plan per PAN with purchase invoices in the year (suppliers sharing a PAN are
+    one plan, as ERPNext counts them together)."""
+    if mode not in YEAR_MODES:
+        frappe.throw(_("Unknown mode {0}.").format(mode))
+    fy_start, fy_end = _year_dates(company, fiscal_year)
+    if fy_start != _current_fy(company)[0] and not _is_system_manager():
+        frappe.throw(_("Only a System Manager may recalculate an earlier fiscal year."), frappe.PermissionError)
+    suppliers = frappe.db.sql(
+        """SELECT DISTINCT supplier FROM `tabPurchase Invoice`
+           WHERE docstatus = 1 AND company = %(c)s AND posting_date BETWEEN %(s)s AND %(e)s
+           ORDER BY supplier""",
+        {"c": company, "s": fy_start, "e": fy_end}, pluck=True,
+    )
+    specs, seen = [], set()
+    for supplier in suppliers:
+        if supplier in seen:
+            continue
+        seen.update(_parties(supplier))
+        specs.append({"supplier": supplier, "company": company, "date": str(fy_start), "mode": mode})
+    return specs
+
+
+def preview_year_tds(company=None, fiscal_year=None, mode="keep", allow_filed=0):
+    """Read-only: TDS for every supplier's year, worked out again with the categories
+    the invoices carry ("keep") or with each line's default category ("defaults":
+    the Item's purchase category on v16, else the Supplier's)."""
+    _require_tool()
+    company = _default_company(company)
+    specs = _year_specs(company, fiscal_year, mode)
+    return _view(_plans_from_specs(specs, cint(allow_filed)),
+                 {"company": company, "fiscal_year": fiscal_year or "", "mode": mode, "model": _model()},
+                 compact=True)
+
+
+def _year_preview_key(key):
+    return f"bns_tds_year_preview:{key}"
+
+
+@frappe.whitelist()
+def start_year_tds_preview(company=None, fiscal_year=None, mode="keep", allow_filed=0):
+    """A whole-year preview can take minutes, so it runs in the background. Poll
+    get_year_tds_preview with the key returned."""
+    _require_tool()
+    company = _default_company(company)
+    _year_specs(company, fiscal_year, mode)  # validates mode, year and role now
+    key = frappe.generate_hash(length=12)
+    frappe.cache.set_value(_year_preview_key(key), {"status": "running", "user": frappe.session.user},
+                           expires_in_sec=7200)
+    frappe.enqueue(_year_preview_job, queue="long", timeout=3600, key=key, company=company,
+                   fiscal_year=fiscal_year, mode=mode, allow_filed=cint(allow_filed), user=frappe.session.user)
+    return {"key": key}
+
+
+def _year_preview_job(key, company, fiscal_year, mode, allow_filed, user):
+    try:
+        view = preview_year_tds(company, fiscal_year, mode, allow_filed)
+        data = {"status": "done", "user": user, "view": view}
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="BNS TDS year preview failed")
+        data = {"status": "error", "user": user, "error": cstr(e)}
+    frappe.cache.set_value(_year_preview_key(key), data, expires_in_sec=7200)
+
+
+@frappe.whitelist()
+def get_year_tds_preview(key):
+    _require_tool()
+    data = frappe.cache.get_value(_year_preview_key(key))
+    if not data or data.get("user") != frappe.session.user:
+        return {"status": "missing"}
+    return data
+
+
+@frappe.whitelist()
+def recalculate_year_tds(company=None, fiscal_year=None, mode="keep", token=None, allow_filed=0):
+    """Apply the previewed whole-year recalculation, in the background. It works the
+    year out again and refuses if anything differs from the preview."""
+    _require_tool(write=True)
+    company = _default_company(company)
+    specs = _year_specs(company, fiscal_year, mode)
+    if not token:
+        frappe.throw(_("Preview first."))
+    if frappe.flags.in_test:
+        return {"status": "done", "summary": _apply_specs(specs, token, cint(allow_filed))}
+    frappe.enqueue(_apply_specs, queue="long", timeout=14400, specs=specs, token=token,
+                   allow_filed=cint(allow_filed), event="bns_tds_apply_complete", user=frappe.session.user)
+    return {"status": "queued", "count": len(specs)}

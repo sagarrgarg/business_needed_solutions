@@ -750,6 +750,18 @@ def get_pis_needing_tds_fix(company=None, include_prior_fy=0):
 		date_condition = "AND pi.posting_date >= %(fy_start)s AND pi.posting_date <= %(fy_end)s"
 		params["fy_start"] = fy_start
 
+	from business_needed_solutions.business_needed_solutions.overrides import tds_backfill as tds
+
+	if tds._model() == "v16":
+		rows = _pis_needing_tds_fix_v16(date_condition, params)
+		for r in rows:
+			r["prior_fy"] = 1 if str(r.get("posting_date")) < str(fy_start) else 0
+		return {
+			"count": len(rows), "items": rows, "company": company,
+			"fiscal_year_start": str(fy_start), "fiscal_year_end": str(fy_end),
+			"showing_prior_fy": bool(show_prior), "is_system_manager": "System Manager" in frappe.get_roles(),
+		}
+
 	rows = frappe.db.sql(f"""
 		SELECT
 			pi.name AS purchase_invoice,
@@ -809,6 +821,45 @@ def get_pis_needing_tds_fix(company=None, include_prior_fy=0):
 	}
 
 
+def _pis_needing_tds_fix_v16(date_condition, params):
+	"""v16: an invoice needs fixing when a TDS line's category is not its default (the
+	Item's purchase category, else the Supplier's), or when TDS is off on an invoice
+	whose lines have a default category."""
+	item_cat = ("NULLIF(it.purchase_tax_withholding_category, '')"
+				if frappe.get_meta("Item").has_field("purchase_tax_withholding_category") else "NULL")
+	expected = f"COALESCE({item_cat}, NULLIF(s.tax_withholding_category, ''))"
+	rows = frappe.db.sql(f"""
+		SELECT
+			pi.name AS purchase_invoice,
+			pi.posting_date,
+			pi.supplier,
+			MAX(pi.supplier_name) AS supplier_name,
+			MAX(pi.apply_tds) AS apply_tds,
+			GROUP_CONCAT(DISTINCT NULLIF(i.tax_withholding_category, '') SEPARATOR ', ') AS pi_category,
+			GROUP_CONCAT(DISTINCT {expected} SEPARATOR ', ') AS supplier_category,
+			SUM(CASE WHEN IFNULL(i.tax_withholding_category, '') != IFNULL({expected}, '') THEN 1 ELSE 0 END)
+				AS wrong_rows
+		FROM `tabPurchase Invoice` pi
+		INNER JOIN `tabSupplier` s ON s.name = pi.supplier
+		INNER JOIN `tabPurchase Invoice Item` i ON i.parent = pi.name AND i.parenttype = 'Purchase Invoice'
+		LEFT JOIN `tabItem` it ON it.name = i.item_code
+		WHERE
+			pi.docstatus = 1
+			AND pi.company = %(company)s
+			{date_condition}
+			AND i.apply_tds = 1
+		GROUP BY pi.name, pi.posting_date, pi.supplier
+		HAVING IFNULL(supplier_category, '') != ''
+			AND (wrong_rows > 0 OR MAX(pi.apply_tds) = 0)
+		ORDER BY pi.supplier, pi.posting_date, pi.name
+		LIMIT 2000
+	""", params, as_dict=True)
+	for r in rows:
+		r["correct_category"] = r["supplier_category"]
+		r["reason"] = _("Wrong / missing category") if cint(r.pop("wrong_rows")) else _("TDS not applied")
+	return rows
+
+
 def _selected_tds_specs(items):
 	"""Group the selected invoices into one plan per supplier year. Each selected
 	invoice takes its supplier's category; the rest of the year keeps its own.
@@ -817,9 +868,13 @@ def _selected_tds_specs(items):
 	that invoice is in the same year it gets the supplier's category too (the preview
 	shows it)."""
 	from business_needed_solutions.business_needed_solutions.overrides.tds_backfill import (
+		DEFAULTS,
 		_fiscal_year,
+		_model,
 		_return_original,
 	)
+
+	v16 = _model() == "v16"
 
 	import json
 	if isinstance(items, str):
@@ -844,10 +899,14 @@ def _selected_tds_specs(items):
 		if str(fy_start) != str(cur_start) and not is_sm:
 			skipped.append({"purchase_invoice": r.name, "reason": _("Outside current fiscal year — System Manager only")})
 			continue
-		category = frappe.db.get_value("Supplier", r.supplier, "tax_withholding_category")
-		if not category:
-			skipped.append({"purchase_invoice": r.name, "reason": _("Supplier has no TDS Category")})
-			continue
+		if v16:
+			# each line takes its own default: the Item's purchase category, else the Supplier's
+			category = DEFAULTS
+		else:
+			category = frappe.db.get_value("Supplier", r.supplier, "tax_withholding_category")
+			if not category:
+				skipped.append({"purchase_invoice": r.name, "reason": _("Supplier has no TDS Category")})
+				continue
 		key = (r.supplier, r.company, str(fy_start))
 		spec = specs.setdefault(key, {
 			"supplier": r.supplier, "company": r.company, "date": str(r.posting_date),
@@ -889,7 +948,8 @@ def fix_selected_pis_tds(items, token=None, allow_filed=0):
 	tds._require_write_on(plans)
 	for name in names:
 		frappe.has_permission("Purchase Invoice", "write", doc=name, throw=True)
-		tds.repair_tds_totals_on_pi(name)
+		if tds._model() == "v15":
+			tds.repair_tds_totals_on_pi(name)
 	result = tds._dispatch(specs, token, cint(allow_filed), "bns_tds_fix_complete", plans)
 	result["skipped"] = skipped
 	return result
