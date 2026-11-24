@@ -11,9 +11,11 @@ validators always agree:
    PR made from a DN / SI and PI made from an SI / PR is compared row by row
    through its link fields by bns_branch_accounting.internal_parity -- the same
    function the validators call. An item on several rows is matched to its own
-   source row, never summed by item code. Rows, quantities, rates, amounts, HSN,
-   item-level GST, GST per head, totals and batches / serials are compared with
-   no tolerance.
+   source row (matched by its link field), never by item code. Only tax-exclusive
+   values are compared, so a tax-inclusive sender and a tax-exclusive receiver with
+   the same ledger agree: item, quantity, UOM, HSN, item-level GST rates, taxable
+   rates and batches / serials exactly; taxable amounts, item-level GST amounts,
+   GST per head, taxable totals, total taxes and grand total within Rs 1.
 2. Receiver missing: a submitted internal DN / SI after the internal-transfer
    cutoff whose receiving PR / PI was never submitted, with its age in days
    (see internal_transfer_scan.missing_receivers for which receiver is required).

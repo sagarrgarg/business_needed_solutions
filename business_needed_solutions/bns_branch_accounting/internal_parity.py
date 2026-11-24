@@ -15,11 +15,19 @@ Links covered (forward documents only; returns follow the return rules):
 Nothing may change from one document to the next: every target row is linked to exactly
 one source row and every source row is used exactly once (one exception: a Sales Invoice
 made from a Delivery Note may add a non-stock row of zero value, such as packing, since it
-moves no stock and no money); item, UOM, conversion factor,
-quantities, rates, amounts, HSN and the item-level GST rates and amounts are equal; the
-taxes are equal per GST head (CGST / SGST / IGST / cess, rate and amount) and in total;
-the header totals are equal; and where both documents move stock, the batches and
-serials are the same.
+moves no stock and no money); item, UOM, conversion factor, quantities, HSN and the
+item-level GST rates are equal; the taxable (net) rates are equal; the taxable amounts,
+item-level GST amounts, GST per head, taxable totals, total taxes and grand total agree
+within Rs 1; and where both documents move stock, the batches and serials are the same.
+
+Only tax-exclusive values are compared. One side may carry tax inside its rate
+(included_in_print_rate) and the other add it on top: their rate / amount / total differ
+by the tax while the ledger is the same, so those fields are not compared. The Rs 1 on
+amounts absorbs the paise that inclusive and exclusive tax round differently.
+
+Rows are matched through their link (dn_detail / delivery_note_item / sales_invoice_item
+/ pr_detail), never by item code, so an item on several rows of one invoice is compared
+with its own source row.
 
 `compare_internal_pair` returns the differences (the reports list them);
 `assert_internal_pair` throws them (the submit / save checks). Both use the same rules,
@@ -37,19 +45,19 @@ from frappe.utils import cint, cstr, flt
 
 DN, SI, PR, PI = "Delivery Note", "Sales Invoice", "Purchase Receipt", "Purchase Invoice"
 
-# (field, label, decimals). Rates and quantities at 6 places, amounts at the paisa.
+# Rupees two amounts may differ by: inclusive and exclusive tax round the paise apart.
+AMOUNT_TOLERANCE = 1.0
+
+# (field, label, decimals, tolerance). Quantities and rates exact (6 places), amounts
+# within AMOUNT_TOLERANCE. Tax-inclusive fields (rate, amount, total) are not compared.
 ROW_NUMBERS = (
-	("qty", "Quantity", 6),
-	("stock_qty", "Stock Quantity", 6),
-	("conversion_factor", "Conversion Factor", 6),
-	("rate", "Rate", 6),
-	("base_rate", "Base Rate", 6),
-	("amount", "Amount", 2),
-	("base_amount", "Base Amount", 2),
-	("net_rate", "Taxable Rate", 6),
-	("base_net_rate", "Base Taxable Rate", 6),
-	("net_amount", "Taxable Amount", 2),
-	("base_net_amount", "Base Taxable Amount", 2),
+	("qty", "Quantity", 6, 0),
+	("stock_qty", "Stock Quantity", 6, 0),
+	("conversion_factor", "Conversion Factor", 6, 0),
+	("net_rate", "Taxable Rate", 6, 0),
+	("base_net_rate", "Base Taxable Rate", 6, 0),
+	("net_amount", "Taxable Amount", 2, AMOUNT_TOLERANCE),
+	("base_net_amount", "Base Taxable Amount", 2, AMOUNT_TOLERANCE),
 )
 ROW_TEXT = (
 	("item_code", "Item"),
@@ -59,28 +67,33 @@ ROW_TEXT = (
 )
 # India Compliance item-level GST (present on v15 and v16 when it is installed).
 ROW_GST = (
-	("igst_rate", "IGST Rate", 3),
-	("igst_amount", "IGST Amount", 2),
-	("cgst_rate", "CGST Rate", 3),
-	("cgst_amount", "CGST Amount", 2),
-	("sgst_rate", "SGST Rate", 3),
-	("sgst_amount", "SGST Amount", 2),
-	("cess_rate", "Cess Rate", 3),
-	("cess_amount", "Cess Amount", 2),
-	("cess_non_advol_rate", "Cess (Non-Advol) Rate", 3),
-	("cess_non_advol_amount", "Cess (Non-Advol) Amount", 2),
+	("igst_rate", "IGST Rate", 3, 0),
+	("igst_amount", "IGST Amount", 2, AMOUNT_TOLERANCE),
+	("cgst_rate", "CGST Rate", 3, 0),
+	("cgst_amount", "CGST Amount", 2, AMOUNT_TOLERANCE),
+	("sgst_rate", "SGST Rate", 3, 0),
+	("sgst_amount", "SGST Amount", 2, AMOUNT_TOLERANCE),
+	("cess_rate", "Cess Rate", 3, 0),
+	("cess_amount", "Cess Amount", 2, AMOUNT_TOLERANCE),
+	("cess_non_advol_rate", "Cess (Non-Advol) Rate", 3, 0),
+	("cess_non_advol_amount", "Cess (Non-Advol) Amount", 2, AMOUNT_TOLERANCE),
 )
 HEADER_NUMBERS = (
-	("total_qty", "Total Quantity", 6),
-	("total", "Total", 2),
-	("base_total", "Base Total", 2),
-	("net_total", "Taxable Total", 2),
-	("base_net_total", "Base Taxable Total", 2),
-	("total_taxes_and_charges", "Total Taxes", 2),
-	("base_total_taxes_and_charges", "Base Total Taxes", 2),
-	("grand_total", "Grand Total", 2),
-	("base_grand_total", "Base Grand Total", 2),
+	("total_qty", "Total Quantity", 6, 0),
+	("net_total", "Taxable Total", 2, AMOUNT_TOLERANCE),
+	("base_net_total", "Base Taxable Total", 2, AMOUNT_TOLERANCE),
+	("total_taxes_and_charges", "Total Taxes", 2, AMOUNT_TOLERANCE),
+	("base_total_taxes_and_charges", "Base Total Taxes", 2, AMOUNT_TOLERANCE),
+	("grand_total", "Grand Total", 2, AMOUNT_TOLERANCE),
+	("base_grand_total", "Base Grand Total", 2, AMOUNT_TOLERANCE),
 )
+
+
+def _differs(a, b, places, tolerance=0) -> bool:
+	a, b = round(flt(a), places), round(flt(b), places)
+	if tolerance:
+		return round(abs(a - b), places) > tolerance
+	return a != b
 
 
 @dataclass
@@ -258,18 +271,18 @@ def compare_internal_pair(doc, link: str, sources=None, row_sources=None) -> lis
 		for field, label in ROW_TEXT:
 			if cstr(row.get(field)).strip() != cstr(src.get(field)).strip():
 				add(row.idx, row.item_code, _(label), src.get(field), row.get(field))
-		for field, label, places in ROW_NUMBERS + tuple(gst_fields):
-			if round(flt(row.get(field)), places) != round(flt(src.get(field)), places):
+		for field, label, places, tolerance in ROW_NUMBERS + tuple(gst_fields):
+			if _differs(row.get(field), src.get(field), places, tolerance):
 				add(row.idx, row.item_code, _(label), flt(src.get(field)), flt(row.get(field)))
 		if stock:
 			for field, expected, found in _lot_differences(row, src):
 				add(row.idx, row.item_code, field, expected, found)
 
-	for field, label, places in HEADER_NUMBERS:
+	for field, label, places, tolerance in HEADER_NUMBERS:
 		expected = sum(flt(s.get(field)) for s in sources)
 		if field == "total_qty":
 			expected += sum(flt(r.get("qty")) for r in extra_rows)
-		if round(flt(doc.get(field)), places) != round(expected, places):
+		if _differs(doc.get(field), expected, places, tolerance):
 			add(None, "", _(label), expected, flt(doc.get(field)))
 
 	target_tax, source_tax = _gst_heads(doc), defaultdict(lambda: {"rate": set(), "amount": 0.0})
@@ -283,7 +296,7 @@ def compare_internal_pair(doc, link: str, sources=None, row_sources=None) -> lis
 		label = head.upper()
 		# The rate is compared per row (cgst_rate, igst_rate, ...); a tax row may carry it
 		# as "Actual" with rate 0 on one side, so only the amount per head is compared here.
-		if round(t["amount"], 2) != round(s["amount"], 2):
+		if _differs(t["amount"], s["amount"], 2, AMOUNT_TOLERANCE):
 			add(None, "", _("{0} amount").format(label), s["amount"], t["amount"])
 	return out
 
@@ -390,8 +403,8 @@ def assert_internal_pair(doc, method=None, links=None, force=False) -> None:
 
 def pair_rows_by_item(source, target) -> dict:
 	"""Target row name -> source row name for two documents not linked yet: an existing
-	row link to this source wins, then the same item, quantity and rate, then the same
-	item, in row order. Each source row is used once; a row left unpaired is reported."""
+	row link to this source wins, then the same item, quantity and taxable rate, then the
+	same item, in row order. Each source row is used once; a row left unpaired is reported."""
 	pool = list(source.get("items") or [])
 	names = {r.name for r in pool}
 	pairs = {}
@@ -408,7 +421,7 @@ def pair_rows_by_item(source, target) -> dict:
 				if src.item_code != row.item_code:
 					continue
 				if exact and (round(flt(src.qty), 6) != round(flt(row.qty), 6)
-							  or round(flt(src.rate), 6) != round(flt(row.rate), 6)):
+							  or round(flt(src.net_rate), 6) != round(flt(row.net_rate), 6)):
 					continue
 				pairs[row.name] = src.name
 				pool.remove(src)

@@ -128,7 +128,7 @@ class TestInternalTransferReports(FrappeTestCase):
 		by_field = {(r["row_no"], r["parity_field"]) for r in rows}
 		self.assertIn((1, "Quantity"), by_field)
 		self.assertIn((2, "Quantity"), by_field)
-		self.assertIn((1, "Amount"), by_field)
+		self.assertIn((1, "Taxable Amount"), by_field)
 		# No made-up "missing" / "extra" rows and nothing on the untouched WL-06 row.
 		self.assertFalse([r for r in rows if r["parity_field"] in ("Row", "Source row")], rows)
 		self.assertFalse([r for r in rows if r["row_no"] == 3], rows)
@@ -158,7 +158,8 @@ class TestInternalTransferReports(FrappeTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			_validate_internal_pr_one_to_one_parity(doc)
 		fields = {r["parity_field"] for r in self._rows(pr.name) if r["transfer_chain"] == "DN->PR"}
-		self.assertTrue({"Rate", "Amount", "Total"} <= fields, fields)
+		self.assertTrue({"Taxable Rate", "Taxable Amount", "Taxable Total"} <= fields, fields)
+		self.assertFalse({"Rate", "Amount", "Total"} & fields, fields)  # tax-inclusive: not compared
 
 	# -- receiver missing ------------------------------------------------------------
 

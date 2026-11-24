@@ -104,14 +104,15 @@ class TestInternalParity(unittest.TestCase):
 		found = self._compare(self._pi_from(si, change=twice), si)
 		self.assertTrue(any(m.field == "Source row" and m.found == "used again" for m in found), found)
 
-	def test_rate_and_hsn_must_be_equal(self):
+	def test_taxable_rate_and_hsn_must_be_equal(self):
 		si = self._sale()
 		def change(rows):
 			rows[0]["rate"] = 101
 			rows[1]["gst_hsn_code"] = "95030010"
 		fields = {m.field for m in self._compare(self._pi_from(si, change=change), si)}
-		self.assertIn("Rate", fields)
+		self.assertIn("Taxable Rate", fields)
 		self.assertIn("HSN/SAC", fields)
+		self.assertNotIn("Rate", fields)  # tax-inclusive rate is not compared
 
 	def test_tax_head_must_match_not_only_the_total(self):
 		si = self._sale()
@@ -132,11 +133,59 @@ class TestInternalParity(unittest.TestCase):
 		fields = {m.field for m in self._compare(self._pi_from(si, change=change), si)}
 		self.assertIn("IGST Amount", fields)
 
-	def test_paisa_difference_in_totals_is_refused(self):
+	def test_totals_agree_within_a_rupee(self):
 		si = self._sale()
 		pi = self._pi_from(si)
+		pi.grand_total += 1.0
+		self.assertFalse(any(m.field == "Grand Total" for m in self._compare(pi, si)))
 		pi.grand_total += 0.01
 		self.assertTrue(any(m.field == "Grand Total" for m in self._compare(pi, si)))
+
+	def test_tax_inclusive_sale_and_tax_exclusive_purchase_with_equal_net_values(self):
+		"""SI GT114 Rs 370 with 5% IGST inside the rate; the PI books Rs 352.381 with IGST
+		on top. Same taxable value and tax, so the same ledger: nothing to report."""
+		qty, gross, net = 10, 370.0, 352.381
+		si = _doc("Sales Invoice", "SI-INCL", [{"item_code": "GT114", "qty": qty, "rate": gross,
+												"net_rate": net, "net_amount": 3523.81}],
+				  [{**_igst(176.19, rate=5), "included_in_print_rate": 1}])
+		si.items[0].name = "SIR-GT"
+		si.items[0].igst_rate, si.items[0].igst_amount = 5, 176.19
+		si.net_total = si.base_net_total = 3523.81
+		si.grand_total = si.base_grand_total = 3700.0
+		pi = _doc("Purchase Invoice", "PI-EXCL", [{"item_code": "GT114", "qty": qty, "rate": net,
+												   "sales_invoice_item": "SIR-GT", "igst_rate": 5,
+												   "igst_amount": 176.19}],
+				  [{**_igst(176.19, rate=5), "add_deduct_tax": "Add"}])
+		self.assertNotEqual(pi.items[0].amount, si.items[0].amount)  # 3523.81 vs 3700: tax in one
+		self.assertNotEqual(pi.total, si.total)
+		self.assertAlmostEqual(pi.grand_total, si.grand_total, delta=1)
+		self.assertEqual(self._compare(pi, si), [])
+
+	def test_repeated_item_on_one_invoice_is_matched_by_its_row_link(self):
+		"""WL-06 twice on SI060827-2840 at different rates; the PI lists the rows the other
+		way round. Each is linked to its own SI row, so nothing differs."""
+		si = self._sale({"item_code": "WL-06", "qty": 4, "rate": 90}, {"item_code": "WL-06", "qty": 6, "rate": 75})
+		pi = self._pi_from(si, change=lambda rows: rows.reverse())
+		self.assertEqual(pi.items[0].sales_invoice_item, "SIR-2")
+		self.assertEqual(self._compare(pi, si), [])
+
+	def test_real_taxable_rate_difference_is_reported(self):
+		"""P340 at Rs 50 on the SI but Rs 44.64 on PI090127-0053."""
+		si = self._sale({"item_code": "P340", "qty": 10, "rate": 50})
+		def change(rows):
+			rows[0]["rate"] = 44.64
+		found = self._compare(self._pi_from(si, change=change), si)
+		rate = [m for m in found if m.field == "Taxable Rate"]
+		self.assertEqual([(m.item_code, m.expected, m.found) for m in rate], [("P340", 50.0, 44.64)])
+
+	def test_taxable_rate_has_no_tolerance(self):
+		"""Rates are compared as stored: 6666.6667 (tax taken out of 7000) is not 6666.67."""
+		si = self._sale({"item_code": "H-DP", "qty": 4, "rate": 6666.6667})
+		def change(rows):
+			rows[0]["rate"] = 6666.67
+		found = self._compare(self._pi_from(si, change=change), si)
+		self.assertIn("Taxable Rate", {m.field for m in found})
+		self.assertNotIn("Taxable Amount", {m.field for m in found})  # Rs 0.01 on the amount
 
 	def test_assert_throws_with_the_differences(self):
 		si = self._sale()
